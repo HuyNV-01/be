@@ -1,0 +1,25 @@
+export type EnvConfig = {
+  APP_URL: string;
+  FE_URL: string;
+  PORT: number;
+  MYSQL_PORT: number;
+  MYSQL_USERNAME: string;
+  MYSQL_DB_NAME: string;
+  MYSQL_PASSWORD: string;
+  MYSQL_HOST: string;
+  REDIS_HOST: string;
+  REDIS_PORT: number;
+  BCRYPT_SALT_ROUND: number;
+  JWT_SECRET: string;
+  JWT_EXPIRES_IN: string;
+  JWT_REFRESH_EXPIRES_IN: string;
+  JWT_ACTIVATION_SECRET: string;
+  JWT_ACTIVATION_EXPIRES_IN: string;
+  MAIL_HOST: string;
+  MAIL_USER: string;
+  MAIL_PASS: string;
+  MAIL_FROM: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_CALLBACK_URL: string;
+};
