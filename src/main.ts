@@ -1,18 +1,18 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
-import { envs } from './config/envs';
-import { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
-import { SwaggerModule } from '@nestjs/swagger';
 import { ForbiddenException, HttpStatus, ValidationPipe } from '@nestjs/common';
-import { SWAGGER_CONFIG } from './config/swagger/swagger';
-import { join } from 'path';
+import { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { HTTP_RESPONSE } from './constants/http-response';
-import { DEFAULT_PORT } from './constants';
+import { SwaggerModule } from '@nestjs/swagger';
+
 import cookieParser from 'cookie-parser';
+import { join } from 'path';
+
+import { AppModule } from './app.module';
 import { RedisIoAdapter } from './common/websocket/redis-io.adapter';
+import { envs } from './config/envs';
+import { SWAGGER_CONFIG } from './config/swagger/swagger';
+import { DEFAULT_PORT } from './constants';
+import { HTTP_RESPONSE } from './constants/http-response';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {

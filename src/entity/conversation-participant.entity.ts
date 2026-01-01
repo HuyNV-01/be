@@ -1,14 +1,8 @@
-import {
-  Column,
-  CreateDateColumn,
-  Entity,
-  Index,
-  JoinColumn,
-  ManyToOne,
-} from 'typeorm';
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
+
+import { BaseModel } from './base-model';
 import { ConversationEntity } from './conversation.entity';
 import { UserEntity } from './user.entity';
-import { BaseModel } from './base-model';
 
 @Entity('conversation_participants')
 @Index(['conversationId', 'userId'], { unique: true })

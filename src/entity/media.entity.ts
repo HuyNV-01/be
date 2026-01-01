@@ -1,7 +1,8 @@
+import { MediaTypeEnum } from 'src/common/enum';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
+
 import { BaseModel } from './base-model';
 import { FileEntity } from './file.entity';
-import { MediaTypeEnum } from 'src/common/enum';
 
 @Entity('media')
 @Index(['targetId', 'type'])

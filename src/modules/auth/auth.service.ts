@@ -8,28 +8,21 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
-import { UserService } from '../user/user.service';
 import { JwtService } from '@nestjs/jwt';
-import {
-  IForgotPassword,
-  IGoogleUser,
-  ILogin,
-  IRegister,
-} from 'src/interface/auth.interface';
-import * as bcrypt from 'bcrypt';
-import { parseExpiresIn } from 'src/utils';
-import { envs } from 'src/config/envs';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { StatusEnum } from 'src/common/enum';
-import { MailService } from '../mail/mail.service';
-import { generateNumericOtp } from 'src/utils/otp.util';
+
 import { InjectRedis } from '@nestjs-modules/ioredis';
+import * as bcrypt from 'bcrypt';
 import Redis from 'ioredis';
-import {
-  LENGTH_PASSWORD_DEFAULT,
-  SYMBOLS,
-  TTL_OTP_SECONDS,
-} from 'src/constants';
+import { StatusEnum } from 'src/common/enum';
+import { envs } from 'src/config/envs';
+import { LENGTH_PASSWORD_DEFAULT, SYMBOLS, TTL_OTP_SECONDS } from 'src/constants';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { IForgotPassword, IGoogleUser, ILogin, IRegister } from 'src/interface/auth.interface';
+import { parseExpiresIn } from 'src/utils';
+import { generateNumericOtp } from 'src/utils/otp.util';
+
+import { MailService } from '../mail/mail.service';
+import { UserService } from '../user/user.service';
 
 @Injectable()
 export class AuthService {
@@ -128,23 +121,14 @@ export class AuthService {
     };
   }
 
-  private getJwtToken(payload: {
-    userId: string;
-    expiresIn?: string | number;
-  }): string {
+  private getJwtToken(payload: { userId: string; expiresIn?: string | number }): string {
     const { userId, expiresIn } = payload;
 
     return this.jwtService.sign({ id: userId }, { expiresIn } as any);
   }
 
-  async updateRefreshTokenHash(payload: {
-    userId: string;
-    refreshToken: string;
-  }) {
-    const hashedRefreshToken = await bcrypt.hash(
-      payload.refreshToken,
-      envs.bcryptSaltRound,
-    );
+  async updateRefreshTokenHash(payload: { userId: string; refreshToken: string }) {
+    const hashedRefreshToken = await bcrypt.hash(payload.refreshToken, envs.bcryptSaltRound);
 
     return await this.userService.updateUser({
       userId: payload.userId,
@@ -163,10 +147,7 @@ export class AuthService {
       });
     }
 
-    const isTokenMatching = await bcrypt.compare(
-      refreshToken,
-      user.refreshToken,
-    );
+    const isTokenMatching = await bcrypt.compare(refreshToken, user.refreshToken);
 
     if (!isTokenMatching) {
       throw new ForbiddenException({
@@ -218,9 +199,7 @@ export class AuthService {
           otp,
         });
       } catch (error) {
-        this.logger.error(
-          `${label} Redis set OTP error for key ${redisKey} -> ${error}`,
-        );
+        this.logger.error(`${label} Redis set OTP error for key ${redisKey} -> ${error}`);
       }
     }
   }
@@ -245,9 +224,7 @@ export class AuthService {
         code: HTTP_RESPONSE.AUTH.OTP_VERIFIED.code,
       };
     } catch (error) {
-      this.logger.error(
-        `${label} Redis get OTP error for key ${redisKey} -> ${error}`,
-      );
+      this.logger.error(`${label} Redis get OTP error for key ${redisKey} -> ${error}`);
       throw new BadRequestException({
         status: HttpStatus.BAD_REQUEST,
         message: HTTP_RESPONSE.AUTH.INVALID_OTP.message,
@@ -329,13 +306,8 @@ export class AuthService {
 
       if (!user) {
         const { accessToken, ...newUser } = googleUser;
-        const randomPassword = this.generateRandomPassword(
-          LENGTH_PASSWORD_DEFAULT,
-        );
-        newUser.password = bcrypt.hashSync(
-          randomPassword,
-          envs.bcryptSaltRound,
-        );
+        const randomPassword = this.generateRandomPassword(LENGTH_PASSWORD_DEFAULT);
+        newUser.password = bcrypt.hashSync(randomPassword, envs.bcryptSaltRound);
         user = await this.userService.createUser({ data: newUser });
       }
 

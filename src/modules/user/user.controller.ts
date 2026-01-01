@@ -12,7 +12,7 @@ import {
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { UserService } from './user.service';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -21,13 +21,15 @@ import {
   ApiParam,
   ApiResponse,
 } from '@nestjs/swagger';
-import { GetListUserDto } from 'src/dto/user/get-list-user.dto';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import type { IBaseReq } from 'src/interface';
-import { UpdateAvatarDto } from 'src/dto/user/update-avatar.dto';
-import { FileInterceptor } from '@nestjs/platform-express';
+
 import { FileValidators } from 'src/common/pipes/file-validation.pipe';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { GetListUserDto } from 'src/dto/user/get-list-user.dto';
+import { UpdateAvatarDto } from 'src/dto/user/update-avatar.dto';
+import type { IBaseReq } from 'src/interface';
+
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { UserService } from './user.service';
 
 @Controller('users')
 @ApiBearerAuth('access-token')

@@ -1,4 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
+
 import { IsOptional, IsString } from 'class-validator';
 import { PaginationOptions } from 'src/types/query.types';
 

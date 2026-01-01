@@ -3,13 +3,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import { Logger } from '@nestjs/common';
-import {
-  Brackets,
-  ObjectLiteral,
-  SelectQueryBuilder,
-  Repository,
-  EntityTarget,
-} from 'typeorm';
+
+import { Brackets, EntityTarget, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 
 // --- Interfaces ---
 export interface PaginationOptions {
@@ -51,10 +46,7 @@ export class JsonSubQueryBuilder<T extends ObjectLiteral> {
     private parentAlias: string,
   ) {}
 
-  select(
-    fields: string | string[] | { field: string; alias: string },
-    alias?: string,
-  ): this {
+  select(fields: string | string[] | { field: string; alias: string }, alias?: string): this {
     if (Array.isArray(fields)) {
       fields.forEach((f) => this.select(f));
       return this;
@@ -85,9 +77,7 @@ export class JsonSubQueryBuilder<T extends ObjectLiteral> {
     condition: string,
     params?: ObjectLiteral,
   ): this {
-    this.joins.push((qb) =>
-      qb.leftJoin(entity as any, alias, condition, params),
-    );
+    this.joins.push((qb) => qb.leftJoin(entity as any, alias, condition, params));
     return this;
   }
 
@@ -97,9 +87,7 @@ export class JsonSubQueryBuilder<T extends ObjectLiteral> {
     condition: string,
     params?: ObjectLiteral,
   ): this {
-    this.joins.push((qb) =>
-      qb.innerJoin(entity as any, alias, condition, params),
-    );
+    this.joins.push((qb) => qb.innerJoin(entity as any, alias, condition, params));
     return this;
   }
 
@@ -110,9 +98,7 @@ export class JsonSubQueryBuilder<T extends ObjectLiteral> {
 
   linkToParent(childField: keyof T | string, parentField: string = 'id'): this {
     const fieldStr = String(childField);
-    const childCol = fieldStr.includes('.')
-      ? fieldStr
-      : `${this.alias}.${fieldStr}`;
+    const childCol = fieldStr.includes('.') ? fieldStr : `${this.alias}.${fieldStr}`;
     this.whereConditions.push({
       str: `${childCol} = ${this.parentAlias}.${parentField}`,
     });
@@ -134,15 +120,12 @@ export class JsonSubQueryBuilder<T extends ObjectLiteral> {
   build(sub: SelectQueryBuilder<any>): SelectQueryBuilder<any> {
     sub.from(this.entity as any, this.alias);
     this.joins.forEach((joinFn) => joinFn(sub));
-    this.whereConditions.forEach(({ str, params }) =>
-      sub.andWhere(str, params),
-    );
+    this.whereConditions.forEach(({ str, params }) => sub.andWhere(str, params));
     this.orderBys.forEach(({ sort, order }) => sub.addOrderBy(sort, order));
     if (this.limitNum) sub.limit(this.limitNum);
 
     const driverType = sub.connection.options.type;
-    const isPostgres =
-      driverType === 'postgres' || driverType === 'cockroachdb';
+    const isPostgres = driverType === 'postgres' || driverType === 'cockroachdb';
 
     let selection = '';
     if (isPostgres) {
@@ -173,11 +156,7 @@ export class ConditionalSearchBuilder {
     private isPostgres: boolean = false,
   ) {}
 
-  matchCase(
-    condition: string,
-    params: ObjectLiteral,
-    searchFields: string[],
-  ): this {
+  matchCase(condition: string, params: ObjectLiteral, searchFields: string[]): this {
     this.branches.push({
       condition,
       params,
@@ -187,11 +166,7 @@ export class ConditionalSearchBuilder {
     return this;
   }
 
-  matchExact(
-    condition: string,
-    params: ObjectLiteral,
-    searchFields: string[],
-  ): this {
+  matchExact(condition: string, params: ObjectLiteral, searchFields: string[]): this {
     this.branches.push({
       condition,
       params,
@@ -253,8 +228,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
     source: Repository<T> | SelectQueryBuilder<T>,
     alias: string = 'root',
   ): AdvancedQueryHelper<T> {
-    const builder =
-      source instanceof Repository ? source.createQueryBuilder(alias) : source;
+    const builder = source instanceof Repository ? source.createQueryBuilder(alias) : source;
     return new AdvancedQueryHelper(builder);
   }
 
@@ -335,13 +309,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
     condition: string,
     params?: ObjectLiteral,
   ): this {
-    this.qb.leftJoinAndMapOne(
-      this.prefixCol(mapTo),
-      entity as any,
-      alias,
-      condition,
-      params,
-    );
+    this.qb.leftJoinAndMapOne(this.prefixCol(mapTo), entity as any, alias, condition, params);
     return this;
   }
 
@@ -352,13 +320,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
     condition: string,
     params?: ObjectLiteral,
   ): this {
-    this.qb.leftJoinAndMapMany(
-      this.prefixCol(mapTo),
-      entity as any,
-      alias,
-      condition,
-      params,
-    );
+    this.qb.leftJoinAndMapMany(this.prefixCol(mapTo), entity as any, alias, condition, params);
     return this;
   }
 
@@ -400,8 +362,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
   }
 
   mapOneWithSubQuery(config: ComplexMapConfig<T>): this {
-    const { mapTo, entity, alias, conditionBuilder, extraCondition, params } =
-      config;
+    const { mapTo, entity, alias, conditionBuilder, extraCondition, params } = config;
     const subQueryFactory = (sq: SelectQueryBuilder<any>) => {
       return conditionBuilder(sq, this.qb.alias).getQuery();
     };
@@ -421,10 +382,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
 
   selectSubQuery(
     alias: string,
-    builder: (
-      sub: SelectQueryBuilder<any>,
-      parentAlias: string,
-    ) => SelectQueryBuilder<any>,
+    builder: (sub: SelectQueryBuilder<any>, parentAlias: string) => SelectQueryBuilder<any>,
   ): this {
     this.qb.addSelect((sub) => builder(sub, this.qb.alias), alias);
     return this;
@@ -491,9 +449,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
   filterIn(field: keyof T | string, values: any[] | undefined): this {
     if (!values || values.length === 0) return this;
     const fieldStr = String(field);
-    const col = fieldStr.includes('.')
-      ? fieldStr
-      : `${this.qb.alias}.${fieldStr}`;
+    const col = fieldStr.includes('.') ? fieldStr : `${this.qb.alias}.${fieldStr}`;
     const paramName = `in_${fieldStr.replace('.', '_')}_${Math.random().toString(36).substring(7)}`;
     this.qb.andWhere(`${col} IN (:...${paramName})`, { [paramName]: values });
     return this;
@@ -501,9 +457,7 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
 
   filterRange(field: keyof T | string, from: any, to: any): this {
     const fieldStr = String(field);
-    const col = fieldStr.includes('.')
-      ? fieldStr
-      : `${this.qb.alias}.${fieldStr}`;
+    const col = fieldStr.includes('.') ? fieldStr : `${this.qb.alias}.${fieldStr}`;
     if (from !== undefined && from !== null) {
       const pName = `gte_${fieldStr.replace('.', '_')}`;
       this.qb.andWhere(`${col} >= :${pName}`, { [pName]: from });
@@ -517,18 +471,14 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
 
   filterIsNull(field: keyof T | string): this {
     const fieldStr = String(field);
-    const col = fieldStr.includes('.')
-      ? fieldStr
-      : `${this.qb.alias}.${fieldStr}`;
+    const col = fieldStr.includes('.') ? fieldStr : `${this.qb.alias}.${fieldStr}`;
     this.qb.andWhere(`${col} IS NULL`);
     return this;
   }
 
   filterNotNull(field: keyof T | string): this {
     const fieldStr = String(field);
-    const col = fieldStr.includes('.')
-      ? fieldStr
-      : `${this.qb.alias}.${fieldStr}`;
+    const col = fieldStr.includes('.') ? fieldStr : `${this.qb.alias}.${fieldStr}`;
     this.qb.andWhere(`${col} IS NOT NULL`);
     return this;
   }

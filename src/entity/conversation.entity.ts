@@ -1,8 +1,9 @@
-import { Entity, Column, OneToMany, Index } from 'typeorm';
 import { ConversationTypeEnum } from 'src/common/enum';
+import { Column, Entity, Index, OneToMany } from 'typeorm';
+
 import { BaseModel } from './base-model';
-import { MessageEntity } from './message.entity';
 import { ConversationParticipantEntity } from './conversation-participant.entity';
+import { MessageEntity } from './message.entity';
 
 @Entity('conversations')
 @Index(['lastMessageAt'])

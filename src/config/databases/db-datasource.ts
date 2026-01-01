@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { envs } from 'src/config/envs';
 import { DataSource } from 'typeorm';
 

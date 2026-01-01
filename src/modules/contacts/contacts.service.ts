@@ -7,33 +7,30 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import {
-  ContactStatusEnum,
-  MediaTypeEnum,
-  SortTypeEnum,
-  StatusEnum,
-} from 'src/common/enum';
-import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
-import { ContactEntity } from 'src/entity/contact.entity';
-import {
-  IGetContacts,
-  ISendFriendRequest,
-  IUpdateContactAlias,
-} from 'src/interface/contact.interface';
-import { DataSource, Repository } from 'typeorm';
-import { UserService } from '../user/user.service';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { IBaseQuery } from 'src/interface';
-import { UserEntity } from 'src/entity/user.entity';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { InjectRepository } from '@nestjs/typeorm';
+
+import { ContactStatusEnum, MediaTypeEnum, SortTypeEnum, StatusEnum } from 'src/common/enum';
+import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import {
   ContactEventEnum,
   ContactRemovedEvent,
   ContactRequestAcceptedEvent,
   ContactRequestSentEvent,
 } from 'src/config/websocket/events/contact.events';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { ContactEntity } from 'src/entity/contact.entity';
 import { MediaEntity } from 'src/entity/media.entity';
+import { UserEntity } from 'src/entity/user.entity';
+import { IBaseQuery } from 'src/interface';
+import {
+  IGetContacts,
+  ISendFriendRequest,
+  IUpdateContactAlias,
+} from 'src/interface/contact.interface';
+import { DataSource, Repository } from 'typeorm';
+
+import { UserService } from '../user/user.service';
 
 @Injectable()
 export class ContactsService {
@@ -53,21 +50,14 @@ export class ContactsService {
 
   async getContacts(payload: { userId: string; query: IGetContacts }) {
     const { userId, query } = payload;
-    const {
-      type = ContactStatusEnum.FRIEND,
-      search,
-      sort: rawSort,
-      ...pagination
-    } = query;
+    const { type = ContactStatusEnum.FRIEND, search, sort: rawSort, ...pagination } = query;
 
     let sort = rawSort;
     const helper = AdvancedQueryHelper.from(this.contactRepo, 'c');
 
     helper.filter({ userId }).filter({ status: type });
 
-    helper
-      .joinRelation('contactUser', 'u')
-      .addSelect(['u.id', 'u.name', 'u.email']);
+    helper.joinRelation('contactUser', 'u').addSelect(['u.id', 'u.name', 'u.email']);
 
     helper
       .leftJoinAndMapOne(
@@ -97,9 +87,7 @@ export class ContactsService {
             : SortTypeEnum.ASC;
 
         if (field === 'name') {
-          helper
-            .getBuilder()
-            .addOrderBy('COALESCE(c.alias, u.name)', direction);
+          helper.getBuilder().addOrderBy('COALESCE(c.alias, u.name)', direction);
         } else {
           remainingSorts.push(part);
         }
@@ -107,9 +95,7 @@ export class ContactsService {
 
       sort = remainingSorts.length > 0 ? remainingSorts.join(',') : undefined;
     } else {
-      helper
-        .getBuilder()
-        .addOrderBy('COALESCE(c.alias, u.name)', SortTypeEnum.ASC);
+      helper.getBuilder().addOrderBy('COALESCE(c.alias, u.name)', SortTypeEnum.ASC);
     }
 
     const result = await helper.getPaginated({ ...pagination, sort });
@@ -135,10 +121,7 @@ export class ContactsService {
     return { ...result, data: finalData };
   }
 
-  async sendFriendRequest(payload: {
-    userId: string;
-    dto: ISendFriendRequest;
-  }) {
+  async sendFriendRequest(payload: { userId: string; dto: ISendFriendRequest }) {
     const { userId, dto } = payload;
     const { targetUserId } = dto;
     if (userId === targetUserId)
@@ -292,11 +275,7 @@ export class ContactsService {
     return { success: true };
   }
 
-  async updateAlias(payload: {
-    userId: string;
-    targetId: string;
-    dto: IUpdateContactAlias;
-  }) {
+  async updateAlias(payload: { userId: string; targetId: string; dto: IUpdateContactAlias }) {
     const { userId, targetId, dto } = payload;
     const contact = await this.contactRepo.findOne({
       where: { userId, contactId: targetId },

@@ -2,8 +2,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
+import { ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 
-import { ObjectLiteral, SelectQueryBuilder, Repository } from 'typeorm';
 import { AdvancedQueryHelper } from './query.helper';
 
 // --- Interfaces ---
@@ -57,14 +57,11 @@ export class AdvancedTreeHelper<T extends ObjectLiteral> {
     alias: string,
     config?: TreeConfig<T>,
   ): AdvancedTreeHelper<T> {
-    const builder =
-      source instanceof Repository ? source.createQueryBuilder(alias) : source;
+    const builder = source instanceof Repository ? source.createQueryBuilder(alias) : source;
     return new AdvancedTreeHelper(builder, config);
   }
 
-  async getPaginatedTree(
-    options: TreePaginationOptions,
-  ): Promise<TreeResult<T>> {
+  async getPaginatedTree(options: TreePaginationOptions): Promise<TreeResult<T>> {
     const hasConditions = this.qb.expressionMap.wheres.length > 0;
 
     if (hasConditions) {
@@ -77,9 +74,7 @@ export class AdvancedTreeHelper<T extends ObjectLiteral> {
   // ==========================================
   // MODE 1: BROWSE
   // ==========================================
-  private async handleBrowseMode(
-    options: TreePaginationOptions,
-  ): Promise<TreeResult<T>> {
+  private async handleBrowseMode(options: TreePaginationOptions): Promise<TreeResult<T>> {
     const rootQb = this.qb.clone();
 
     rootQb.andWhere(`${rootQb.alias}.${this.parentIdField} IS NULL`);
@@ -133,9 +128,7 @@ export class AdvancedTreeHelper<T extends ObjectLiteral> {
   // ==========================================
   // MODE 2: SEARCH
   // ==========================================
-  private async handleSearchMode(
-    options: TreePaginationOptions,
-  ): Promise<TreeResult<T>> {
+  private async handleSearchMode(options: TreePaginationOptions): Promise<TreeResult<T>> {
     const matchedNodes = await this.qb.getMany();
 
     if (matchedNodes.length === 0) {
@@ -252,10 +245,7 @@ export class AdvancedTreeHelper<T extends ObjectLiteral> {
   /**
    * FIX: Ép kiểu trả về là T[] thay vì để tự suy luận
    */
-  static buildTreeStructure<T extends ObjectLiteral>(
-    flatList: T[],
-    config: TreeConfig<T>,
-  ): T[] {
+  static buildTreeStructure<T extends ObjectLiteral>(flatList: T[], config: TreeConfig<T>): T[] {
     const idField = String(config.idField || 'id');
     const parentField = String(config.parentIdField || 'parentId');
     const childrenField = config.childrenField || 'children';

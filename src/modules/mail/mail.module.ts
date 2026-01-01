@@ -1,13 +1,15 @@
+import { BullModule } from '@nestjs/bull';
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+
 import { MailerModule } from '@nestjs-modules/mailer';
 import { HandlebarsAdapter } from '@nestjs-modules/mailer/dist/adapters/handlebars.adapter';
-import { Module } from '@nestjs/common';
-import { MailService } from './mail.service';
-import { ConfigModule, ConfigService } from '@nestjs/config';
 import { join } from 'path';
 import { envs } from 'src/config/envs';
-import { BullModule } from '@nestjs/bull';
 import { QUEUE_NAME } from 'src/constants/queue.constant';
+
 import { MailProcessor } from './mail.processor';
+import { MailService } from './mail.service';
 
 @Module({
   imports: [

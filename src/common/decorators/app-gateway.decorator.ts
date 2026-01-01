@@ -1,12 +1,9 @@
-import {
-  applyDecorators,
-  UseFilters,
-  UsePipes,
-  ValidationPipe,
-} from '@nestjs/common';
+import { UseFilters, UsePipes, ValidationPipe, applyDecorators } from '@nestjs/common';
 import { WebSocketGateway } from '@nestjs/websockets';
-import { WsExceptionFilter } from '../websocket/ws-exception.filter';
+
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
+
+import { WsExceptionFilter } from '../websocket/ws-exception.filter';
 
 export function AppGateway(namespace: string) {
   return applyDecorators(

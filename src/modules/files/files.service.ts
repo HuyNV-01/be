@@ -1,13 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, EntityManager, In } from 'typeorm';
-import sharp from 'sharp';
+
 import * as crypto from 'crypto';
-import { v4 as uuidv4 } from 'uuid';
 import { extname } from 'path';
+import sharp from 'sharp';
+import { FileProviderEnum } from 'src/common/enum';
 import { FileEntity } from 'src/entity/file.entity';
 import type { IStorageProvider } from 'src/interface/storage.interface';
-import { FileProviderEnum } from 'src/common/enum';
+import { EntityManager, In, Repository } from 'typeorm';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface BufferedFile {
   fieldname: string;
@@ -42,12 +43,7 @@ export class FilesService {
     options: FileUploadOptions = {},
     manager?: EntityManager,
   ): Promise<FileEntity> {
-    const {
-      folder = 'general',
-      optimize = true,
-      resizeWidth,
-      retentionDays,
-    } = options;
+    const { folder = 'general', optimize = true, resizeWidth, retentionDays } = options;
 
     const { originalname } = file;
     let { buffer, mimetype, size } = file;
@@ -116,9 +112,7 @@ export class FilesService {
 
       return await repo.save(newFile);
     } catch (error) {
-      this.logger.error(
-        `DB Save failed, rolling back storage: ${uploadRes.key}`,
-      );
+      this.logger.error(`DB Save failed, rolling back storage: ${uploadRes.key}`);
 
       await this.storageProvider
         .delete(uploadRes.key, uploadRes.bucket)
@@ -128,10 +122,7 @@ export class FilesService {
     }
   }
 
-  async softDeleteFile(
-    fileId: string,
-    manager?: EntityManager,
-  ): Promise<boolean> {
+  async softDeleteFile(fileId: string, manager?: EntityManager): Promise<boolean> {
     const repo = manager ? manager.getRepository(FileEntity) : this.fileRepo;
 
     const result = await repo.softDelete(fileId);
@@ -139,10 +130,7 @@ export class FilesService {
     return result.affected ? result.affected > 0 : false;
   }
 
-  async hardDeleteFile(
-    fileId: string,
-    manager?: EntityManager,
-  ): Promise<boolean> {
+  async hardDeleteFile(fileId: string, manager?: EntityManager): Promise<boolean> {
     const repo = manager ? manager.getRepository(FileEntity) : this.fileRepo;
 
     const file = await repo.findOne({
@@ -163,10 +151,7 @@ export class FilesService {
     return true;
   }
 
-  async softDeleteMany(
-    fileIds: string[],
-    manager?: EntityManager,
-  ): Promise<boolean> {
+  async softDeleteMany(fileIds: string[], manager?: EntityManager): Promise<boolean> {
     if (!fileIds.length) return false;
 
     const repo = manager ? manager.getRepository(FileEntity) : this.fileRepo;
@@ -179,10 +164,7 @@ export class FilesService {
     return result.affected ? result.affected > 0 : false;
   }
 
-  async hardDeleteMany(
-    fileIds: string[],
-    manager?: EntityManager,
-  ): Promise<boolean> {
+  async hardDeleteMany(fileIds: string[], manager?: EntityManager): Promise<boolean> {
     if (!fileIds.length) return false;
 
     const repo = manager ? manager.getRepository(FileEntity) : this.fileRepo;
@@ -206,9 +188,7 @@ export class FilesService {
     for (const [bucket, paths] of filesByBucket.entries()) {
       storageDeletePromises.push(
         this.storageProvider.deleteMany(paths, bucket).catch((err) => {
-          this.logger.error(
-            `Failed to delete files in bucket ${bucket}: ${err}`,
-          );
+          this.logger.error(`Failed to delete files in bucket ${bucket}: ${err}`);
         }),
       );
     }

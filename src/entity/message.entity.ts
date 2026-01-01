@@ -1,8 +1,9 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index } from 'typeorm';
-import { UserEntity } from './user.entity';
 import { MessageTypeEnum } from 'src/common/enum';
+import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
+
 import { BaseModel } from './base-model';
 import { ConversationEntity } from './conversation.entity';
+import { UserEntity } from './user.entity';
 
 @Entity('messages')
 export class MessageEntity extends BaseModel {

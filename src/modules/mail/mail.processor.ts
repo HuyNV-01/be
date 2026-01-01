@@ -1,12 +1,7 @@
-import { MailerService } from '@nestjs-modules/mailer';
-import {
-  OnQueueActive,
-  OnQueueCompleted,
-  OnQueueFailed,
-  Process,
-  Processor,
-} from '@nestjs/bull';
+import { OnQueueActive, OnQueueCompleted, OnQueueFailed, Process, Processor } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
+
+import { MailerService } from '@nestjs-modules/mailer';
 import bull from 'bull';
 import { envs } from 'src/config/envs';
 import { JOB_NAME, QUEUE_NAME } from 'src/constants/queue.constant';
@@ -18,9 +13,7 @@ export class MailProcessor {
   constructor(private readonly mailerService: MailerService) {}
 
   @Process(JOB_NAME.SEND_WELCOME)
-  async handleSendUserWelcome(
-    job: bull.Job<{ email: string; name: string; token: string }>,
-  ) {
+  async handleSendUserWelcome(job: bull.Job<{ email: string; name: string; token: string }>) {
     const label = '[handleSendUserWelcome]';
     const { email, name, token } = job.data;
     this.logger.debug(`${label} - send: ${email}`);
@@ -38,9 +31,7 @@ export class MailProcessor {
   }
 
   @Process(JOB_NAME.SEND_FORGOT_PASSWORD)
-  async handleSendPasswordResetOtp(
-    job: bull.Job<{ email: string; name: string; otp: string }>,
-  ) {
+  async handleSendPasswordResetOtp(job: bull.Job<{ email: string; name: string; otp: string }>) {
     const label = '[handleSendPasswordResetOtp]';
     const { email, name, otp } = job.data;
     this.logger.debug(`${label} - send: ${email}`);

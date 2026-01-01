@@ -1,5 +1,6 @@
-import { Column, Entity, JoinColumn, ManyToOne, Unique, Index } from 'typeorm';
 import { ContactStatusEnum } from 'src/common/enum';
+import { Column, Entity, Index, JoinColumn, ManyToOne, Unique } from 'typeorm';
+
 import { BaseModel } from './base-model';
 import { UserEntity } from './user.entity';
 

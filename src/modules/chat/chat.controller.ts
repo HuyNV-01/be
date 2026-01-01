@@ -1,24 +1,19 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-
 import {
+  Body,
   Controller,
   Get,
-  Post,
-  Body,
-  Query,
-  Param,
-  UseGuards,
-  Req,
-  HttpStatus,
-  Put,
   HttpCode,
+  HttpStatus,
   Logger,
+  Param,
+  Post,
+  Put,
+  Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
-import { ChatService } from './chat.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { CreateGroupDto } from 'src/dto/chat/chat.dto';
-import * as queryTypes from 'src/types/query.types';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -27,9 +22,15 @@ import {
   ApiQuery,
   ApiResponse,
 } from '@nestjs/swagger';
+
 import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import { DBaseQuery } from 'src/dto/base-query.dto';
+import { CreateGroupDto } from 'src/dto/chat/chat.dto';
+import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
+import * as queryTypes from 'src/types/query.types';
+
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { ChatService } from './chat.service';
 
 @Controller('chat')
 @ApiBearerAuth('access-token')

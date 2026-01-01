@@ -11,9 +11,7 @@ export class SmartContentValidator extends FileValidator<{
   isValid(file?: Express.Multer.File): boolean {
     if (!file) return false;
 
-    const rule = this.validationOptions.rules.find((r) =>
-      r.fileType.test(file.originalname),
-    );
+    const rule = this.validationOptions.rules.find((r) => r.fileType.test(file.originalname));
 
     if (!rule) return false;
 
@@ -27,9 +25,7 @@ export class SmartContentValidator extends FileValidator<{
   buildErrorMessage(file: Express.Multer.File): string {
     if (!file) return 'File is required';
 
-    const rule = this.validationOptions.rules.find((r) =>
-      r.fileType.test(file.originalname),
-    );
+    const rule = this.validationOptions.rules.find((r) => r.fileType.test(file.originalname));
 
     if (!rule) {
       return `File type ${file.mimetype} is not allowed`;

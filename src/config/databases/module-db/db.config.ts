@@ -1,6 +1,5 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { registerAs } from '@nestjs/config';
+
 import { envs } from 'src/config/envs';
 
 export default registerAs('database.mysql', () => ({

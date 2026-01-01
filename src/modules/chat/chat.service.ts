@@ -1,32 +1,24 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import {
-  Injectable,
-  ForbiddenException,
-  BadRequestException,
-  Logger,
-} from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import {
-  ConversationTypeEnum,
-  MediaTypeEnum,
-  MessageTypeEnum,
-} from 'src/common/enum';
+
+import { ConversationTypeEnum, MediaTypeEnum, MessageTypeEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
+import { SocketStateService } from 'src/common/websocket/socket-state.service';
 import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { MediaEntity } from 'src/entity/media.entity';
 import { MessageEntity } from 'src/entity/message.entity';
 import { UserEntity } from 'src/entity/user.entity';
+import { IBaseQuery } from 'src/interface';
 import { PaginationOptions } from 'src/types/query.types';
 import { DataSource, Repository } from 'typeorm';
+
 import { UserService } from '../user/user.service';
-import { SocketStateService } from 'src/common/websocket/socket-state.service';
-import { IBaseQuery } from 'src/interface';
-import { MediaEntity } from 'src/entity/media.entity';
 
 @Injectable()
 export class ChatService {
@@ -56,8 +48,7 @@ export class ChatService {
       const participant = await this.partRepository.findOne({
         where: { conversationId: dto.conversationId, userId: senderId },
       });
-      if (!participant)
-        throw new ForbiddenException('Not a member of this chat');
+      if (!participant) throw new ForbiddenException('Not a member of this chat');
 
       const message = this.msgRepository.create({
         conversationId: dto.conversationId,
@@ -69,20 +60,15 @@ export class ChatService {
       const savedMessage = await queryRunner.manager.save(message);
 
       await queryRunner.manager.update(ConversationEntity, dto.conversationId, {
-        lastMessage:
-          dto.type === MessageTypeEnum.TEXT ? dto.content : `[${dto.type}]`,
+        lastMessage: dto.type === MessageTypeEnum.TEXT ? dto.content : `[${dto.type}]`,
         lastMessageSenderId: senderId,
         lastMessageAt: savedMessage.createdAt,
         lastMessageType: dto.type,
       });
 
-      await queryRunner.manager.update(
-        ConversationParticipantEntity,
-        participant.id,
-        {
-          lastReadAt: savedMessage.createdAt,
-        },
-      );
+      await queryRunner.manager.update(ConversationParticipantEntity, participant.id, {
+        lastReadAt: savedMessage.createdAt,
+      });
 
       const participants = await this.partRepository.find({
         where: { conversationId: dto.conversationId },
@@ -262,11 +248,9 @@ export class ChatService {
             { searchTypeDirect: ConversationTypeEnum.DIRECT },
             ['u_partner.name', 'u_partner.email'],
           )
-          .matchCase(
-            'c.type = :searchTypeGroup',
-            { searchTypeGroup: ConversationTypeEnum.GROUP },
-            ['c.name'],
-          );
+          .matchCase('c.type = :searchTypeGroup', { searchTypeGroup: ConversationTypeEnum.GROUP }, [
+            'c.name',
+          ]);
       });
     }
 
@@ -277,9 +261,7 @@ export class ChatService {
     const result = await helper.getPaginated(query);
 
     const partnerIds = result.data
-      .filter(
-        (c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser,
-      )
+      .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
       .map((c: any) => c.partnerUser.id);
 
     const onlineSet = await this.socketStateService.getOnlineUsers(partnerIds);
@@ -308,11 +290,7 @@ export class ChatService {
     const partners = await this.partRepository
       .createQueryBuilder('p')
       .select('DISTINCT p.userId', 'userId')
-      .innerJoin(
-        'conversation_participants',
-        'me',
-        'me.conversationId = p.conversationId',
-      )
+      .innerJoin('conversation_participants', 'me', 'me.conversationId = p.conversationId')
       .where('me.userId = :userId', { userId })
       .andWhere('p.userId != :userId', { userId })
       .getRawMany();
@@ -320,10 +298,7 @@ export class ChatService {
     return partners.map((p) => p.userId);
   }
 
-  async getOrCreateDirectConversation(payload: {
-    senderId: string;
-    dto: CreateDirectChatDto;
-  }) {
+  async getOrCreateDirectConversation(payload: { senderId: string; dto: CreateDirectChatDto }) {
     const { senderId, dto } = payload;
     const { receiverId } = dto;
 
@@ -348,9 +323,7 @@ export class ChatService {
       return this.enrichConversationInfo(existingConversation, receiverId);
     }
 
-    const queryRunner = this.dataSource
-      .createQueryBuilder()
-      .connection.createQueryRunner();
+    const queryRunner = this.dataSource.createQueryBuilder().connection.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
@@ -381,10 +354,7 @@ export class ChatService {
     }
   }
 
-  private async enrichConversationInfo(
-    conversation: ConversationEntity,
-    partnerId: string,
-  ) {
+  private async enrichConversationInfo(conversation: ConversationEntity, partnerId: string) {
     const partner = await this.dataSource.getRepository(UserEntity).findOne({
       where: { id: partnerId },
       select: ['id', 'name', 'email', 'status'],
@@ -396,17 +366,11 @@ export class ChatService {
     };
   }
 
-  async markConversationAsRead(payload: {
-    userId: string;
-    conversationId: string;
-  }) {
+  async markConversationAsRead(payload: { userId: string; conversationId: string }) {
     const label = '[markConversationAsRead]';
     const { conversationId, userId } = payload;
     this.logger.debug(`${label} conversationId -> ${conversationId}`);
-    await this.partRepository.update(
-      { conversationId, userId },
-      { lastReadAt: new Date() },
-    );
+    await this.partRepository.update({ conversationId, userId }, { lastReadAt: new Date() });
     return { success: true };
   }
 }

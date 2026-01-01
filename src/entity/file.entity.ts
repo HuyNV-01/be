@@ -1,6 +1,7 @@
-import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
-import { BaseModel } from './base-model';
 import { FileProviderEnum } from 'src/common/enum';
+import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
+
+import { BaseModel } from './base-model';
 import { UserEntity } from './user.entity';
 
 @Entity('files')

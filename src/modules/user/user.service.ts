@@ -1,24 +1,21 @@
-import {
-  BadRequestException,
-  HttpStatus,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { envs } from 'src/config/envs';
-import { UserEntity } from 'src/entity/user.entity';
-import { ICreateUser, IUpdateUser } from 'src/interface/user.interface';
-import { Repository } from 'typeorm';
+
 import * as bcrypt from 'bcrypt';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { GetListUserDto } from 'src/dto/user/get-list-user.dto';
-import { PaginatedResult } from 'src/types/query.types';
 import { MediaTypeEnum, StatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
+import { envs } from 'src/config/envs';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { GetListUserDto } from 'src/dto/user/get-list-user.dto';
 import { ContactEntity } from 'src/entity/contact.entity';
-import { MediaService } from '../media/media.service';
-import { BufferedFile } from '../files/files.service';
 import { MediaEntity } from 'src/entity/media.entity';
+import { UserEntity } from 'src/entity/user.entity';
+import { ICreateUser, IUpdateUser } from 'src/interface/user.interface';
+import { PaginatedResult } from 'src/types/query.types';
+import { Repository } from 'typeorm';
+
+import { BufferedFile } from '../files/files.service';
+import { MediaService } from '../media/media.service';
 
 @Injectable()
 export class UserService {
@@ -77,10 +74,7 @@ export class UserService {
     return user;
   }
 
-  async updateUser(payload: {
-    userId: string;
-    data: IUpdateUser;
-  }): Promise<UserEntity> {
+  async updateUser(payload: { userId: string; data: IUpdateUser }): Promise<UserEntity> {
     const { userId, data: updateUser } = payload;
     const user = await this.userRepository.preload({
       id: userId,
@@ -98,9 +92,7 @@ export class UserService {
     return this.userRepository.save(user);
   }
 
-  async getList(payload: {
-    query: GetListUserDto;
-  }): Promise<PaginatedResult<UserEntity>> {
+  async getList(payload: { query: GetListUserDto }): Promise<PaginatedResult<UserEntity>> {
     const { query } = payload;
 
     const qb = AdvancedQueryHelper.from(this.userRepository, 'u');

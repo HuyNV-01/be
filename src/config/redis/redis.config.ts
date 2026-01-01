@@ -1,7 +1,7 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { RedisModuleOptions } from '@nestjs-modules/ioredis';
-import { envs } from '../envs';
 import { HOST_DEFAULT, PORT_REDIS_DEFAULT } from 'src/constants';
+
+import { envs } from '../envs';
 
 export const redisConfig = {
   host: envs.redisHost || HOST_DEFAULT,

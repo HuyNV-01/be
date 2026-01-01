@@ -1,9 +1,10 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
+
 import { FileEntity } from 'src/entity/file.entity';
 import type { IStorageProvider } from 'src/interface/storage.interface';
-import { Repository, LessThan, In, IsNull } from 'typeorm';
+import { In, IsNull, LessThan, Repository } from 'typeorm';
 
 @Injectable()
 export class FileCleanupService {

@@ -12,22 +12,19 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ContactsService } from './contacts.service';
+import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse } from '@nestjs/swagger';
+
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { DBaseQuery } from 'src/dto/base-query.dto';
 import {
   GetContactsDto,
   SendFriendRequestDto,
   UpdateContactAliasDto,
 } from 'src/dto/contact/contact.dto';
 import type { IBaseReq } from 'src/interface';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
+
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiParam,
-  ApiResponse,
-} from '@nestjs/swagger';
-import { DBaseQuery } from 'src/dto/base-query.dto';
+import { ContactsService } from './contacts.service';
 
 @Controller('contacts')
 @ApiBearerAuth('access-token')
@@ -170,10 +167,7 @@ export class ContactsController {
   })
   @Post('accept/:senderId')
   @HttpCode(HttpStatus.OK)
-  async acceptRequest(
-    @Req() req: IBaseReq,
-    @Param('senderId') senderId: string,
-  ) {
+  async acceptRequest(@Req() req: IBaseReq, @Param('senderId') senderId: string) {
     const result = await this.contactsService.acceptFriendRequest({
       userId: req.user.id,
       senderId,
@@ -210,10 +204,7 @@ export class ContactsController {
   })
   @Delete(':targetId')
   @HttpCode(HttpStatus.OK)
-  async removeContact(
-    @Req() req: IBaseReq,
-    @Param('targetId') targetId: string,
-  ) {
+  async removeContact(@Req() req: IBaseReq, @Param('targetId') targetId: string) {
     const result = await this.contactsService.removeContact({
       userId: req.user.id,
       targetId,

@@ -1,21 +1,17 @@
-import {
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-  WebSocketServer,
-} from '@nestjs/websockets';
-import { Server } from 'socket.io';
 import { Logger } from '@nestjs/common';
-import { SocketStateService } from './socket-state.service';
+import { OnGatewayConnection, OnGatewayDisconnect, WebSocketServer } from '@nestjs/websockets';
+
+import { Server } from 'socket.io';
 import { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
+
+import { SocketStateService } from './socket-state.service';
 
 export interface PresenceGateway {
   handleUserOnline(userId: string): Promise<void>;
   handleUserOffline(userId: string): Promise<void>;
 }
 
-export abstract class BaseGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
-{
+export abstract class BaseGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
@@ -57,10 +53,7 @@ export abstract class BaseGateway
     this.logger.debug(`User disconnected: ${userId}`);
     if (userId) {
       try {
-        const isOfflineCompletely = await this.socketStateService.remove(
-          userId,
-          client.id,
-        );
+        const isOfflineCompletely = await this.socketStateService.remove(userId, client.id);
 
         if (isOfflineCompletely) {
           this.logger.debug(`User offline completely: ${userId}`);
@@ -101,9 +94,7 @@ export abstract class BaseGateway
       const activeSockets = await this.server.in(socketId).fetchSockets();
 
       if (activeSockets.length === 0) {
-        this.logger.warn(
-          `🧹 Cleaning ghost socket: ${socketId} for user ${userId}`,
-        );
+        this.logger.warn(`🧹 Cleaning ghost socket: ${socketId} for user ${userId}`);
         await this.socketStateService.remove(userId, socketId);
       }
     });

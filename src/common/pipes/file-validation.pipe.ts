@@ -1,9 +1,7 @@
-import {
-  ParseFilePipeBuilder,
-  HttpStatus,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { HttpStatus, ParseFilePipeBuilder, UnprocessableEntityException } from '@nestjs/common';
+
 import { FILE_CONFIG } from 'src/constants/file-validators.constant';
+
 import { SmartContentValidator } from './smart-file.validator';
 
 interface FileValidationOptions {
@@ -93,21 +91,12 @@ export class FileValidators {
       });
   }
 
-  static Custom(
-    options: FileValidationOptions & { maxSize: number; fileType: RegExp },
-  ) {
+  static Custom(options: FileValidationOptions & { maxSize: number; fileType: RegExp }) {
     return FileValidators.buildPipe(options);
   }
 
-  private static buildPipe(
-    options: FileValidationOptions & { maxSize: number; fileType: RegExp },
-  ) {
-    const {
-      required = true,
-      maxSize,
-      fileType,
-      errorMessage = 'Invalid file type',
-    } = options;
+  private static buildPipe(options: FileValidationOptions & { maxSize: number; fileType: RegExp }) {
+    const { required = true, maxSize, fileType, errorMessage = 'Invalid file type' } = options;
 
     return new ParseFilePipeBuilder()
 
@@ -117,8 +106,7 @@ export class FileValidators {
 
       .addMaxSizeValidator({
         maxSize: maxSize,
-        message: (maxSize) =>
-          `File is too large! Max allowed size is ${maxSize / 1024 / 1024}MB`,
+        message: (maxSize) => `File is too large! Max allowed size is ${maxSize / 1024 / 1024}MB`,
       })
 
       .build({
@@ -131,9 +119,7 @@ export class FileValidators {
           }
 
           if (error.includes('File is required')) {
-            return new UnprocessableEntityException(
-              'File attachment is required',
-            );
+            return new UnprocessableEntityException('File attachment is required');
           }
 
           return new UnprocessableEntityException(error);

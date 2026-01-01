@@ -1,6 +1,7 @@
-import { Column, Entity, Index } from 'typeorm';
-import { BaseModel } from './base-model';
 import { StatusEnum, ValidRolesEnum } from 'src/common/enum';
+import { Column, Entity, Index } from 'typeorm';
+
+import { BaseModel } from './base-model';
 
 @Entity('users')
 @Index(['email', 'name'])

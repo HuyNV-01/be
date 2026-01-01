@@ -1,22 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+
 import {
-  S3Client,
-  PutObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
-  S3ClientConfig,
   GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+  S3ClientConfig,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { BuildHandlerArguments } from '@aws-sdk/types';
+import * as crypto from 'crypto';
+import { FileProviderEnum } from 'src/common/enum';
 import {
   IStorageProvider,
   UploadFileOptions,
   UploadResponse,
 } from 'src/interface/storage.interface';
-import { FileProviderEnum } from 'src/common/enum';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import * as crypto from 'crypto';
-import { BuildHandlerArguments } from '@aws-sdk/types';
 
 interface IMinioRequest {
   headers: Record<string, string>;
@@ -33,14 +34,10 @@ export class MinioProvider implements IStorageProvider {
   constructor(private readonly configService: ConfigService) {
     const region = this.configService.get<string>('AWS_REGION');
     const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-    const secretAccessKey = this.configService.get<string>(
-      'AWS_SECRET_ACCESS_KEY',
-    );
+    const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
     const endpoint = this.configService.get<string>('AWS_ENDPOINT');
     const bucketName = this.configService.get<string>('AWS_BUCKET_NAME');
-    const publicEndpoint = this.configService.get<string>(
-      'AWS_PUBLIC_ENDPOINT',
-    );
+    const publicEndpoint = this.configService.get<string>('AWS_PUBLIC_ENDPOINT');
 
     if (
       !region ||
@@ -79,10 +76,7 @@ export class MinioProvider implements IStorageProvider {
         if (request && request.headers) {
           if (context.commandName === 'DeleteObjectsCommand') {
             if (request.body) {
-              const md5 = crypto
-                .createHash('md5')
-                .update(request.body)
-                .digest('base64');
+              const md5 = crypto.createHash('md5').update(request.body).digest('base64');
 
               request.headers['Content-MD5'] = md5;
             }
@@ -99,10 +93,7 @@ export class MinioProvider implements IStorageProvider {
     );
   }
 
-  async upload(
-    buffer: Buffer,
-    options: UploadFileOptions,
-  ): Promise<UploadResponse> {
+  async upload(buffer: Buffer, options: UploadFileOptions): Promise<UploadResponse> {
     const bucket = options.bucket || this.bucketName;
     try {
       await this.s3Client.send(
@@ -155,11 +146,7 @@ export class MinioProvider implements IStorageProvider {
     }
   }
 
-  async getPresignedUrl(
-    path: string,
-    bucket?: string,
-    expiresIn = 3600,
-  ): Promise<string> {
+  async getPresignedUrl(path: string, bucket?: string, expiresIn = 3600): Promise<string> {
     const targetBucket = bucket || this.bucketName;
 
     try {

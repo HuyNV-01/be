@@ -1,23 +1,25 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
+import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { JwtModule } from '@nestjs/jwt';
+
+import { RedisModule } from '@nestjs-modules/ioredis';
+
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { ConfigModule } from '@nestjs/config';
-import { DatabaseConfigModule } from './config/databases/module-db/db.module';
 import { DatabaseModule } from './config/databases/database.module';
-import { RedisModule } from '@nestjs-modules/ioredis';
+import { DatabaseConfigModule } from './config/databases/module-db/db.module';
+import { envs } from './config/envs';
+import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
 import { AuthModule } from './modules/auth/auth.module';
-import { UserModule } from './modules/user/user.module';
-import { MailModule } from './modules/mail/mail.module';
-import { BullModule } from '@nestjs/bull';
 import { ChatModule } from './modules/chat/chat.module';
-import googleOauthConfig from './config/oauth/google-oauth.config';
-import { JwtModule } from '@nestjs/jwt';
-import { envs } from './config/envs';
-import { parseExpiresIn } from './utils';
 import { ContactsModule } from './modules/contacts/contacts.module';
-import { EventEmitterModule } from '@nestjs/event-emitter';
+import { MailModule } from './modules/mail/mail.module';
+import { UserModule } from './modules/user/user.module';
+import { parseExpiresIn } from './utils';
 
 @Module({
   imports: [

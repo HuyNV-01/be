@@ -1,10 +1,6 @@
 import { InjectQueue } from '@nestjs/bull';
-import {
-  BadRequestException,
-  HttpStatus,
-  Injectable,
-  Logger,
-} from '@nestjs/common';
+import { BadRequestException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+
 import bull from 'bull';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import { JOB_NAME, QUEUE_NAME } from 'src/constants/queue.constant';
@@ -14,11 +10,7 @@ export class MailService {
   constructor(@InjectQueue(QUEUE_NAME.MAIL) private mailQueue: bull.Queue) {}
   private readonly logger = new Logger(MailService.name, { timestamp: true });
 
-  async sendUserWelcome(payload: {
-    email: string;
-    name: string;
-    token: string;
-  }) {
+  async sendUserWelcome(payload: { email: string; name: string; token: string }) {
     try {
       await this.mailQueue.add(JOB_NAME.SEND_WELCOME, payload);
     } catch (error) {
@@ -31,11 +23,7 @@ export class MailService {
     }
   }
 
-  async sendPasswordResetOtp(payload: {
-    email: string;
-    name: string;
-    otp: string;
-  }) {
+  async sendPasswordResetOtp(payload: { email: string; name: string; otp: string }) {
     try {
       await this.mailQueue.add(JOB_NAME.SEND_FORGOT_PASSWORD, payload);
     } catch (error) {

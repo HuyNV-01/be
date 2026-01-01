@@ -3,9 +3,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
+
+import { JwtPayload } from 'jsonwebtoken';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { envs } from 'src/config/envs';
-import { JwtPayload } from 'jsonwebtoken';
+
 import { AuthService } from '../auth.service';
 
 @Injectable()

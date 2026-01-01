@@ -14,20 +14,22 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { AuthService } from './auth.service';
-import { LocalAuthGuard } from './guards/local-auth.guard';
-import { LoginDto } from 'src/dto/auth/login.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ApiBearerAuth, ApiBody, ApiQuery, ApiResponse } from '@nestjs/swagger';
-import { RegisterDto } from 'src/dto/auth/register.dto';
-import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
+
 import express from 'express';
-import { ForgotPasswordDto } from 'src/dto/auth/forgot-password.dto';
-import { VerifyOtpDto } from 'src/dto/auth/verify-otp.dto';
-import { ResetPasswordDto } from 'src/dto/auth/reset-password.dto';
 import { envs } from 'src/config/envs';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { ForgotPasswordDto } from 'src/dto/auth/forgot-password.dto';
+import { LoginDto } from 'src/dto/auth/login.dto';
+import { RegisterDto } from 'src/dto/auth/register.dto';
+import { ResetPasswordDto } from 'src/dto/auth/reset-password.dto';
+import { VerifyOtpDto } from 'src/dto/auth/verify-otp.dto';
+
+import { AuthService } from './auth.service';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
+import { LocalAuthGuard } from './guards/local-auth.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -191,10 +193,7 @@ export class AuthController {
     description: 'Account activated successfully',
   })
   @Get('activate')
-  async activateAccount(
-    @Query('token') token: string,
-    @Res() res: express.Response,
-  ) {
+  async activateAccount(@Query('token') token: string, @Res() res: express.Response) {
     const label = '[activateAccount]';
     try {
       await this.authService.activateAccount(token);

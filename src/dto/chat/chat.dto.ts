@@ -1,12 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-  IsEnum,
-  IsNotEmpty,
-  IsOptional,
-  IsString,
-  IsArray,
-  IsUUID,
-} from 'class-validator';
+
+import { IsArray, IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
 import { MessageTypeEnum } from 'src/common/enum';
 
 export class SendMessageDto {

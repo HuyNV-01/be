@@ -1,10 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import dbConfig from './db.config';
+
 import * as joi from 'joi';
+
+import dbConfig from './db.config';
 import { DatabaseConfigService } from './dbConfig.service';
 
 @Module({

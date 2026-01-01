@@ -1,14 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+
 import { MediaTypeEnum } from 'src/common/enum';
 import { FileEntity } from 'src/entity/file.entity';
 import { MediaEntity } from 'src/entity/media.entity';
-import { Repository, DataSource, EntityManager } from 'typeorm';
-import {
-  BufferedFile,
-  FilesService,
-  FileUploadOptions,
-} from '../files/files.service';
+import { DataSource, EntityManager, Repository } from 'typeorm';
+
+import { BufferedFile, FileUploadOptions, FilesService } from '../files/files.service';
 
 @Injectable()
 export class MediaService {
@@ -67,10 +65,7 @@ export class MediaService {
     }
   }
 
-  async getMediaUrl(
-    targetId: string,
-    type: MediaTypeEnum,
-  ): Promise<string | null> {
+  async getMediaUrl(targetId: string, type: MediaTypeEnum): Promise<string | null> {
     const media = await this.mediaRepo.findOne({
       where: { targetId, type },
       relations: ['file'],
@@ -97,12 +92,7 @@ export class MediaService {
         manager,
       );
 
-      await this.updateSingleMedia(
-        uploadedFile.id,
-        params.targetId,
-        params.type,
-        manager,
-      );
+      await this.updateSingleMedia(uploadedFile.id, params.targetId, params.type, manager);
 
       return uploadedFile;
     };
@@ -125,21 +115,11 @@ export class MediaService {
   ) {
     const execute = async (manager: EntityManager) => {
       const uploadPromises = params.files.map((file) =>
-        this.filesService.uploadFile(
-          file,
-          params.userId,
-          params.options,
-          manager,
-        ),
+        this.filesService.uploadFile(file, params.userId, params.options, manager),
       );
       const uploadedFiles = await Promise.all(uploadPromises);
 
-      await this.attachFiles(
-        uploadedFiles,
-        params.targetId,
-        params.type,
-        manager,
-      );
+      await this.attachFiles(uploadedFiles, params.targetId, params.type, manager);
 
       return uploadedFiles;
     };
@@ -191,11 +171,7 @@ export class MediaService {
     return this.dataSource.transaction((manager) => execute(manager));
   }
 
-  async restoreMedia(
-    targetId: string,
-    type: MediaTypeEnum,
-    externalManager?: EntityManager,
-  ) {
+  async restoreMedia(targetId: string, type: MediaTypeEnum, externalManager?: EntityManager) {
     const execute = async (manager: EntityManager) => {
       const mediaRepo = manager.getRepository(MediaEntity);
       const fileRepo = manager.getRepository(FileEntity);

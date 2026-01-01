@@ -1,14 +1,15 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-
-import { PassportStrategy } from '@nestjs/passport';
-import { Strategy, VerifyCallback } from 'passport-google-oauth20';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
-import googleOauthConfig from 'src/config/oauth/google-oauth.config';
-import { AuthService } from '../auth.service';
+import { PassportStrategy } from '@nestjs/passport';
+
+import { Strategy, VerifyCallback } from 'passport-google-oauth20';
 import { StatusEnum } from 'src/common/enum';
+import googleOauthConfig from 'src/config/oauth/google-oauth.config';
 import { IGoogleUser } from 'src/interface/auth.interface';
+
+import { AuthService } from '../auth.service';
 
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {

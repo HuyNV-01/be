@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // src/common/websocket/services/socket-state.service.ts
 import { Injectable, Logger } from '@nestjs/common';
+
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 

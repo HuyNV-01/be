@@ -1,5 +1,6 @@
-import { Catch, ArgumentsHost } from '@nestjs/common';
+import { ArgumentsHost, Catch } from '@nestjs/common';
 import { BaseWsExceptionFilter, WsException } from '@nestjs/websockets';
+
 import { Socket } from 'socket.io';
 
 @Catch()
@@ -13,8 +14,7 @@ export class WsExceptionFilter extends BaseWsExceptionFilter {
         : {
             status: 'error',
             message: 'Internal Server Error',
-            details:
-              process.env.NODE_ENV !== 'production' ? exception : undefined,
+            details: process.env.NODE_ENV !== 'production' ? exception : undefined,
           };
 
     client.emit('exception', error);

@@ -1,27 +1,23 @@
-import {
-  SubscribeMessage,
-  MessageBody,
-  ConnectedSocket,
-} from '@nestjs/websockets';
-import {
-  BaseGateway,
-  PresenceGateway,
-} from '../../common/websocket/base.gateway';
-import { ChatService } from './chat.service';
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { HttpStatus } from '@nestjs/common';
-import { SocketStateService } from 'src/common/websocket/socket-state.service';
-import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
-import { SendMessageDto } from 'src/dto/chat/chat.dto';
-import { HTTP_RESPONSE } from 'src/constants/http-response';
-import { AppGateway } from 'src/common/decorators/app-gateway.decorator';
-import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { OnEvent } from '@nestjs/event-emitter';
+import { ConnectedSocket, MessageBody, SubscribeMessage } from '@nestjs/websockets';
+
+import { AppGateway } from 'src/common/decorators/app-gateway.decorator';
+import { SocketStateService } from 'src/common/websocket/socket-state.service';
 import {
   ContactEventEnum,
   ContactRemovedEvent,
   ContactRequestAcceptedEvent,
   ContactRequestSentEvent,
 } from 'src/config/websocket/events/contact.events';
+import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { SendMessageDto } from 'src/dto/chat/chat.dto';
+import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
+
+import { BaseGateway, PresenceGateway } from '../../common/websocket/base.gateway';
+import { ChatService } from './chat.service';
 
 @AppGateway(SOCKET_CONFIG.namespaces.CHAT)
 export class ChatGateway extends BaseGateway implements PresenceGateway {
@@ -42,15 +38,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.broadcastStatus(userId, false, recipientIds);
   }
 
-  private broadcastStatus(
-    userId: string,
-    isOnline: boolean,
-    recipients: string[],
-  ) {
+  private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]) {
     const payload = { userId, isOnline, lastActive: new Date() };
-    recipients.forEach((id) =>
-      this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload),
-    );
+    recipients.forEach((id) => this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload));
   }
 
   @SubscribeMessage('join_room')
@@ -58,9 +48,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     @MessageBody('conversationId') conversationId: string,
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
-    this.logger.debug(
-      `User ${client.data.user.id} joined conversation ${conversationId}`,
-    );
+    this.logger.debug(`User ${client.data.user.id} joined conversation ${conversationId}`);
     await client.join(`conversation:${conversationId}`);
     return {
       status: HttpStatus.OK,
@@ -94,9 +82,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       dto,
     });
 
-    this.server
-      .to(`conversation:${dto.conversationId}`)
-      .emit('new_message', message);
+    this.server.to(`conversation:${dto.conversationId}`).emit('new_message', message);
 
     recipientIds.forEach((userId) => {
       if (userId !== client.data.user.id) {
@@ -126,9 +112,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
   @OnEvent(ContactEventEnum.REQUEST_SENT)
   handleContactRequestSent(event: ContactRequestSentEvent) {
-    this.logger.log(
-      `[Event] Request sent from ${event.senderId} to ${event.targetUserId}`,
-    );
+    this.logger.log(`[Event] Request sent from ${event.senderId} to ${event.targetUserId}`);
 
     this.server
       .to(`user:${event.targetUserId}`)
@@ -152,11 +136,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
   @OnEvent(ContactEventEnum.FRIEND_REMOVED)
   handleContactRemoved(event: ContactRemovedEvent) {
-    this.server
-      .to(`user:${event.targetId}`)
-      .emit(SOCKET_CONFIG.events.CONTACT.FRIEND_REMOVED, {
-        removerId: event.removerId,
-        timestamp: event.timestamp,
-      });
+    this.server.to(`user:${event.targetId}`).emit(SOCKET_CONFIG.events.CONTACT.FRIEND_REMOVED, {
+      removerId: event.removerId,
+      timestamp: event.timestamp,
+    });
   }
 }
