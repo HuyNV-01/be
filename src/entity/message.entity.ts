@@ -1,4 +1,4 @@
-import { MessageTypeEnum } from 'src/common/enum';
+import { MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -42,6 +42,16 @@ export class MessageEntity extends BaseModel {
   @JoinColumn({ name: 'senderId' })
   sender: UserEntity;
 
-  @Column({ type: 'json', nullable: true })
+  @Column({ type: 'json' })
   readBy: string[];
+
+  @Column({
+    type: 'enum',
+    enum: MessageStatusEnum,
+    default: MessageStatusEnum.SENT,
+  })
+  status: MessageStatusEnum;
+
+  @Column({ type: 'json' })
+  deliveredTo: string[];
 }

@@ -2,11 +2,18 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 
-import { ConversationTypeEnum, MediaTypeEnum, MessageTypeEnum } from 'src/common/enum';
+import {
+  ConversationTypeEnum,
+  MediaTypeEnum,
+  MessageStatusEnum,
+  MessageTypeEnum,
+} from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import { SocketStateService } from 'src/common/websocket/socket-state.service';
+import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
 import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
@@ -32,6 +39,7 @@ export class ChatService {
     private dataSource: DataSource,
     private readonly userService: UserService,
     private readonly socketStateService: SocketStateService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
   private readonly logger = new Logger(ChatService.name, {
     timestamp: true,
@@ -56,6 +64,9 @@ export class ChatService {
         content: dto.content,
         type: dto.type,
         metadata: dto.metadata,
+        readBy: [],
+        deliveredTo: [],
+        status: MessageStatusEnum.SENT,
       });
       const savedMessage = await queryRunner.manager.save(message);
 
@@ -144,20 +155,54 @@ export class ChatService {
 
     const result = await helper.getPaginated(pagination);
 
+    const readerIds = new Set<string>();
+    result.data.forEach((msg: any) => {
+      if (Array.isArray(msg.readBy)) {
+        (msg.readBy as string[]).forEach((id: string) => {
+          if (id !== userId) readerIds.add(id);
+        });
+      }
+    });
+
+    const userMap = new Map<string, UserEntity>();
+    if (readerIds.size > 0) {
+      const users = await this.userService.getBasicUsersInfo(Array.from(readerIds));
+      users.forEach((u) => userMap.set(u.id, u));
+    }
+
     const finalData = result.data.map((msg: any) => {
       const sender = msg.sender;
       const avatarUrl = sender?.avatarMedia?.file?.url || null;
+      if (sender) delete sender.avatarMedia;
+      const cleanSender = { ...sender, avatar: avatarUrl };
 
-      if (sender) {
-        delete sender.avatarMedia;
+      const computedStatus = this.computeStatus(msg, userId);
+
+      let readByUsers: { id: string; name: string; avatar: string | null }[] = [];
+
+      if (Array.isArray(msg.readBy)) {
+        readByUsers = (msg.readBy as string[])
+          .map((id: string) => {
+            const u = userMap.get(id);
+            if (!u) return null;
+            const userWithAvatar = u as any;
+
+            return {
+              id: u.id,
+              name: u.name,
+              avatar: userWithAvatar.avatarMedia?.file?.url || null,
+            };
+          })
+          .filter(
+            (item): item is { id: string; name: string; avatar: string | null } => item !== null,
+          );
       }
 
       return {
         ...msg,
-        sender: {
-          ...sender,
-          avatar: avatarUrl,
-        },
+        sender: cleanSender,
+        status: computedStatus,
+        readByUsers: readByUsers,
       };
     });
 
@@ -210,6 +255,7 @@ export class ChatService {
         str: 'mp.userId = :userId',
         params: { userId },
       })
+      .addSelect(['mp.isAdmin', 'mp.isMuted', 'mp.joinedAt', 'mp.lastReadAt'])
       .mapOneWithSubQuery({
         mapTo: 'partnerUser',
         entity: UserEntity,
@@ -237,6 +283,7 @@ export class ChatService {
           .select('COUNT(m.id)', 'count')
           .from(MessageEntity, 'm')
           .where(`m.conversationId = ${parentAlias}.id`)
+          .andWhere('m.senderId != :userId')
           .andWhere('m.createdAt > mp.lastReadAt');
       });
 
@@ -258,7 +305,7 @@ export class ChatService {
       query.sort = 'lastMessageAt:DESC';
     }
 
-    const result = await helper.getPaginated(query);
+    const result = await helper.getPaginatedRaw(query);
 
     const partnerIds = result.data
       .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
@@ -267,6 +314,7 @@ export class ChatService {
     const onlineSet = await this.socketStateService.getOnlineUsers(partnerIds);
 
     const finalData = result.data.map((conv: any) => {
+      const myParticipant = conv.participants?.[0];
       let isOnline = false;
       let avatar = null;
       if (conv.type === ConversationTypeEnum.DIRECT && conv.partnerUser) {
@@ -278,9 +326,17 @@ export class ChatService {
 
       delete conv.partner;
       delete conv.partnerUser;
+      delete conv.participants;
 
-      conv.unreadCount = parseInt(conv.unreadCount || '0');
-      return { ...conv, isOnline, avatar };
+      return {
+        ...conv,
+        isOnline,
+        avatar,
+        isAdmin: myParticipant?.isAdmin || false,
+        isMuted: myParticipant?.isMuted || false,
+        joinedAt: myParticipant?.joinedAt || new Date(),
+        lastReadAt: myParticipant?.lastReadAt,
+      };
     });
 
     return { ...result, data: finalData };
@@ -370,7 +426,101 @@ export class ChatService {
     const label = '[markConversationAsRead]';
     const { conversationId, userId } = payload;
     this.logger.debug(`${label} conversationId -> ${conversationId}`);
-    await this.partRepository.update({ conversationId, userId }, { lastReadAt: new Date() });
+
+    const now = new Date();
+
+    await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
+
+    await this.msgRepository
+      .createQueryBuilder()
+      .update(MessageEntity)
+      .set({
+        readBy: () => `JSON_ARRAY_APPEND(COALESCE(readBy, JSON_ARRAY()), '$', '${userId}')`,
+      })
+      .where('conversationId = :conversationId', { conversationId })
+      .andWhere('senderId != :userId', { userId })
+      .andWhere(`NOT JSON_CONTAINS(readBy, '"${userId}"', '$')`)
+      .execute();
+
+    const users = await this.userService.getBasicUsersInfo([userId]);
+    const user = users[0];
+
+    const userReaderInfo = user
+      ? {
+          id: user.id,
+          name: user.name,
+          avatar: (user as any).avatarMedia?.file?.url || null,
+        }
+      : { id: userId, name: 'Unknown', avatar: null };
+
+    const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo);
+    this.eventEmitter.emit(ChatEventEnum.MESSAGE_READ, event);
+
     return { success: true };
+  }
+
+  async markAsDelivered(payload: { userId: string; messageId: string }) {
+    const { userId, messageId } = payload;
+
+    await this.msgRepository
+      .createQueryBuilder()
+      .update(MessageEntity)
+      .set({
+        deliveredTo: () =>
+          `JSON_ARRAY_APPEND(COALESCE(deliveredTo, JSON_ARRAY()), '$', '${userId}')`,
+      })
+      .where('id = :messageId', { messageId })
+      .andWhere('senderId != :userId', { userId })
+      .andWhere(`NOT JSON_CONTAINS(deliveredTo, '"${userId}"', '$')`)
+      .execute();
+
+    return { success: true };
+  }
+
+  private computeStatus(msg: MessageEntity, currentUserId: string): MessageStatusEnum {
+    if (msg.status === MessageStatusEnum.REMOVED) return MessageStatusEnum.REMOVED;
+    if (msg.status === MessageStatusEnum.FAILED) return MessageStatusEnum.FAILED;
+
+    if (msg.senderId !== currentUserId) return MessageStatusEnum.READ;
+
+    const hasRead = msg.readBy?.some((id) => id !== currentUserId);
+    if (hasRead) return MessageStatusEnum.READ;
+
+    const hasDelivered = msg.deliveredTo?.some((id) => id !== currentUserId);
+    if (hasDelivered) return MessageStatusEnum.DELIVERED;
+
+    return MessageStatusEnum.SENT;
+  }
+
+  async processUndeliveredMessages(userId: string) {
+    const pendingMessages = await this.msgRepository
+      .createQueryBuilder('m')
+      .select(['m.id', 'm.conversationId', 'm.senderId'])
+      .where('m.senderId != :userId', { userId })
+      .andWhere(`NOT JSON_CONTAINS(COALESCE(m.deliveredTo, JSON_ARRAY()), '"${userId}"', '$')`)
+      .getMany();
+
+    if (pendingMessages.length === 0) return {};
+
+    await this.msgRepository
+      .createQueryBuilder()
+      .update(MessageEntity)
+      .set({
+        deliveredTo: () =>
+          `JSON_ARRAY_APPEND(COALESCE(deliveredTo, JSON_ARRAY()), '$', '${userId}')`,
+      })
+      .whereInIds(pendingMessages.map((m) => m.id))
+      .execute();
+
+    const groupedResult: Record<string, string[]> = {};
+
+    pendingMessages.forEach((msg) => {
+      if (!groupedResult[msg.conversationId]) {
+        groupedResult[msg.conversationId] = [];
+      }
+      groupedResult[msg.conversationId].push(msg.id);
+    });
+
+    return groupedResult;
   }
 }

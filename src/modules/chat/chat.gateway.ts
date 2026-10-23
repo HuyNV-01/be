@@ -1,10 +1,12 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { HttpStatus } from '@nestjs/common';
-import { OnEvent } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { ConnectedSocket, MessageBody, SubscribeMessage } from '@nestjs/websockets';
 
 import { AppGateway } from 'src/common/decorators/app-gateway.decorator';
+import { MessageStatusEnum } from 'src/common/enum';
 import { SocketStateService } from 'src/common/websocket/socket-state.service';
+import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
 import {
   ContactEventEnum,
   ContactRemovedEvent,
@@ -24,6 +26,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   constructor(
     socketStateService: SocketStateService,
     private readonly chatService: ChatService,
+    private readonly eventEmitter: EventEmitter2,
   ) {
     super(socketStateService, ChatGateway.name);
   }
@@ -31,6 +34,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   async handleUserOnline(userId: string) {
     const recipientIds = await this.chatService.getRelatedUserIds(userId);
     this.broadcastStatus(userId, true, recipientIds);
+    this.syncUndeliveredMessages(userId);
   }
 
   async handleUserOffline(userId: string) {
@@ -98,6 +102,68 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     };
   }
 
+  @SubscribeMessage('message_received')
+  async handleMessageReceived(
+    @MessageBody() payload: { conversationId: string; messageId: string },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    try {
+      const userId = client.data.user.id;
+
+      await this.chatService.markAsDelivered({
+        userId,
+        messageId: payload.messageId,
+      });
+
+      const updatePayload = {
+        id: payload.messageId,
+        conversationId: payload.conversationId,
+        status: MessageStatusEnum.DELIVERED,
+        userId: userId,
+        timestamp: new Date().toISOString(),
+      };
+
+      this.server
+        .to(`conversation:${payload.conversationId}`)
+        .emit('message_status_update', updatePayload);
+
+      return { status: HttpStatus.OK };
+    } catch (error) {
+      this.logger.error(`Error Message Received: ${error}`);
+    }
+  }
+
+  @SubscribeMessage('ack_pending_messages')
+  async handleAckPendingMessages(@ConnectedSocket() client: AuthenticatedSocket) {
+    const userId = client.data.user.id;
+    this.logger.debug(`[AckPending] User ${userId} requested sync via Inbox`);
+
+    await this.syncUndeliveredMessages(userId);
+
+    return { status: HttpStatus.OK };
+  }
+
+  @OnEvent(ChatEventEnum.MESSAGE_READ)
+  handleInternalMessageRead(event: ChatMessageReadEvent) {
+    this.server.to(`conversation:${event.conversationId}`).emit('message_read', {
+      conversationId: event.conversationId,
+      userId: event.userId,
+      user: event.user,
+      lastReadAt: event.lastReadAt.toISOString(),
+    });
+  }
+
+  @SubscribeMessage('mark_read')
+  async handleMarkRead(
+    @MessageBody() payload: { conversationId: string },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    await this.chatService.markConversationAsRead({
+      userId: client.data.user.id,
+      conversationId: payload.conversationId,
+    });
+  }
+
   @SubscribeMessage('typing')
   handleTyping(
     @MessageBody() payload: { conversationId: string; isTyping: boolean },
@@ -140,5 +206,32 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       removerId: event.removerId,
       timestamp: event.timestamp,
     });
+  }
+
+  private async syncUndeliveredMessages(userId: string) {
+    try {
+      const groupedMessages = await this.chatService.processUndeliveredMessages(userId);
+      const conversationIds = Object.keys(groupedMessages);
+
+      if (conversationIds.length === 0) return;
+
+      conversationIds.forEach((convId) => {
+        const messageIds = groupedMessages[convId];
+
+        const batchPayload = {
+          conversationId: convId,
+          messageIds: messageIds,
+          status: MessageStatusEnum.DELIVERED,
+          userId: userId,
+          updatedAt: new Date().toISOString(),
+        };
+
+        this.server.to(`conversation:${convId}`).emit('message_status_update_batch', batchPayload);
+      });
+
+      this.logger.log(`Synced batch messages for user ${userId}`);
+    } catch (error) {
+      this.logger.error(`Error syncing: ${error}`);
+    }
   }
 }

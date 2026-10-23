@@ -18,6 +18,8 @@ export interface PaginatedResult<T> {
   meta: { total: number; page: number; limit: number; totalPages: number };
 }
 
+export type RawParseType = 'int' | 'float' | 'bool' | 'date' | 'string' | 'json';
+
 export interface ComplexMapConfig<T> {
   mapTo: keyof T | string;
   entity: EntityTarget<any>;
@@ -541,6 +543,132 @@ export class AdvancedQueryHelper<T extends ObjectLiteral> {
         totalPages: isNoLimit || limit === 0 ? 1 : Math.ceil(total / limit),
       },
     };
+  }
+
+  async getPaginatedRaw<R = T>(
+    options: PaginationOptions,
+    parseMap?: Record<string, RawParseType>,
+  ): Promise<PaginatedResult<R>> {
+    const page = Math.max(1, Number(options.page) || 1);
+    const limit = Number(options.limit) || 10;
+    const isNoLimit = limit === 0;
+
+    if (options.sort) {
+      options.sort.split(',').forEach((s) => {
+        const [f, o] = s.split(':');
+        if (f) {
+          const col = f.includes('.') ? f : `${this.qb.alias}.${f}`;
+          this.qb.addOrderBy(col, o?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC');
+        }
+      });
+    } else {
+      if (!Object.keys(this.qb.expressionMap.orderBys).length) {
+        this.qb.addOrderBy(`${this.qb.alias}.createdAt`, 'DESC');
+      }
+    }
+
+    const countQuery = this.qb.clone();
+    countQuery.expressionMap.selects = [];
+    countQuery.expressionMap.orderBys = {};
+    countQuery.select(`COUNT(DISTINCT ${this.qb.alias}.id)`, 'total');
+    const countResult = await countQuery.getRawOne();
+
+    const totalStr = countResult ? (countResult['total'] as string) : '0';
+    const total = parseInt(totalStr, 10);
+
+    if (!isNoLimit) {
+      this.qb.offset((page - 1) * limit).limit(limit);
+    }
+
+    const { entities, raw } = await this.qb.getRawAndEntities();
+
+    const alias = this.qb.alias;
+    const rawIdKey = `${alias}_id`;
+    const rawMap = new Map<string, ObjectLiteral>();
+
+    (raw as ObjectLiteral[]).forEach((r) => {
+      const idVal = (r[rawIdKey] || r['id']) as string;
+      if (idVal) rawMap.set(idVal, r);
+    });
+
+    const mergedData: R[] = entities.map((entity) => {
+      const entityId = (entity as any).id as string;
+      const rawRow = rawMap.get(entityId);
+
+      if (!rawRow) return entity as unknown as R;
+
+      const computedProps: Record<string, unknown> = {};
+
+      if (parseMap) {
+        Object.keys(parseMap).forEach((key) => {
+          const rawValue = rawRow[key];
+          if (rawValue !== undefined && rawValue !== null) {
+            computedProps[key] = this.parseValue(rawValue, parseMap[key], key);
+          }
+        });
+      } else {
+        Object.keys(rawRow).forEach((key) => {
+          if (key === rawIdKey || key === 'id') return;
+
+          if (key.startsWith(`${alias}_`)) return;
+
+          if (key.includes('_')) return;
+
+          if (Object.prototype.hasOwnProperty.call(entity, key)) return;
+
+          computedProps[key] = rawRow[key];
+        });
+      }
+
+      return { ...entity, ...computedProps } as unknown as R;
+    });
+
+    return {
+      data: mergedData,
+      meta: {
+        total,
+        page,
+        limit: isNoLimit ? total : limit,
+        totalPages: isNoLimit || limit === 0 ? 1 : Math.ceil(total / limit),
+      },
+    };
+  }
+
+  private parseValue(value: any, type: RawParseType, keyName: string): any {
+    if (type === 'string') return String(value);
+
+    if (typeof value === 'string') {
+      switch (type) {
+        case 'int':
+          return parseInt(value, 10);
+        case 'float':
+          return parseFloat(value);
+        case 'bool':
+          return value === 'true' || value === '1';
+        case 'date':
+          return new Date(value);
+        case 'json':
+          try {
+            return JSON.parse(value);
+          } catch (e) {
+            this.logger.warn(
+              `Failed to parse JSON for key '${keyName}'. Value: ${value} - Error: ${e}`,
+            );
+            return null;
+          }
+      }
+    }
+
+    if (typeof value === 'number') {
+      if (type === 'bool') return Boolean(value);
+      if (type === 'date') return new Date(value);
+    }
+
+    if (typeof value === 'object' && type === 'json') {
+      return value;
+    }
+
+    return value;
   }
 
   getBuilder(): SelectQueryBuilder<T> {

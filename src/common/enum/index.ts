@@ -45,3 +45,11 @@ export enum SortTypeEnum {
   ASC = 'ASC',
   DESC = 'DESC',
 }
+
+export enum MessageStatusEnum {
+  SENT = 'sent',
+  DELIVERED = 'delivered',
+  READ = 'read',
+  FAILED = 'failed',
+  REMOVED = 'removed',
+}

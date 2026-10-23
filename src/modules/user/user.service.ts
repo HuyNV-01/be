@@ -222,4 +222,26 @@ export class UserService {
       hardDelete: true,
     });
   }
+
+  async getBasicUsersInfo(userIds: string[]): Promise<UserEntity[]> {
+    if (!userIds || userIds.length === 0) {
+      return [];
+    }
+
+    const users = await this.userRepository
+      .createQueryBuilder('u')
+      .where('u.id IN (:...userIds)', { userIds })
+      .select(['u.id', 'u.name'])
+      .leftJoinAndMapOne(
+        'u.avatarMedia',
+        MediaEntity,
+        'media',
+        'media.targetId = u.id AND media.type = :avatarType',
+        { avatarType: MediaTypeEnum.USER_AVATAR },
+      )
+      .leftJoinAndSelect('media.file', 'file')
+      .getMany();
+
+    return users;
+  }
 }
