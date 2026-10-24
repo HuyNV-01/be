@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { FileEntity } from 'src/entity/file.entity';
-import type { IStorageProvider } from 'src/interface/storage.interface';
-import { In, IsNull, LessThan, Repository } from 'typeorm';
+import { IsNull, LessThan, Repository } from 'typeorm';
+
+import { FilesService } from '../files.service';
 
 @Injectable()
 export class FileCleanupService {
@@ -13,8 +14,7 @@ export class FileCleanupService {
   constructor(
     @InjectRepository(FileEntity)
     private readonly fileRepo: Repository<FileEntity>,
-    @Inject('STORAGE_PROVIDER')
-    private readonly storageProvider: IStorageProvider,
+    private readonly filesService: FilesService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_2AM)
@@ -31,14 +31,8 @@ export class FileCleanupService {
 
     if (!expiredFiles.length) return;
 
-    const filesByBucket = this.groupFilesByBucket(expiredFiles);
-
-    for (const [bucket, paths] of Object.entries(filesByBucket)) {
-      await this.storageProvider.deleteMany(paths, bucket);
-    }
-
     const idsToDelete = expiredFiles.map((f) => f.id);
-    await this.fileRepo.softDelete({ id: In(idsToDelete) });
+    await this.filesService.hardDeleteMany(idsToDelete);
 
     this.logger.log(`[Cron] Cleaned ${expiredFiles.length} expired files.`);
   }
@@ -52,40 +46,18 @@ export class FileCleanupService {
 
     const orphanFiles = await this.fileRepo
       .createQueryBuilder('f')
+      .withDeleted()
       .leftJoin('media', 'm', 'm.file_id = f.id AND m.deleted_at IS NULL')
       .where('m.id IS NULL')
       .andWhere('f.created_at < :safeDate', { safeDate })
-      .andWhere('f.deleted_at IS NULL')
       .take(500)
       .getMany();
 
     if (!orphanFiles.length) return;
 
-    const filesByBucket = this.groupFilesByBucket(orphanFiles);
+    const orphanIds = orphanFiles.map((f) => f.id);
+    await this.filesService.hardDeleteMany(orphanIds);
 
-    for (const [bucket, paths] of Object.entries(filesByBucket)) {
-      try {
-        await this.storageProvider.deleteMany(paths, bucket);
-      } catch (error) {
-        this.logger.error(`Failed to delete files in bucket ${bucket}`, error);
-      }
-    }
-
-    await this.fileRepo.remove(orphanFiles);
-
-    this.logger.log(`[Cron] Garbage Collected ${orphanFiles.length} files.`);
-  }
-
-  private groupFilesByBucket(files: FileEntity[]): Record<string, string[]> {
-    return files.reduce(
-      (acc, file) => {
-        if (!acc[file.bucket]) {
-          acc[file.bucket] = [];
-        }
-        acc[file.bucket].push(file.path);
-        return acc;
-      },
-      {} as Record<string, string[]>,
-    );
+    this.logger.log(`[Cron] Garbage Collected ${orphanFiles.length} orphan/soft-deleted files.`);
   }
 }

@@ -80,10 +80,23 @@ export class FileValidators {
               maxSize: FILE_CONFIG.VIDEO.MAX_SIZE,
             },
             {
+              fileType: FILE_CONFIG.AUDIO.MIME_TYPE,
+              maxSize: FILE_CONFIG.AUDIO.MAX_SIZE,
+            },
+            {
               fileType: FILE_CONFIG.DOCS.MIME_TYPE,
               maxSize: FILE_CONFIG.DOCS.MAX_SIZE,
             },
+            {
+              fileType: FILE_CONFIG.EXCEL.MIME_TYPE,
+              maxSize: FILE_CONFIG.EXCEL.MAX_SIZE,
+            },
+            {
+              fileType: FILE_CONFIG.MESSAGE_ATTACHMENT.MIME_TYPE,
+              maxSize: FILE_CONFIG.MESSAGE_ATTACHMENT.MAX_SIZE,
+            },
           ],
+          errorMessage: FILE_CONFIG.MESSAGE_ATTACHMENT.ERROR_MSG,
         }),
       )
       .build({
@@ -99,29 +112,19 @@ export class FileValidators {
     const { required = true, maxSize, fileType, errorMessage = 'Invalid file type' } = options;
 
     return new ParseFilePipeBuilder()
-
-      .addFileTypeValidator({
-        fileType: fileType,
-      })
-
-      .addMaxSizeValidator({
-        maxSize: maxSize,
-        message: (maxSize) => `File is too large! Max allowed size is ${maxSize / 1024 / 1024}MB`,
-      })
-
+      .addValidator(
+        new SmartContentValidator({
+          rules: [{ fileType, maxSize }],
+          errorMessage,
+        }),
+      )
       .build({
         errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
         fileIsRequired: required,
-
         exceptionFactory: (error) => {
-          if (error.includes('expected type is')) {
-            return new UnprocessableEntityException(errorMessage);
-          }
-
           if (error.includes('File is required')) {
             return new UnprocessableEntityException('File attachment is required');
           }
-
           return new UnprocessableEntityException(error);
         },
       });

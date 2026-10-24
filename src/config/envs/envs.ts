@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import 'dotenv/config';
 import * as joi from 'joi';
+import { FileProviderEnum } from 'src/common/enum';
 import { EnvConfig } from 'src/types/envs';
 
 const envVarsSchema = joi
@@ -15,6 +16,7 @@ const envVarsSchema = joi
     MYSQL_HOST: joi.string().required(),
     REDIS_HOST: joi.string().required(),
     REDIS_PORT: joi.number().required(),
+    REDIS_PASSWORD: joi.string().optional().allow(''),
     BCRYPT_SALT_ROUND: joi.number().required(),
     JWT_SECRET: joi.string().required(),
     JWT_EXPIRES_IN: joi.string().required(),
@@ -28,6 +30,21 @@ const envVarsSchema = joi
     GOOGLE_CLIENT_ID: joi.string().required(),
     GOOGLE_CLIENT_SECRET: joi.string().required(),
     GOOGLE_CALLBACK_URL: joi.string().required(),
+
+    STORAGE_PROVIDER: joi
+      .string()
+      .valid(...Object.values(FileProviderEnum))
+      .optional(),
+    STORAGE_BUCKET: joi.string().optional(),
+    STORAGE_REGION: joi.string().default('ap-southeast-1'),
+    STORAGE_ENDPOINT: joi.string().optional().allow(''),
+    STORAGE_PUBLIC_ENDPOINT: joi.string().optional().allow(''),
+    STORAGE_ACCESS_KEY: joi.string().optional().allow(''),
+    STORAGE_SECRET_KEY: joi.string().optional().allow(''),
+    STORAGE_FORCE_PATH_STYLE: joi.boolean().default(true),
+    STORAGE_AUTO_CREATE_BUCKET: joi.boolean().default(true),
+    STORAGE_LOCAL_DIR: joi.string().default('uploads'),
+    STORAGE_SIGNING_SECRET: joi.string().optional(),
   })
   .unknown(true)
   .required();
@@ -51,6 +68,7 @@ export const envs = {
   host: envVars.MYSQL_HOST,
   redisHost: envVars.REDIS_HOST,
   redisPort: envVars.REDIS_PORT,
+  redisPassword: envVars.REDIS_PASSWORD,
   bcryptSaltRound: envVars.BCRYPT_SALT_ROUND,
   jwtSecret: envVars.JWT_SECRET,
   jwtExpiresIn: envVars.JWT_EXPIRES_IN,
@@ -64,4 +82,25 @@ export const envs = {
   googleClientId: envVars.GOOGLE_CLIENT_ID,
   googleClientSecret: envVars.GOOGLE_CLIENT_SECRET,
   googleCallbackUrl: envVars.GOOGLE_CALLBACK_URL,
+
+  storage: {
+    provider:
+      envVars.STORAGE_PROVIDER ||
+      (envVars.AWS_ENDPOINT ? FileProviderEnum.SEAWEEDFS : FileProviderEnum.LOCAL),
+    bucket: envVars.STORAGE_BUCKET || envVars.AWS_BUCKET_NAME || 'app-bucket',
+    region: envVars.STORAGE_REGION || envVars.AWS_REGION || 'ap-southeast-1',
+    endpoint: envVars.STORAGE_ENDPOINT || envVars.AWS_ENDPOINT || 'http://localhost:8333',
+    publicEndpoint:
+      envVars.STORAGE_PUBLIC_ENDPOINT ||
+      envVars.AWS_PUBLIC_ENDPOINT ||
+      envVars.STORAGE_ENDPOINT ||
+      envVars.AWS_ENDPOINT ||
+      envVars.APP_URL,
+    accessKey: envVars.STORAGE_ACCESS_KEY || envVars.AWS_ACCESS_KEY_ID || 'seaweedadmin',
+    secretKey: envVars.STORAGE_SECRET_KEY || envVars.AWS_SECRET_ACCESS_KEY || 'seaweedsecret123',
+    forcePathStyle: envVars.STORAGE_FORCE_PATH_STYLE ?? true,
+    autoCreateBucket: envVars.STORAGE_AUTO_CREATE_BUCKET ?? true,
+    localDir: envVars.STORAGE_LOCAL_DIR || 'uploads',
+    signingSecret: envVars.STORAGE_SIGNING_SECRET || envVars.JWT_SECRET,
+  },
 };

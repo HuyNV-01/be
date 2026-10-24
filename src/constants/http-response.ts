@@ -161,4 +161,27 @@ export const HTTP_RESPONSE = {
       code: 5005,
     },
   },
+
+  FILE: {
+    NOT_FOUND: {
+      message: 'File not found',
+      code: 6000,
+    },
+    UPLOAD_FAILED: {
+      message: 'File upload failed',
+      code: 6001,
+    },
+    INVALID_SIGNATURE: {
+      message: 'File signature does not match its declared extension or MIME type',
+      code: 6002,
+    },
+    EXPIRED_OR_INVALID_TOKEN: {
+      message: 'Signed file URL is invalid or has expired',
+      code: 6003,
+    },
+    OBJECT_NOT_UPLOADED: {
+      message: 'Target object has not been uploaded to storage yet',
+      code: 6004,
+    },
+  },
 };

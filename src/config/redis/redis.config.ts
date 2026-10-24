@@ -5,10 +5,13 @@ import { envs } from '../envs';
 
 export const redisConfig = {
   host: envs.redisHost || HOST_DEFAULT,
-  port: envs.redisPort || PORT_REDIS_DEFAULT,
+  port: Number(envs.redisPort || PORT_REDIS_DEFAULT),
+  password: envs.redisPassword || undefined,
 };
 
-export const redisUrl = `redis://${redisConfig.host}:${redisConfig.port}`;
+const authSegment = redisConfig.password ? `:${encodeURIComponent(redisConfig.password)}@` : '';
+
+export const redisUrl = `redis://${authSegment}${redisConfig.host}:${redisConfig.port}`;
 
 export const redisType = {
   single: 'single',
@@ -18,4 +21,7 @@ export const redisType = {
 export const redisOption: RedisModuleOptions = {
   type: redisType.single,
   url: redisUrl,
+  options: {
+    password: redisConfig.password,
+  },
 } as RedisModuleOptions;

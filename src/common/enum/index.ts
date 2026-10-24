@@ -29,9 +29,10 @@ export enum ContactStatusEnum {
 }
 
 export enum FileProviderEnum {
-  MINIO = 'MINIO',
-  S3 = 'S3',
   LOCAL = 'LOCAL',
+  SEAWEEDFS = 'SEAWEEDFS',
+  S3 = 'S3',
+  R2 = 'R2',
 }
 
 export enum MediaTypeEnum {

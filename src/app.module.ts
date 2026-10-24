@@ -17,7 +17,10 @@ import { redisConfig, redisOption } from './config/redis/redis.config';
 import { AuthModule } from './modules/auth/auth.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
+import { FilesModule } from './modules/files/files.module';
 import { MailModule } from './modules/mail/mail.module';
+import { MediaModule } from './modules/media/media.module';
+import { StorageModule } from './modules/storage/storage.module';
 import { UserModule } from './modules/user/user.module';
 import { parseExpiresIn } from './utils';
 
@@ -33,6 +36,7 @@ import { parseExpiresIn } from './utils';
       redis: {
         host: redisConfig.host,
         port: Number(redisConfig.port),
+        password: redisConfig.password,
       },
     }),
     JwtModule.register({
@@ -47,6 +51,9 @@ import { parseExpiresIn } from './utils';
     }),
     DatabaseConfigModule,
     DatabaseModule,
+    StorageModule,
+    FilesModule,
+    MediaModule,
     AuthModule,
     UserModule,
     MailModule,

@@ -12,10 +12,11 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { createClient } from 'redis';
 import { ServerOptions } from 'socket.io';
 import { envs } from 'src/config/envs';
+import { redisConfig, redisUrl } from 'src/config/redis/redis.config';
 import { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
 export class RedisIoAdapter extends IoAdapter {
-  private adapterConstructor: ReturnType<typeof createAdapter>;
+  private adapterConstructor: ReturnType<typeof createAdapter> | undefined;
   private readonly logger = new Logger(RedisIoAdapter.name);
 
   constructor(private app: INestApplicationContext) {
@@ -24,7 +25,8 @@ export class RedisIoAdapter extends IoAdapter {
 
   async connectToRedis(): Promise<void> {
     const pubClient = createClient({
-      url: `redis://${envs.redisHost}:${envs.redisPort}`,
+      url: redisUrl,
+      password: redisConfig.password,
     });
     const subClient = pubClient.duplicate();
 
@@ -35,7 +37,7 @@ export class RedisIoAdapter extends IoAdapter {
 
     this.adapterConstructor = createAdapter(pubClient, subClient);
     this.logger.log(
-      `Redis Adapter initialized for Socket.io at ${envs.redisHost}:${envs.redisPort}`,
+      `Redis Adapter initialized for Socket.io at ${redisConfig.host}:${redisConfig.port}`,
     );
   }
 
