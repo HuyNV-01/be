@@ -43,7 +43,7 @@ import {
   ReactMessageDto,
   RegisterPublicKeyDto,
 } from 'src/dto/chat/call-and-security.dto';
-import { CreateGroupDto } from 'src/dto/chat/chat.dto';
+import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import * as queryTypes from 'src/types/query.types';
 
@@ -436,6 +436,44 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
       data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'Send a message via HTTP REST (Automatic Fallback when Socket is reconnecting)',
+  })
+  @ApiBody({ type: SendMessageDto })
+  @Post('messages')
+  @HttpCode(HttpStatus.CREATED)
+  async sendMessageHttpFallback(@Req() req, @Body() dto: SendMessageDto) {
+    const { message, recipientIds } = await this.chatService.sendMessage({
+      senderId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      dto.conversationId,
+      SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+      message,
+    );
+
+    recipientIds.forEach((uid) => {
+      if (uid !== req.user.id) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+          message,
+        );
+      }
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: message,
     };
   }
 }

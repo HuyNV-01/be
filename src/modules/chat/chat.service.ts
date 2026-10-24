@@ -485,12 +485,16 @@ export class ChatService {
   }
 
   getWebRtcIceServers(userId: string) {
+    const chatConfig = (envs as any).chat;
     return this.messageCryptoService.generateIceServers({
       userId,
-      stunUrls: envs.chat.stunUrls,
-      turnUrls: envs.chat.turnUrls,
-      turnSecret: envs.chat.turnSecret,
-      ttlSeconds: envs.chat.turnTtl,
+      stunUrls: chatConfig?.stunUrls || [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+      ],
+      turnUrls: chatConfig?.turnUrls || [],
+      turnSecret: chatConfig?.turnSecret || envs.jwtSecret,
+      ttlSeconds: chatConfig?.turnTtl || 86400,
     });
   }
 
