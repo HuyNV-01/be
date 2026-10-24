@@ -18,7 +18,25 @@ export enum MessageTypeEnum {
   TEXT = 'TEXT',
   IMAGE = 'IMAGE',
   FILE = 'FILE',
+  AUDIO = 'AUDIO',
+  VIDEO = 'VIDEO',
+  CALL = 'CALL',
   SYSTEM = 'SYSTEM',
+}
+
+export enum CallTypeEnum {
+  AUDIO = 'AUDIO',
+  VIDEO = 'VIDEO',
+}
+
+export enum CallStatusEnum {
+  RINGING = 'RINGING',
+  ONGOING = 'ONGOING',
+  COMPLETED = 'COMPLETED',
+  MISSED = 'MISSED',
+  REJECTED = 'REJECTED',
+  BUSY = 'BUSY',
+  CANCELLED = 'CANCELLED',
 }
 
 export enum ContactStatusEnum {

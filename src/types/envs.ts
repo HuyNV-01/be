@@ -44,4 +44,10 @@ export type EnvConfig = {
   AWS_PUBLIC_ENDPOINT?: string;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
+
+  CHAT_ENCRYPTION_KEY?: string;
+  WEBRTC_STUN_URLS?: string;
+  WEBRTC_TURN_URLS?: string;
+  WEBRTC_TURN_SECRET?: string;
+  WEBRTC_TURN_TTL?: number;
 };

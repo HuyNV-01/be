@@ -1,4 +1,5 @@
 import { MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
+import * as messageInterface from 'src/interface/message.interface';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -6,6 +7,7 @@ import { ConversationEntity } from './conversation.entity';
 import { UserEntity } from './user.entity';
 
 @Entity('messages')
+@Index(['conversationId', 'createdAt'])
 export class MessageEntity extends BaseModel {
   @Column({ type: 'text', nullable: true })
   content: string;
@@ -18,12 +20,7 @@ export class MessageEntity extends BaseModel {
   type: MessageTypeEnum;
 
   @Column({ type: 'json', nullable: true })
-  metadata: {
-    fileName?: string;
-    fileSize?: number;
-    width?: number;
-    height?: number;
-  };
+  metadata: messageInterface.MessageMetadata;
 
   @Column()
   @Index()

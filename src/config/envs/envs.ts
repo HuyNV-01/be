@@ -45,6 +45,14 @@ const envVarsSchema = joi
     STORAGE_AUTO_CREATE_BUCKET: joi.boolean().default(true),
     STORAGE_LOCAL_DIR: joi.string().default('uploads'),
     STORAGE_SIGNING_SECRET: joi.string().optional(),
+
+    CHAT_ENCRYPTION_KEY: joi.string().optional(),
+    WEBRTC_STUN_URLS: joi
+      .string()
+      .default('stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302'),
+    WEBRTC_TURN_URLS: joi.string().optional().allow(''),
+    WEBRTC_TURN_SECRET: joi.string().optional().allow(''),
+    WEBRTC_TURN_TTL: joi.number().default(86400),
   })
   .unknown(true)
   .required();
@@ -102,5 +110,21 @@ export const envs = {
     autoCreateBucket: envVars.STORAGE_AUTO_CREATE_BUCKET ?? true,
     localDir: envVars.STORAGE_LOCAL_DIR || 'uploads',
     signingSecret: envVars.STORAGE_SIGNING_SECRET || envVars.JWT_SECRET,
+  },
+
+  chat: {
+    encryptionKey: envVars.CHAT_ENCRYPTION_KEY || envVars.JWT_SECRET,
+    stunUrls: (
+      envVars.WEBRTC_STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302'
+    )
+      .split(',')
+      .map((u) => u.trim())
+      .filter(Boolean),
+    turnUrls: (envVars.WEBRTC_TURN_URLS || '')
+      .split(',')
+      .map((u) => u.trim())
+      .filter(Boolean),
+    turnSecret: envVars.WEBRTC_TURN_SECRET || envVars.JWT_SECRET,
+    turnTtl: Number(envVars.WEBRTC_TURN_TTL || 86400),
   },
 };
