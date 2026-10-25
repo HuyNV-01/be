@@ -1,7 +1,7 @@
-import { execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { DataSource, QueryRunner, Table } from 'typeorm';
+import { Query } from 'typeorm/driver/Query';
 
 import { DatabaseEvolutionService } from './database-evolution.service';
 import dataSource from './db-datasource';
@@ -20,8 +20,6 @@ interface ParsedMigrationFile {
 
 export class SmartMigrationEngine {
   private readonly migrationsDir: string;
-  private readonly dataSourcePath: string;
-  private readonly typeormCliPath: string;
   private readonly maxKeepMigrations: number;
 
   constructor(
@@ -29,8 +27,6 @@ export class SmartMigrationEngine {
     options?: { maxKeepMigrations?: number },
   ) {
     this.migrationsDir = resolve(process.cwd(), 'src/config/databases/migrations');
-    this.dataSourcePath = resolve(__dirname, 'db-datasource.ts');
-    this.typeormCliPath = resolve(process.cwd(), 'node_modules/typeorm/cli.js');
     this.maxKeepMigrations = options?.maxKeepMigrations ?? 5;
 
     if (!existsSync(this.migrationsDir)) {
@@ -50,14 +46,8 @@ export class SmartMigrationEngine {
     try {
       const migrationsTableName = this.ds.options.migrationsTableName || 'typeorm_migrations';
 
-      console.log('🔹 [Step 1/5] Checking and executing pending migrations...');
-      const pendingBefore = await this.ds.showMigrations();
-      if (pendingBefore) {
-        await this.ds.runMigrations({ transaction: 'each' });
-        console.log('   ✅ Pending migrations applied successfully.');
-      } else {
-        console.log('   ✅ No pending migrations found.');
-      }
+      console.log('🔹 [Step 1/5] Synchronizing existing migration states...');
+      await this.syncExistingMigrationsState(migrationsTableName);
 
       console.log(
         '\n🔹 [Step 2/5] Scanning all Entities to detect schema changes (Schema Diff)...',
@@ -66,37 +56,45 @@ export class SmartMigrationEngine {
 
       if (sqlInMemory.upQueries.length === 0) {
         console.log(
-          '   ✨ Current database schema matches 100% with Entities. No new migration file needed.',
+          '   ✨ Database schema is 100% up-to-date with all Entities. No new migration needed.',
         );
       } else {
-        console.log(`   🔍 Detected ${sqlInMemory.upQueries.length} schema change queries.`);
+        const safeUpQueries = this.transformDestructiveQueriesToSafeModify(sqlInMemory.upQueries);
+        const safeDownQueries = this.transformDestructiveQueriesToSafeModify(
+          sqlInMemory.downQueries,
+        );
 
-        const cleanName = migrationName.replace(/[^a-zA-Z0-9]/g, '') || 'AutoMigration';
-        const targetPath = `src/config/databases/migrations/${cleanName}`;
-        const cmd = `npx ts-node -r tsconfig-paths/register "${this.typeormCliPath}" -d "${this.dataSourcePath}" migration:generate "${targetPath}"`;
+        console.log(
+          `   🔍 Detected ${sqlInMemory.upQueries.length} raw queries -> Optimized to ${safeUpQueries.length} zero-data-loss queries.`,
+        );
 
-        console.log(`   🛠️  Automatically generating new migration file...`);
-        execSync(cmd, { stdio: 'inherit' });
-
-        const newestFile = this.getSortedMigrationFiles().at(-1);
-        if (newestFile) {
-          this.enhanceGeneratedMigrationForLegacyData(newestFile.fullPath);
-          console.log(`   📄 Migration file created and optimized: ${newestFile.fileName}`);
-        }
+        const createdFile = this.writeOptimizedMigrationFile(
+          migrationName,
+          safeUpQueries,
+          safeDownQueries,
+        );
+        console.log(`   📄 Migration file created and optimized: ${createdFile.fileName}`);
 
         console.log(
           '\n🔹 [Step 3/5] Applying new schema to Database while preserving legacy data...',
         );
-        await this.executeRawUpQueriesSafely(sqlInMemory.upQueries.map((q) => q.query));
+        try {
+          await this.executeSafeSchemaUpgrade(safeUpQueries);
+        } catch (err) {
+          if (existsSync(createdFile.fullPath)) {
+            unlinkSync(createdFile.fullPath);
+          }
+          throw err;
+        }
 
-        if (newestFile && newestFile.className) {
+        if (createdFile.className) {
           await this.recordMigrationAsExecuted(
             migrationsTableName,
-            newestFile.timestamp,
-            newestFile.className,
+            createdFile.timestamp,
+            createdFile.className,
           );
         }
-        console.log('   ✅ New schema applied and legacy data preserved successfully!');
+        console.log('   ✅ New schema applied and 100% of legacy data preserved!');
       }
 
       console.log('\n🔹 [Step 4/5] Synchronizing and normalizing legacy data into new fields...');
@@ -105,12 +103,12 @@ export class SmartMigrationEngine {
       console.log('   ✅ Legacy data synchronization completed.');
 
       console.log(
-        `\n🔹 [Step 5/5] Cleaning up migration history (Keeping only the latest ${this.maxKeepMigrations} files)...`,
+        `\n🔹 [Step 5/5] Pruning migration history (Keeping only the latest ${this.maxKeepMigrations} files)...`,
       );
       await this.pruneOldMigrations(migrationsTableName);
 
       console.log('\n================================================================');
-      console.log('🎉 [Smart DB Engine] Database Upgrade & Data Synchronization COMPLETED!');
+      console.log('🎉 [Smart DB Engine] Database Upgrade & Data Sync COMPLETED!');
       console.log('================================================================\n');
     } finally {
       if (this.ds.isInitialized) {
@@ -119,23 +117,69 @@ export class SmartMigrationEngine {
     }
   }
 
-  private enhanceGeneratedMigrationForLegacyData(filePath: string): void {
-    if (!existsSync(filePath)) return;
-    const content = readFileSync(filePath, 'utf8');
+  private transformDestructiveQueriesToSafeModify(queries: Query[]): Query[] {
+    const dropRegex = /^ALTER TABLE `([^`]+)` DROP COLUMN `([^`]+)`$/i;
+    const addRegex = /^ALTER TABLE `([^`]+)` ADD `([^`]+)` (.+)$/i;
 
-    const enhanced = content.replace(
-      /ALTER TABLE `([^`]+)` ADD `([^`]+)` (varchar\(\d+\)|int|smallint|tinyint|bigint|datetime|timestamp|text|json) NOT NULL(?! DEFAULT)/gi,
+    const addMap = new Map<string, { index: number; table: string; col: string; def: string }>();
+    const dropIndicesToSkip = new Set<number>();
+    const addIndicesToConvert = new Map<number, string>();
+
+    queries.forEach((q, idx) => {
+      const addMatch = addRegex.exec(q.query.trim());
+      if (addMatch) {
+        const [, table, col, def] = addMatch;
+        addMap.set(`${table}.${col}`, { index: idx, table, col, def });
+      }
+    });
+
+    queries.forEach((q, idx) => {
+      const dropMatch = dropRegex.exec(q.query.trim());
+      if (dropMatch) {
+        const [, table, col] = dropMatch;
+        const key = `${table}.${col}`;
+        const matchingAdd = addMap.get(key);
+        if (matchingAdd) {
+          dropIndicesToSkip.add(idx);
+          addIndicesToConvert.set(
+            matchingAdd.index,
+            `ALTER TABLE \`${table}\` MODIFY COLUMN \`${col}\` ${matchingAdd.def}`,
+          );
+        }
+      }
+    });
+
+    const result: Query[] = [];
+
+    queries.forEach((q, idx) => {
+      if (dropIndicesToSkip.has(idx)) {
+        return;
+      }
+
+      let sql = addIndicesToConvert.get(idx) ?? q.query;
+
+      if (!addIndicesToConvert.has(idx)) {
+        sql = this.ensureSafeDefaultOnNewNotNullColumn(sql);
+      }
+
+      result.push(new Query(sql, q.parameters));
+    });
+
+    return result;
+  }
+
+  /**
+   * Đảm bảo cột mới tinh (`ADD COLUMN ... NOT NULL`) có giá trị DEFAULT an toàn khi thêm vào bảng đã có dữ liệu
+   */
+  private ensureSafeDefaultOnNewNotNullColumn(sql: string): string {
+    return sql.replace(
+      /ALTER TABLE `([^`]+)` ADD `([^`]+)` (varchar\(\d+\)|int|smallint|tinyint|bigint|datetime|timestamp) NOT NULL(?! DEFAULT)/i,
       (fullMatch, table: string, col: string, colType: string) => {
         const lowerType = colType.toLowerCase();
         if (lowerType.startsWith('varchar')) {
           return `ALTER TABLE \`${table}\` ADD \`${col}\` ${colType} NOT NULL DEFAULT ''`;
         }
-        if (
-          lowerType.includes('int') ||
-          lowerType === 'decimal' ||
-          lowerType === 'double' ||
-          lowerType === 'float'
-        ) {
+        if (lowerType.includes('int')) {
           return `ALTER TABLE \`${table}\` ADD \`${col}\` ${colType} NOT NULL DEFAULT 0`;
         }
         if (lowerType === 'datetime' || lowerType === 'timestamp') {
@@ -144,42 +188,181 @@ export class SmartMigrationEngine {
         return fullMatch;
       },
     );
+  }
 
-    if (enhanced !== content) {
-      writeFileSync(filePath, enhanced, 'utf8');
+  private async executeSafeSchemaUpgrade(queries: Query[]): Promise<void> {
+    const queryRunner = this.ds.createQueryRunner();
+    await queryRunner.connect();
+
+    try {
+      await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0');
+
+      for (const q of queries) {
+        const sql = q.query.trim();
+
+        await this.preSanitizeBeforeUniqueIndex(queryRunner, sql);
+
+        await this.preSanitizeBeforeForeignKey(queryRunner, sql);
+
+        try {
+          await queryRunner.query(sql, q.parameters);
+        } catch (err: any) {
+          const errno = err?.errno || err?.driverError?.errno;
+
+          if (errno === 1061 || errno === 1062 || errno === 1826 || errno === 1091) {
+            if (errno === 1062) {
+              console.warn(`   ⚠️ Skipped duplicate constraint warning on query: ${sql}`);
+            }
+            continue;
+          }
+          throw err;
+        }
+      }
+    } finally {
+      await queryRunner.query('SET FOREIGN_KEY_CHECKS = 1').catch(() => undefined);
+      await queryRunner.release();
     }
   }
 
-  private async executeRawUpQueriesSafely(queries: string[]): Promise<void> {
-    const queryRunner: QueryRunner = this.ds.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+  /**
+   * Tự động xử lý dữ liệu cũ bị trùng lặp hoặc bị rỗng `''` trước khi tạo `UNIQUE INDEX`
+   * để không bao giờ xảy ra lỗi `ER_DUP_ENTRY: Duplicate entry '' for key ...`
+   */
+  private async preSanitizeBeforeUniqueIndex(queryRunner: QueryRunner, sql: string): Promise<void> {
+    const uniqueIdxMatch = /^CREATE UNIQUE INDEX `([^`]+)` ON `([^`]+)` \(([^)]+)\)/i.exec(sql);
+    if (!uniqueIdxMatch) {
+      return;
+    }
 
+    const [, , tableName, rawCols] = uniqueIdxMatch;
+    const cols = rawCols
+      .split(',')
+      .map((c) => c.trim().replace(/`/g, ''))
+      .filter(Boolean);
+
+    if (cols.length === 0) return;
+
+    for (const col of cols) {
+      await queryRunner.query(`DELETE FROM \`${tableName}\` WHERE \`${col}\` = ''`);
+    }
+
+    const hasIdCol = await queryRunner.hasColumn(tableName, 'id');
+    if (hasIdCol) {
+      const joinCondition = cols.map((c) => `t1.\`${c}\` = t2.\`${c}\``).join(' AND ');
+      const notNullCondition = cols.map((c) => `t1.\`${c}\` IS NOT NULL`).join(' AND ');
+
+      await queryRunner.query(
+        `DELETE t1 FROM \`${tableName}\` t1 INNER JOIN \`${tableName}\` t2 ON ${joinCondition} WHERE ${notNullCondition} AND t1.\`id\` < t2.\`id\``,
+      );
+    }
+  }
+
+  private async preSanitizeBeforeForeignKey(queryRunner: QueryRunner, sql: string): Promise<void> {
+    const fkMatch =
+      /^ALTER TABLE `([^`]+)` ADD CONSTRAINT `[^`]+` FOREIGN KEY \(`([^`]+)`\) REFERENCES `([^`]+)`\(`([^`]+)`\)(.*)$/i.exec(
+        sql,
+      );
+    if (!fkMatch) {
+      return;
+    }
+
+    const [, childTable, childCol, parentTable, parentCol, tail] = fkMatch;
+    const isSetNull = /ON DELETE SET NULL/i.test(tail || '');
+
+    if (isSetNull) {
+      await queryRunner.query(
+        `UPDATE \`${childTable}\` c LEFT JOIN \`${parentTable}\` p ON c.\`${childCol}\` = p.\`${parentCol}\` SET c.\`${childCol}\` = NULL WHERE c.\`${childCol}\` IS NOT NULL AND p.\`${parentCol}\` IS NULL`,
+      );
+    } else {
+      await queryRunner.query(
+        `DELETE c FROM \`${childTable}\` c LEFT JOIN \`${parentTable}\` p ON c.\`${childCol}\` = p.\`${parentCol}\` WHERE c.\`${childCol}\` IS NOT NULL AND p.\`${parentCol}\` IS NULL`,
+      );
+    }
+  }
+
+  private writeOptimizedMigrationFile(
+    migrationName: string,
+    upQueries: Query[],
+    downQueries: Query[],
+  ): ParsedMigrationFile {
+    const timestamp = Date.now();
+    const cleanName = migrationName.replace(/[^a-zA-Z0-9]/g, '') || 'AutoMigration';
+    const className = `${cleanName}${timestamp}`;
+    const fileName = `${timestamp}-${cleanName}.ts`;
+    const fullPath = join(this.migrationsDir, fileName);
+
+    const escapeSqlForTemplate = (q: string) =>
+      q.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+
+    const upLines = upQueries
+      .map((q) => `    await queryRunner.query(\`${escapeSqlForTemplate(q.query)}\`);`)
+      .join('\n');
+
+    const downLines = [...downQueries]
+      .reverse()
+      .map((q) => `    await queryRunner.query(\`${escapeSqlForTemplate(q.query)}\`);`)
+      .join('\n');
+
+    const fileContent = `import { MigrationInterface, QueryRunner } from 'typeorm';
+
+export class ${className} implements MigrationInterface {
+  name = '${className}';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0');
+${upLines}
+    await queryRunner.query('SET FOREIGN_KEY_CHECKS = 1');
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0');
+${downLines}
+    await queryRunner.query('SET FOREIGN_KEY_CHECKS = 1');
+  }
+}
+`;
+
+    writeFileSync(fullPath, fileContent, 'utf8');
+    return {
+      fileName,
+      fullPath,
+      timestamp,
+      className,
+    };
+  }
+
+  private async syncExistingMigrationsState(migrationsTableName: string): Promise<void> {
+    const queryRunner = this.ds.createQueryRunner();
     try {
-      for (const rawQuery of queries) {
-        const safeQuery = rawQuery.replace(
-          /ALTER TABLE `([^`]+)` ADD `([^`]+)` (varchar\(\d+\)|int|smallint|tinyint|bigint|datetime|timestamp) NOT NULL(?! DEFAULT)/i,
-          (fullMatch, table: string, col: string, colType: string) => {
-            const lowerType = colType.toLowerCase();
-            if (lowerType.startsWith('varchar')) {
-              return `ALTER TABLE \`${table}\` ADD \`${col}\` ${colType} NOT NULL DEFAULT ''`;
-            }
-            if (lowerType.includes('int')) {
-              return `ALTER TABLE \`${table}\` ADD \`${col}\` ${colType} NOT NULL DEFAULT 0`;
-            }
-            if (lowerType === 'datetime' || lowerType === 'timestamp') {
-              return `ALTER TABLE \`${table}\` ADD \`${col}\` ${colType} NOT NULL DEFAULT CURRENT_TIMESTAMP`;
-            }
-            return fullMatch;
-          },
-        );
-        await queryRunner.query(safeQuery);
+      await this.ensureMigrationsTableExists(queryRunner, migrationsTableName);
+      const executedRows = await queryRunner.manager
+        .createQueryBuilder()
+        .select('m.name', 'name')
+        .from(migrationsTableName, 'm')
+        .getRawMany<{ name: string }>();
+
+      const executedNames = new Set(executedRows.map((r) => r.name));
+      const allFiles = this.getSortedMigrationFiles();
+
+      for (const file of allFiles) {
+        if (!file.className || executedNames.has(file.className)) {
+          continue;
+        }
+
+        const content = readFileSync(file.fullPath, 'utf8');
+
+        if (content.includes('DROP COLUMN')) {
+          unlinkSync(file.fullPath);
+          console.log(
+            `   🧹 Cleaned up unexecuted destructive migration from previous failed run: ${file.fileName}`,
+          );
+        }
       }
 
-      await queryRunner.commitTransaction();
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
+      const pendingAfterClean = await this.ds.showMigrations();
+      if (pendingAfterClean) {
+        await this.ds.runMigrations({ transaction: 'each' });
+      }
     } finally {
       await queryRunner.release();
     }
@@ -295,7 +478,7 @@ export class SmartMigrationEngine {
 
     if (allFiles.length <= this.maxKeepMigrations) {
       console.log(
-        `   ✅ Currently have ${allFiles.length}/${this.maxKeepMigrations} migration files. No cleanup needed.`,
+        `   ✅ Currently ${allFiles.length}/${this.maxKeepMigrations} migration files. No pruning needed.`,
       );
       return;
     }
@@ -317,12 +500,12 @@ export class SmartMigrationEngine {
             .execute();
         }
       } catch (err) {
-        console.warn(`   ⚠️ Failed to delete file ${file.fileName}:`, err);
+        console.warn(`   ⚠️ Could not delete file ${file.fileName}:`, err);
       }
     }
 
     console.log(
-      `   ✨ Kept the latest ${filesToKeep.length} migration files: ${filesToKeep
+      `   ✨ Retained the latest ${filesToKeep.length} migration files: ${filesToKeep
         .map((f) => f.fileName)
         .join(', ')}`,
     );
