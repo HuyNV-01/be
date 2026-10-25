@@ -1,4 +1,4 @@
-import { envs } from '../envs';
+import { envs } from '../envs/envs';
 
 export const SOCKET_CONFIG = {
   cors: {
@@ -50,4 +50,4 @@ export const SOCKET_CONFIG = {
       FRIEND_REMOVED: 'contact.friend_removed',
     },
   },
-};
+} as const;

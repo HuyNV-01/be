@@ -21,7 +21,7 @@ import {
 } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import { SocketStateService, UserPublicKeyBundle } from 'src/common/websocket/socket-state.service';
-import { envs } from 'src/config/envs';
+import { envs } from 'src/config/envs/envs';
 import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
 import {
   AddGroupMembersDto,
@@ -143,12 +143,12 @@ export class ChatService {
         attachments = files.map((f) => ({
           fileId: f.id,
           url: f.url,
-          thumbnailUrl: f.metadata?.thumbnailUrl,
+          thumbnailUrl: f.metadata?.thumbnailUrl as string | undefined,
           fileName: f.originalName,
           mimeType: f.mimeType,
           size: Number(f.size),
-          width: f.metadata?.width,
-          height: f.metadata?.height,
+          width: f.metadata?.width as number | undefined,
+          height: f.metadata?.height as number | undefined,
         }));
       }
 
@@ -302,6 +302,18 @@ export class ChatService {
     };
 
     await this.msgRepository.save(message);
+
+    const latestMsg = await this.msgRepository.findOne({
+      where: { conversationId: dto.conversationId },
+      order: { createdAt: 'DESC' },
+      select: ['id'],
+    });
+    if (latestMsg && latestMsg.id === message.id) {
+      await this.convRepository.update(dto.conversationId, {
+        lastMessage: encrypted.ciphertext,
+      });
+    }
+
     const enriched = await this.buildEnrichedMessageResponse(message.id);
     const recipientIds = await this.getConversationMemberIds(dto.conversationId);
 
@@ -335,6 +347,18 @@ export class ChatService {
     };
 
     await this.msgRepository.save(message);
+
+    const latestMsg = await this.msgRepository.findOne({
+      where: { conversationId: dto.conversationId },
+      order: { createdAt: 'DESC' },
+      select: ['id'],
+    });
+    if (latestMsg && latestMsg.id === message.id) {
+      await this.convRepository.update(dto.conversationId, {
+        lastMessage: recalledPlaceholder.ciphertext,
+      });
+    }
+
     const recipientIds = await this.getConversationMemberIds(dto.conversationId);
 
     return {
@@ -466,7 +490,10 @@ export class ChatService {
     return this.buildEnrichedMessageResponse(saved.id);
   }
 
-  async registerE2EEPublicKey(userId: string, dto: RegisterPublicKeyDto) {
+  async registerE2EEPublicKey(
+    userId: string,
+    dto: RegisterPublicKeyDto,
+  ): Promise<UserPublicKeyBundle> {
     const bundle: UserPublicKeyBundle = {
       userId,
       publicKey: dto.publicKey,
@@ -478,23 +505,23 @@ export class ChatService {
     return bundle;
   }
 
-  async getConversationPublicKeys(conversationId: string, requesterId: string) {
+  async getConversationPublicKeys(
+    conversationId: string,
+    requesterId: string,
+  ): Promise<Record<string, UserPublicKeyBundle>> {
     await this.ensureParticipant(conversationId, requesterId);
     const memberIds = await this.getConversationMemberIds(conversationId);
     return this.socketStateService.getPublicKeyBundles(memberIds);
   }
 
   getWebRtcIceServers(userId: string) {
-    const chatConfig = (envs as any).chat;
+    const chatConfig = envs.chat;
     return this.messageCryptoService.generateIceServers({
       userId,
-      stunUrls: chatConfig?.stunUrls || [
-        'stun:stun.l.google.com:19302',
-        'stun:stun1.l.google.com:19302',
-      ],
-      turnUrls: chatConfig?.turnUrls || [],
-      turnSecret: chatConfig?.turnSecret || envs.jwtSecret,
-      ttlSeconds: chatConfig?.turnTtl || 86400,
+      stunUrls: chatConfig.stunUrls,
+      turnUrls: chatConfig.turnUrls,
+      turnSecret: chatConfig.turnSecret,
+      ttlSeconds: chatConfig.turnTtl,
     });
   }
 
@@ -653,9 +680,9 @@ export class ChatService {
       if (sender) delete sender.avatarMedia;
       const cleanSender = { ...sender, avatar: avatarUrl };
 
-      const computedStatus = this.computeStatus(msg, userId);
+      const computedStatus = this.computeStatus(msg as MessageEntity, userId);
       const decryptedContent = this.messageCryptoService.decryptForConversation(
-        msg.content,
+        msg.content as string,
         conversationId,
       );
 
@@ -798,9 +825,9 @@ export class ChatService {
 
     const result = await helper.getPaginatedRaw(query);
 
-    const partnerIds = result.data
+    const partnerIds: string[] = result.data
       .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
-      .map((c: any) => c.partnerUser.id);
+      .map((c: any) => String(c.partnerUser.id));
 
     const onlineSet = await this.socketStateService.getOnlineUsers(partnerIds);
 
@@ -812,11 +839,14 @@ export class ChatService {
         conv.name = conv.partnerUser.name;
         avatar = conv.partnerUser.avatarMedia?.file?.url || null;
         conv.partnerId = conv.partnerUser.id;
-        isOnline = onlineSet.has(conv.partnerUser.id);
+        isOnline = onlineSet.has(String(conv.partnerUser.id));
       }
 
       const decryptedLastMessage = conv.lastMessage
-        ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
+        ? this.messageCryptoService.decryptForConversation(
+            conv.lastMessage as string,
+            conv.id as string,
+          )
         : null;
 
       delete conv.partner;
@@ -845,7 +875,7 @@ export class ChatService {
       .innerJoin('conversation_participants', 'me', 'me.conversationId = p.conversationId')
       .where('me.userId = :userId', { userId })
       .andWhere('p.userId != :userId', { userId })
-      .getRawMany();
+      .getRawMany<{ userId: string }>();
 
     return partners.map((p) => p.userId);
   }
@@ -953,7 +983,7 @@ export class ChatService {
       ? {
           id: user.id,
           name: user.name,
-          avatar: (user as any).avatarMedia?.file?.url || null,
+          avatar: ((user as any).avatarMedia?.file?.url as string) || null,
         }
       : { id: userId, name: 'Unknown', avatar: null };
 
@@ -996,7 +1026,7 @@ export class ChatService {
     return MessageStatusEnum.SENT;
   }
 
-  async processUndeliveredMessages(userId: string) {
+  async processUndeliveredMessages(userId: string): Promise<Record<string, string[]>> {
     const pendingMessages = await this.msgRepository
       .createQueryBuilder('m')
       .select(['m.id', 'm.conversationId', 'm.senderId'])

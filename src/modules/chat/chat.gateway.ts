@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { HttpStatus } from '@nestjs/common';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
@@ -6,6 +5,7 @@ import { ConnectedSocket, MessageBody, SubscribeMessage, WsException } from '@ne
 
 import { AppGateway } from 'src/common/decorators/app-gateway.decorator';
 import { MessageStatusEnum } from 'src/common/enum';
+import { BaseGateway, PresenceGateway } from 'src/common/websocket/base.gateway';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SocketRateLimiter } from 'src/common/websocket/socket-rate-limiter';
 import { SocketStateService } from 'src/common/websocket/socket-state.service';
@@ -32,7 +32,6 @@ import {
 import { SendMessageDto } from 'src/dto/chat/chat.dto';
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
-import { BaseGateway, PresenceGateway } from '../../common/websocket/base.gateway';
 import { ChatService } from './chat.service';
 import { CallSignalingService } from './services/call-signaling.service';
 
@@ -57,18 +56,72 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     );
   }
 
-  async handleUserOnline(userId: string) {
+  async handleUserOnline(userId: string): Promise<void> {
     const recipientIds = await this.chatService.getRelatedUserIds(userId);
     this.broadcastStatus(userId, true, recipientIds);
     await this.syncUndeliveredMessages(userId);
   }
 
-  async handleUserOffline(userId: string) {
+  async handleUserOffline(userId: string): Promise<void> {
     const recipientIds = await this.chatService.getRelatedUserIds(userId);
     this.broadcastStatus(userId, false, recipientIds);
+
+    try {
+      const activeCallId = await this.callSignalingService.getActiveCallIdByUser(userId);
+      if (activeCallId) {
+        const outcome = await this.callSignalingService.rejectOrLeaveCall({
+          callId: activeCallId,
+          userId,
+          reason: 'hangup',
+        });
+
+        if (outcome.session) {
+          if (outcome.isCallTerminated) {
+            const endPayload = {
+              callId: activeCallId,
+              endedBy: userId,
+              finalStatus: outcome.finalStatus,
+              durationSeconds: outcome.durationSeconds,
+            };
+            this.server
+              .to(`call:${activeCallId}`)
+              .emit(SOCKET_CONFIG.events.CALL.ENDED, endPayload);
+
+            const allCallMembers = [outcome.session.initiatorId, ...outcome.session.invitedUserIds];
+            allCallMembers.forEach((uid) => {
+              this.emitToUser(uid, SOCKET_CONFIG.events.CALL.ENDED, endPayload);
+            });
+
+            const callLog = await this.chatService.recordCallHistoryMessage({
+              conversationId: outcome.session.conversationId,
+              initiatorId: outcome.session.initiatorId,
+              callId: outcome.session.callId,
+              callType: outcome.session.callType,
+              status: outcome.finalStatus,
+              durationSeconds: outcome.durationSeconds,
+              participantIds: allCallMembers,
+            });
+            this.server
+              .to(`conversation:${outcome.session.conversationId}`)
+              .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
+          } else {
+            this.server
+              .to(`call:${activeCallId}`)
+              .emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_LEFT, {
+                callId: activeCallId,
+                userId,
+                remainingParticipants: outcome.session.participants,
+              });
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Error cleaning up call on user offline: ${msg}`);
+    }
   }
 
-  private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]) {
+  private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]): void {
     const payload = { userId, isOnline, lastActive: new Date() };
     recipients.forEach((id) => this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload));
   }
@@ -303,13 +356,18 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
     await client.join(`call:${session.callId}`);
 
-    this.server.to(`call:${session.callId}`).emit(SOCKET_CONFIG.events.CALL.ACCEPTED, {
+    const acceptedPayload = {
       callId: session.callId,
       conversationId: session.conversationId,
       acceptedBy: userId,
       participants: session.participants,
       answeredAt: session.answeredAt,
-    });
+    };
+
+    this.server
+      .to(`call:${session.callId}`)
+      .emit(SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
+    this.emitToUser(session.initiatorId, SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
 
     return {
       status: HttpStatus.OK,
@@ -336,12 +394,21 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     });
 
     if (outcome.session) {
-      this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.REJECTED, {
+      const rejectedPayload = {
         callId: dto.callId,
         rejectedBy: userId,
         reason,
         isCallTerminated: outcome.isCallTerminated,
-      });
+      };
+
+      this.server
+        .to(`call:${dto.callId}`)
+        .emit(SOCKET_CONFIG.events.CALL.REJECTED, rejectedPayload);
+      this.emitToUser(
+        outcome.session.initiatorId,
+        SOCKET_CONFIG.events.CALL.REJECTED,
+        rejectedPayload,
+      );
 
       if (outcome.isCallTerminated) {
         const callLog = await this.chatService.recordCallHistoryMessage({
@@ -428,20 +495,18 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
     if (outcome.session) {
       if (outcome.isCallTerminated) {
-        this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.ENDED, {
+        const endedPayload = {
           callId: dto.callId,
           endedBy: userId,
           finalStatus: outcome.finalStatus,
           durationSeconds: outcome.durationSeconds,
-        });
+        };
 
-        outcome.session.invitedUserIds.forEach((uid) => {
-          this.emitToUser(uid, SOCKET_CONFIG.events.CALL.ENDED, {
-            callId: dto.callId,
-            endedBy: userId,
-            finalStatus: outcome.finalStatus,
-            durationSeconds: outcome.durationSeconds,
-          });
+        this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.ENDED, endedPayload);
+
+        const allCallUsers = [outcome.session.initiatorId, ...outcome.session.invitedUserIds];
+        allCallUsers.forEach((uid) => {
+          this.emitToUser(uid, SOCKET_CONFIG.events.CALL.ENDED, endedPayload);
         });
 
         const callLog = await this.chatService.recordCallHistoryMessage({
@@ -451,7 +516,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
           callType: outcome.session.callType,
           status: outcome.finalStatus,
           durationSeconds: outcome.durationSeconds,
-          participantIds: [outcome.session.initiatorId, ...outcome.session.invitedUserIds],
+          participantIds: allCallUsers,
         });
 
         this.server
@@ -475,6 +540,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
     try {
+      this.enforceRateLimit(client, 'message_received');
       const userId = client.data.user.id;
 
       await this.chatService.markAsDelivered({
@@ -486,7 +552,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         id: payload.messageId,
         conversationId: payload.conversationId,
         status: MessageStatusEnum.DELIVERED,
-        userId: userId,
+        userId,
         timestamp: new Date().toISOString(),
       };
 
@@ -495,8 +561,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_UPDATE, updatePayload);
 
       return { status: HttpStatus.OK };
-    } catch (error) {
-      this.logger.error(`Error Message Received: ${error}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Error Message Received: ${msg}`);
     }
   }
 
@@ -508,7 +575,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   @OnEvent(ChatEventEnum.MESSAGE_READ)
-  handleInternalMessageRead(event: ChatMessageReadEvent) {
+  handleInternalMessageRead(event: ChatMessageReadEvent): void {
     this.server
       .to(`conversation:${event.conversationId}`)
       .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_READ, {
@@ -523,7 +590,8 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   async handleMarkRead(
     @MessageBody() payload: { conversationId: string },
     @ConnectedSocket() client: AuthenticatedSocket,
-  ) {
+  ): Promise<void> {
+    this.enforceRateLimit(client, 'mark_read');
     await this.chatService.markConversationAsRead({
       userId: client.data.user.id,
       conversationId: payload.conversationId,
@@ -534,7 +602,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   handleTyping(
     @MessageBody() payload: { conversationId: string; isTyping: boolean },
     @ConnectedSocket() client: AuthenticatedSocket,
-  ) {
+  ): void {
     this.enforceRateLimit(client, 'typing');
     client
       .to(`conversation:${payload.conversationId}`)
@@ -546,7 +614,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   @OnEvent(ContactEventEnum.REQUEST_SENT)
-  handleContactRequestSent(event: ContactRequestSentEvent) {
+  handleContactRequestSent(event: ContactRequestSentEvent): void {
     this.server
       .to(`user:${event.targetUserId}`)
       .emit(SOCKET_CONFIG.events.CONTACT.REQUEST_RECEIVED, {
@@ -556,7 +624,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   @OnEvent(ContactEventEnum.REQUEST_ACCEPTED)
-  handleContactRequestAccepted(event: ContactRequestAcceptedEvent) {
+  handleContactRequestAccepted(event: ContactRequestAcceptedEvent): void {
     this.server
       .to(`user:${event.requesterId}`)
       .emit(SOCKET_CONFIG.events.CONTACT.REQUEST_ACCEPTED, {
@@ -566,14 +634,14 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   @OnEvent(ContactEventEnum.FRIEND_REMOVED)
-  handleContactRemoved(event: ContactRemovedEvent) {
+  handleContactRemoved(event: ContactRemovedEvent): void {
     this.server.to(`user:${event.targetId}`).emit(SOCKET_CONFIG.events.CONTACT.FRIEND_REMOVED, {
       removerId: event.removerId,
       timestamp: event.timestamp,
     });
   }
 
-  private async syncUndeliveredMessages(userId: string) {
+  private async syncUndeliveredMessages(userId: string): Promise<void> {
     try {
       const groupedMessages = await this.chatService.processUndeliveredMessages(userId);
       const conversationIds = Object.keys(groupedMessages);
@@ -585,9 +653,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
         const batchPayload = {
           conversationId: convId,
-          messageIds: messageIds,
+          messageIds,
           status: MessageStatusEnum.DELIVERED,
-          userId: userId,
+          userId,
           updatedAt: new Date().toISOString(),
         };
 
@@ -595,8 +663,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
           .to(`conversation:${convId}`)
           .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH, batchPayload);
       });
-    } catch (error) {
-      this.logger.error(`Error syncing: ${error}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Error syncing: ${msg}`);
     }
   }
 }

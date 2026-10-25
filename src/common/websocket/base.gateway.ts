@@ -12,7 +12,7 @@ import {
 } from '@nestjs/websockets';
 
 import { Server } from 'socket.io';
-import { envs } from 'src/config/envs';
+import { envs } from 'src/config/envs/envs';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
@@ -50,14 +50,13 @@ export abstract class BaseGateway
     }
   }
 
-  async handleConnection(client: AuthenticatedSocket) {
+  async handleConnection(client: AuthenticatedSocket): Promise<void> {
     try {
-      if (!client.data?.user?.id) {
+      const userId = client.data?.user?.id;
+      if (!userId) {
         client.disconnect();
         return;
       }
-
-      const userId = client.data.user.id;
 
       await this.cleanupGhostSockets(userId);
       await this.socketStateService.add(userId, client.id);
@@ -68,15 +67,16 @@ export abstract class BaseGateway
       if (this.isPresenceGateway(this)) {
         await this.handleUserOnline(userId);
       }
-    } catch (e) {
-      this.logger.error(`Connection error: ${e}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Connection error: ${msg}`);
       client.disconnect();
     }
   }
 
-  async handleDisconnect(client: AuthenticatedSocket) {
+  async handleDisconnect(client: AuthenticatedSocket): Promise<void> {
     const userId = client.data?.user?.id;
-    this.logger.debug(`User disconnected: ${userId} (socketId: ${client.id})`);
+    this.logger.debug(`User disconnected: ${userId ?? 'unknown'} (socketId: ${client.id})`);
     if (userId) {
       try {
         const isOfflineCompletely = await this.socketStateService.remove(userId, client.id);
@@ -85,13 +85,15 @@ export abstract class BaseGateway
           this.logger.debug(`User offline completely: ${userId}`);
 
           if (this.isPresenceGateway(this)) {
-            await this.handleUserOffline(userId).catch((err) =>
-              this.logger.error(`Error in handleUserOffline: ${err}`),
-            );
+            await this.handleUserOffline(userId).catch((err: unknown) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              this.logger.error(`Error in handleUserOffline: ${msg}`);
+            });
           }
         }
-      } catch (error) {
-        this.logger.error(`Error during disconnect handling: ${error}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Error during disconnect handling: ${msg}`);
       }
     }
   }
@@ -140,7 +142,7 @@ export abstract class BaseGateway
         secret: envs.jwtSecret,
       });
 
-      if (payload.id !== client.data.user.id) {
+      if (payload.id !== client.data?.user?.id) {
         throw new WsException('Token user mismatch');
       }
 
@@ -166,7 +168,9 @@ export abstract class BaseGateway
       client.disconnect();
       throw new WsException('Access token has expired');
     }
-    this.rateLimiter?.consume(userId, eventName);
+    if (this.rateLimiter) {
+      this.rateLimiter.consume(userId, eventName);
+    }
   }
 
   private isPresenceGateway(instance: unknown): instance is PresenceGateway {
@@ -180,11 +184,11 @@ export abstract class BaseGateway
     );
   }
 
-  protected emitToUser(userId: string, event: string, data: any) {
+  protected emitToUser<T = unknown>(userId: string, event: string, data: T): void {
     this.server.to(`user:${userId}`).emit(event, data);
   }
 
-  private async cleanupGhostSockets(userId: string) {
+  private async cleanupGhostSockets(userId: string): Promise<void> {
     const existingSockets = await this.socketStateService.getSocketIds(userId);
 
     if (existingSockets.length === 0) return;

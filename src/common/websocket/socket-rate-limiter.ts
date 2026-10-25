@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { WsException } from '@nestjs/websockets';
 
 interface RateLimitBucket {
@@ -12,19 +12,44 @@ export interface RateLimitRule {
 }
 
 @Injectable()
-export class SocketRateLimiter {
+export class SocketRateLimiter implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SocketRateLimiter.name);
   private readonly buckets = new Map<string, RateLimitBucket>();
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   private readonly defaultRules: Record<string, RateLimitRule> = {
-    send_message: { points: 30, windowMs: 10_000 },
+    join_room: { points: 30, windowMs: 10_000 },
+    leave_room: { points: 30, windowMs: 10_000 },
+    send_message: { points: 25, windowMs: 10_000 },
     edit_message: { points: 15, windowMs: 10_000 },
+    recall_message: { points: 15, windowMs: 10_000 },
     react_message: { points: 40, windowMs: 10_000 },
+    pin_message: { points: 15, windowMs: 10_000 },
     typing: { points: 40, windowMs: 10_000 },
+    mark_read: { points: 40, windowMs: 10_000 },
+    message_received: { points: 100, windowMs: 10_000 },
+    'e2ee:register_key': { points: 10, windowMs: 60_000 },
     'call:initiate': { points: 5, windowMs: 15_000 },
-    'call:signal': { points: 150, windowMs: 10_000 },
+    'call:accept': { points: 10, windowMs: 10_000 },
+    'call:reject': { points: 10, windowMs: 10_000 },
+    'call:hangup': { points: 15, windowMs: 10_000 },
+    'call:media_state': { points: 40, windowMs: 10_000 },
+    'call:signal': { points: 200, windowMs: 10_000 },
     default: { points: 60, windowMs: 10_000 },
   };
+
+  onModuleInit(): void {
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupExpired();
+    }, 60_000);
+  }
+
+  onModuleDestroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
 
   consume(userId: string, eventName: string, customRule?: RateLimitRule): void {
     const rule = customRule || this.defaultRules[eventName] || this.defaultRules.default;
@@ -46,7 +71,7 @@ export class SocketRateLimiter {
       throw new WsException({
         status: 429,
         code: 'SOCKET_RATE_LIMIT_EXCEEDED',
-        message: `Too many "${eventName}" requests. Please slow down.`,
+        message: `Thao tác "${eventName}" quá nhanh. Vui lòng thử lại sau giây lát.`,
         retryAfterMs: bucket.resetAt - now,
       });
     }

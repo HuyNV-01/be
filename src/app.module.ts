@@ -10,7 +10,6 @@ import { RedisModule } from '@nestjs-modules/ioredis';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './config/databases/database.module';
-import { DatabaseConfigModule } from './config/databases/module-db/db.module';
 import { envs } from './config/envs';
 import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
@@ -49,7 +48,6 @@ import { parseExpiresIn } from './utils';
       wildcard: true,
       delimiter: '.',
     }),
-    DatabaseConfigModule,
     DatabaseModule,
     StorageModule,
     FilesModule,

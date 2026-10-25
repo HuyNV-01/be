@@ -31,9 +31,16 @@ export class CallSignalingService {
   private readonly logger = new Logger(CallSignalingService.name);
   private readonly CALL_KEY_PREFIX = 'webrtc_call_session:';
   private readonly USER_CALL_PREFIX = 'webrtc_user_active_call:';
-  private readonly CALL_TTL_SECONDS = 3600 * 4;
+  private readonly CALL_TTL_SECONDS = 3600 * 2; // Tối đa 2 giờ
+  private readonly RINGING_TIMEOUT_MS = 60_000; // Tự giải phóng nếu đổ chuông > 60s
 
   constructor(@InjectRedis() private readonly redis: Redis) {}
+
+  private isStaleRingingSession(session: ActiveCallSession): boolean {
+    if (session.status !== CallStatusEnum.RINGING) return false;
+    const elapsed = Date.now() - new Date(session.createdAt).getTime();
+    return elapsed > this.RINGING_TIMEOUT_MS;
+  }
 
   async initiateCall(params: {
     conversationId: string;
@@ -50,10 +57,10 @@ export class CallSignalingService {
     );
     if (existingCallerCallId) {
       const existingCall = await this.getCallSession(existingCallerCallId);
-      if (existingCall) {
-        throw new BadRequestException('You are already in an active call');
+      if (existingCall && !this.isStaleRingingSession(existingCall)) {
+        throw new BadRequestException('Bạn đang ở trong một cuộc gọi khác');
       }
-      await this.redis.del(`${this.USER_CALL_PREFIX}${params.initiatorId}`);
+      await this.forceCleanupSession(existingCallerCallId, params.initiatorId);
     }
 
     const targetIds = params.memberIds.filter((id) => id !== params.initiatorId);
@@ -64,11 +71,11 @@ export class CallSignalingService {
       const activeCallId = await this.redis.get(`${this.USER_CALL_PREFIX}${targetId}`);
       if (activeCallId) {
         const activeSession = await this.getCallSession(activeCallId);
-        if (activeSession) {
+        if (activeSession && !this.isStaleRingingSession(activeSession)) {
           busyUserIds.push(targetId);
           continue;
         }
-        await this.redis.del(`${this.USER_CALL_PREFIX}${targetId}`);
+        await this.forceCleanupSession(activeCallId, targetId);
       }
       ringingUserIds.push(targetId);
     }
@@ -121,14 +128,22 @@ export class CallSignalingService {
     }
   }
 
+  async getActiveCallIdByUser(userId: string): Promise<string | null> {
+    return this.redis.get(`${this.USER_CALL_PREFIX}${userId}`);
+  }
+
+  private async forceCleanupSession(callId: string, userId: string): Promise<void> {
+    await this.redis.del(`${this.CALL_KEY_PREFIX}${callId}`, `${this.USER_CALL_PREFIX}${userId}`);
+  }
+
   async acceptCall(callId: string, userId: string): Promise<ActiveCallSession> {
     const session = await this.getCallSession(callId);
     if (!session) {
-      throw new BadRequestException('Call session has expired or already ended');
+      throw new BadRequestException('Phiên cuộc gọi đã hết hạn hoặc đã kết thúc');
     }
 
     if (session.initiatorId !== userId && !session.invitedUserIds.includes(userId)) {
-      throw new ForbiddenException('You are not invited to this call');
+      throw new ForbiddenException('Bạn không nằm trong danh sách tham gia cuộc gọi này');
     }
 
     const now = new Date().toISOString();
@@ -162,7 +177,7 @@ export class CallSignalingService {
   }): Promise<ActiveCallSession> {
     const session = await this.getCallSession(params.callId);
     if (!session || !session.participants[params.userId]) {
-      throw new BadRequestException('Active call participant not found');
+      throw new BadRequestException('Không tìm thấy thành viên trong cuộc gọi');
     }
 
     const current = session.participants[params.userId];
