@@ -59,6 +59,12 @@ export class ChatService {
     timestamp: true,
   });
 
+  /**
+   * Bộ nhớ đệm quyền thành viên ngắn hạn (TTL 30s) giúp giảm 90% truy vấn DB khi gõ phím (typing) hoặc gửi tin liên tục
+   */
+  private readonly membershipCache = new Map<string, { isMember: boolean; expiresAt: number }>();
+  private readonly MEMBERSHIP_CACHE_TTL_MS = 30_000;
+
   constructor(
     @InjectRepository(ConversationEntity)
     private convRepository: Repository<ConversationEntity>,
@@ -74,10 +80,36 @@ export class ChatService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
+  private invalidateMembershipCache(conversationId: string, userId?: string): void {
+    if (userId) {
+      this.membershipCache.delete(`${conversationId}:${userId}`);
+      return;
+    }
+    for (const key of this.membershipCache.keys()) {
+      if (key.startsWith(`${conversationId}:`)) {
+        this.membershipCache.delete(key);
+      }
+    }
+  }
+
   async isParticipant(conversationId: string, userId: string): Promise<boolean> {
-    return this.partRepository.exists({
+    if (!conversationId || !userId) return false;
+    const cacheKey = `${conversationId}:${userId}`;
+    const cached = this.membershipCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.isMember;
+    }
+
+    const exists = await this.partRepository.exists({
       where: { conversationId, userId },
     });
+
+    this.membershipCache.set(cacheKey, {
+      isMember: exists,
+      expiresAt: Date.now() + this.MEMBERSHIP_CACHE_TTL_MS,
+    });
+
+    return exists;
   }
 
   async ensureParticipant(
@@ -101,9 +133,40 @@ export class ChatService {
     return rows.map((r) => r.userId);
   }
 
+  async getConversationMembersInfo(conversationId: string) {
+    const memberIds = await this.getConversationMemberIds(conversationId);
+    const users = await this.userService.getBasicUsersInfo(memberIds);
+    return users.map((u: any) => ({
+      id: u.id,
+      name: u.name,
+      avatar: u.avatarMedia?.file?.url || null,
+    }));
+  }
+
   async sendMessage(payload: { senderId: string; dto: SendMessageDto }) {
     const label = '[sendMessage]';
     const { senderId, dto } = payload;
+
+    // 1. Kiểm tra Idempotency (chống nhân bản tin nhắn khi mạng chập chờn hoặc gửi đúp)
+    if (dto.tempId) {
+      const existingMsg = await this.msgRepository.findOne({
+        where: {
+          conversationId: dto.conversationId,
+          senderId,
+          clientTempId: dto.tempId,
+        },
+      });
+      if (existingMsg) {
+        const enrichedExisting = await this.buildEnrichedMessageResponse(existingMsg.id);
+        const memberIds = await this.getConversationMemberIds(dto.conversationId);
+        return {
+          message: { ...enrichedExisting, tempId: dto.tempId },
+          recipientIds: memberIds,
+          isDuplicate: true,
+        };
+      }
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -152,8 +215,9 @@ export class ChatService {
         }));
       }
 
+      const cleanContent = (dto.content || '').trim();
       const encrypted = this.messageCryptoService.encryptForConversation(
-        dto.content,
+        cleanContent,
         dto.conversationId,
       );
 
@@ -171,6 +235,9 @@ export class ChatService {
         senderId,
         content: encrypted.ciphertext,
         type: dto.type || MessageTypeEnum.TEXT,
+        replyToMessageId: dto.replyToMessageId || null,
+        clientTempId: dto.tempId ? dto.tempId.slice(0, 64) : null,
+        isPinned: false,
         metadata,
         readBy: [],
         deliveredTo: [],
@@ -191,7 +258,7 @@ export class ChatService {
       }
 
       const lastMsgRaw =
-        dto.type === MessageTypeEnum.TEXT || !dto.type ? dto.content : `[${dto.type}]`;
+        dto.type === MessageTypeEnum.TEXT || !dto.type ? cleanContent : `[${dto.type}]`;
       const encryptedLastMsg = this.messageCryptoService.encryptForConversation(
         lastMsgRaw,
         dto.conversationId,
@@ -221,6 +288,7 @@ export class ChatService {
       return {
         message: { ...finalMessage, tempId: dto.tempId },
         recipientIds: participants.map((p) => p.userId),
+        isDuplicate: false,
       };
     } catch (err) {
       await queryRunner.rollbackTransaction();
@@ -288,7 +356,7 @@ export class ChatService {
     }
 
     const encrypted = this.messageCryptoService.encryptForConversation(
-      dto.content,
+      dto.content.trim(),
       dto.conversationId,
     );
 
@@ -340,6 +408,7 @@ export class ChatService {
 
     message.content = recalledPlaceholder.ciphertext;
     message.status = MessageStatusEnum.REMOVED;
+    message.isPinned = false;
     message.metadata = {
       isEncrypted: true,
       encryptionAlg: 'AES-256-GCM',
@@ -421,6 +490,7 @@ export class ChatService {
     });
     if (!message) throw new NotFoundException('Message not found');
 
+    message.isPinned = dto.isPinned;
     message.metadata = {
       ...(message.metadata || {}),
       isPinned: dto.isPinned,
@@ -446,10 +516,23 @@ export class ChatService {
     durationSeconds: number;
     participantIds: string[];
   }) {
-    const summaryText =
-      params.status === CallStatusEnum.COMPLETED
-        ? `Cuộc gọi ${params.callType === CallTypeEnum.VIDEO ? 'video' : 'thoại'} (${params.durationSeconds}s)`
-        : `Cuộc gọi ${params.callType === CallTypeEnum.VIDEO ? 'video' : 'thoại'} nhỡ`;
+    const formatDuration = (sec: number) => {
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return m > 0 ? `${m} phút ${s} giây` : `${s} giây`;
+    };
+
+    const callLabel = params.callType === CallTypeEnum.VIDEO ? 'video' : 'thoại';
+    let summaryText = `Cuộc gọi ${callLabel} nhỡ`;
+    if (params.status === CallStatusEnum.COMPLETED) {
+      summaryText = `Cuộc gọi ${callLabel} (${formatDuration(params.durationSeconds)})`;
+    } else if (params.status === CallStatusEnum.REJECTED) {
+      summaryText = `Cuộc gọi ${callLabel} đã bị từ chối`;
+    } else if (params.status === CallStatusEnum.CANCELLED) {
+      summaryText = `Cuộc gọi ${callLabel} đã hủy`;
+    } else if (params.status === CallStatusEnum.BUSY) {
+      summaryText = `Người nhận đang bận`;
+    }
 
     const encrypted = this.messageCryptoService.encryptForConversation(
       summaryText,
@@ -557,6 +640,7 @@ export class ChatService {
         }),
       );
       await this.partRepository.save(entities);
+      this.invalidateMembershipCache(params.conversationId);
     }
 
     return {
@@ -579,6 +663,7 @@ export class ChatService {
       conversationId: params.conversationId,
       userId: params.targetUserId,
     });
+    this.invalidateMembershipCache(params.conversationId, params.targetUserId);
 
     return {
       conversationId: params.conversationId,
@@ -735,7 +820,7 @@ export class ChatService {
 
     try {
       const conversation = this.convRepository.create({
-        name: dto.name,
+        name: dto.name.trim(),
         type: ConversationTypeEnum.GROUP,
         lastMessageAt: new Date(),
       });
@@ -834,7 +919,7 @@ export class ChatService {
     const finalData = result.data.map((conv: any) => {
       const myParticipant = conv.participants?.[0];
       let isOnline = false;
-      let avatar = null;
+      let avatar = conv.avatar || null;
       if (conv.type === ConversationTypeEnum.DIRECT && conv.partnerUser) {
         conv.name = conv.partnerUser.name;
         avatar = conv.partnerUser.avatarMedia?.file?.url || null;
@@ -892,6 +977,15 @@ export class ChatService {
       userId: receiverId,
     });
 
+    const directKey = [senderId, receiverId].sort().join(':');
+
+    const existingByKey = await this.convRepository.findOne({
+      where: { directKey },
+    });
+    if (existingByKey) {
+      return this.enrichConversationInfo(existingByKey, receiverId);
+    }
+
     const existingConversation = await this.convRepository
       .createQueryBuilder('c')
       .innerJoin('c.participants', 'p1')
@@ -902,6 +996,11 @@ export class ChatService {
       .getOne();
 
     if (existingConversation) {
+      if (!existingConversation.directKey) {
+        await this.convRepository
+          .update(existingConversation.id, { directKey })
+          .catch(() => undefined);
+      }
       return this.enrichConversationInfo(existingConversation, receiverId);
     }
 
@@ -912,6 +1011,7 @@ export class ChatService {
     try {
       const newConv = this.convRepository.create({
         type: ConversationTypeEnum.DIRECT,
+        directKey,
         lastMessageAt: new Date(),
       });
       const savedConv = await queryRunner.manager.save(newConv);
@@ -930,6 +1030,10 @@ export class ChatService {
       return this.enrichConversationInfo(savedConv, receiverId);
     } catch (error) {
       await queryRunner.rollbackTransaction();
+      const raceWinner = await this.convRepository.findOne({ where: { directKey } });
+      if (raceWinner) {
+        return this.enrichConversationInfo(raceWinner, receiverId);
+      }
       throw error;
     } finally {
       await queryRunner.release();
@@ -937,20 +1041,29 @@ export class ChatService {
   }
 
   private async enrichConversationInfo(conversation: ConversationEntity, partnerId: string) {
-    const partner = await this.dataSource.getRepository(UserEntity).findOne({
-      where: { id: partnerId },
-      select: ['id', 'name', 'email', 'status'],
-    });
+    const partnerUsers = await this.userService.getBasicUsersInfo([partnerId]);
+    const partner = partnerUsers[0] as any;
+    const onlineSet = await this.socketStateService.getOnlineUsers([partnerId]);
 
     return {
       ...conversation,
+      name: partner?.name || conversation.name,
+      avatar: partner?.avatarMedia?.file?.url || conversation.avatar || null,
+      partnerId,
+      isOnline: onlineSet.has(partnerId),
       lastMessage: conversation.lastMessage
         ? this.messageCryptoService.decryptForConversation(
             conversation.lastMessage,
             conversation.id,
           )
         : null,
-      partnerInfo: partner,
+      partnerInfo: partner
+        ? {
+            id: partner.id,
+            name: partner.name,
+            avatar: partner?.avatarMedia?.file?.url || null,
+          }
+        : null,
     };
   }
 

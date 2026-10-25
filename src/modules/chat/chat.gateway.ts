@@ -168,20 +168,22 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.enforceRateLimit(client, 'send_message');
     const senderId = client.data.user.id;
 
-    const { message, recipientIds } = await this.chatService.sendMessage({
+    const { message, recipientIds, isDuplicate } = await this.chatService.sendMessage({
       senderId,
       dto,
     });
 
-    this.server
-      .to(`conversation:${dto.conversationId}`)
-      .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
+    if (!isDuplicate) {
+      this.server
+        .to(`conversation:${dto.conversationId}`)
+        .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
 
-    recipientIds.forEach((userId) => {
-      if (userId !== senderId) {
-        this.server.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
-      }
-    });
+      recipientIds.forEach((userId) => {
+        if (userId !== senderId) {
+          this.server.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
+        }
+      });
+    }
 
     return {
       status: HttpStatus.OK,
@@ -312,27 +314,87 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     const callerId = client.data.user.id;
 
     await this.chatService.ensureParticipant(dto.conversationId, callerId);
-    const memberIds = await this.chatService.getConversationMemberIds(dto.conversationId);
+    const membersInfo = await this.chatService.getConversationMembersInfo(dto.conversationId);
+    const memberIds = membersInfo.map((m) => m.id);
+    const callerInfo = membersInfo.find((m) => m.id === callerId);
 
-    const { session, busyUserIds, ringingUserIds } = await this.callSignalingService.initiateCall({
-      conversationId: dto.conversationId,
-      initiatorId: callerId,
-      memberIds,
-      callType: dto.callType,
-    });
+    const { session, busyUserIds, ringingUserIds, isJoinedExisting } =
+      await this.callSignalingService.initiateCall({
+        conversationId: dto.conversationId,
+        initiatorId: callerId,
+        memberIds,
+        callType: dto.callType,
+        isGroupCall: memberIds.length > 2,
+      });
 
     await client.join(`call:${session.callId}`);
 
-    ringingUserIds.forEach((targetId) => {
-      this.emitToUser(targetId, SOCKET_CONFIG.events.CALL.INCOMING, {
+    if (isJoinedExisting) {
+      this.server.to(`call:${session.callId}`).emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_JOINED, {
         callId: session.callId,
-        conversationId: dto.conversationId,
-        callType: dto.callType,
-        callerId,
-        sdpOffer: dto.sdpOffer,
-        createdAt: session.createdAt,
+        conversationId: session.conversationId,
+        userId: callerId,
+        userInfo: callerInfo,
+        participants: session.participants,
+        membersInfo,
       });
-    });
+    } else {
+      ringingUserIds.forEach((targetId) => {
+        this.emitToUser(targetId, SOCKET_CONFIG.events.CALL.INCOMING, {
+          callId: session.callId,
+          conversationId: dto.conversationId,
+          callType: dto.callType,
+          isGroupCall: session.isGroupCall,
+          callerId,
+          callerName: callerInfo?.name || 'Người dùng',
+          callerAvatar: callerInfo?.avatar || null,
+          sdpOffer: dto.sdpOffer,
+          createdAt: session.createdAt,
+          participants: session.participants,
+          membersInfo,
+        });
+      });
+
+      // Tự động kết thúc cuộc gọi nếu sau 60s không ai bắt máy
+      this.callSignalingService.scheduleRingingTimeout(session.callId, async (staleSession) => {
+        const outcome = await this.callSignalingService.rejectOrLeaveCall({
+          callId: staleSession.callId,
+          userId: staleSession.initiatorId,
+          reason: 'timeout',
+        });
+
+        const endPayload = {
+          callId: staleSession.callId,
+          endedBy: staleSession.initiatorId,
+          finalStatus: outcome.finalStatus,
+          durationSeconds: 0,
+          reason: 'timeout',
+        };
+
+        this.server
+          .to(`call:${staleSession.callId}`)
+          .emit(SOCKET_CONFIG.events.CALL.ENDED, endPayload);
+
+        const allUsers = [staleSession.initiatorId, ...staleSession.invitedUserIds];
+        allUsers.forEach((uid) => {
+          this.emitToUser(uid, SOCKET_CONFIG.events.CALL.ENDED, endPayload);
+        });
+
+        const callLog = await this.chatService.recordCallHistoryMessage({
+          conversationId: staleSession.conversationId,
+          initiatorId: staleSession.initiatorId,
+          callId: staleSession.callId,
+          callType: staleSession.callType,
+          status: outcome.finalStatus,
+          durationSeconds: 0,
+          participantIds: allUsers,
+        });
+
+        this.server
+          .to(`conversation:${staleSession.conversationId}`)
+          .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
+      });
+    }
 
     return {
       status: HttpStatus.OK,
@@ -340,6 +402,8 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         ...session,
         busyUserIds,
         ringingUserIds,
+        isJoinedExisting,
+        membersInfo,
         iceConfig: this.chatService.getWebRtcIceServers(callerId),
       },
     };
@@ -353,6 +417,8 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.enforceRateLimit(client, 'call:accept');
     const userId = client.data.user.id;
     const session = await this.callSignalingService.acceptCall(dto.callId, userId);
+    const membersInfo = await this.chatService.getConversationMembersInfo(session.conversationId);
+    const userInfo = membersInfo.find((m) => m.id === userId);
 
     await client.join(`call:${session.callId}`);
 
@@ -360,7 +426,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       callId: session.callId,
       conversationId: session.conversationId,
       acceptedBy: userId,
+      userInfo,
       participants: session.participants,
+      membersInfo,
       answeredAt: session.answeredAt,
     };
 
@@ -369,10 +437,21 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       .emit(SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
     this.emitToUser(session.initiatorId, SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
 
+    // Thông báo cho tất cả thành viên đang trong cuộc gọi để tạo kết nối P2P Mesh với thành viên mới
+    client.to(`call:${session.callId}`).emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_JOINED, {
+      callId: session.callId,
+      conversationId: session.conversationId,
+      userId,
+      userInfo,
+      participants: session.participants,
+      membersInfo,
+    });
+
     return {
       status: HttpStatus.OK,
       data: {
         session,
+        membersInfo,
         iceConfig: this.chatService.getWebRtcIceServers(userId),
       },
     };
@@ -442,6 +521,12 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       throw new WsException('Call session does not exist or has ended');
     }
 
+    // Xác thực người gửi và người nhận đều thuộc cuộc gọi
+    const allowedUsers = new Set([session.initiatorId, ...session.invitedUserIds]);
+    if (!allowedUsers.has(senderId) || !allowedUsers.has(dto.targetUserId)) {
+      throw new WsException('Forbidden: Unauthorized WebRTC signal target');
+    }
+
     this.emitToUser(dto.targetUserId, SOCKET_CONFIG.events.CALL.SIGNAL, {
       callId: dto.callId,
       conversationId: session.conversationId,
@@ -471,6 +556,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.MEDIA_STATE, {
       callId: dto.callId,
       userId,
+      callType: session.callType,
       participantState: session.participants[userId],
     });
 
@@ -599,17 +685,21 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   @SubscribeMessage('typing')
-  handleTyping(
+  async handleTyping(
     @MessageBody() payload: { conversationId: string; isTyping: boolean },
     @ConnectedSocket() client: AuthenticatedSocket,
-  ): void {
+  ): Promise<void> {
     this.enforceRateLimit(client, 'typing');
+    const userId = client.data.user.id;
+    const isMember = await this.chatService.isParticipant(payload.conversationId, userId);
+    if (!isMember) return;
+
     client
       .to(`conversation:${payload.conversationId}`)
       .emit(SOCKET_CONFIG.events.CHAT.USER_TYPING, {
-        userId: client.data.user.id,
+        userId,
         conversationId: payload.conversationId,
-        isTyping: payload.isTyping,
+        isTyping: Boolean(payload.isTyping),
       });
   }
 

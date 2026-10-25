@@ -8,6 +8,8 @@ import { UserEntity } from './user.entity';
 
 @Entity('messages')
 @Index(['conversationId', 'createdAt'])
+@Index(['conversationId', 'isPinned'])
+@Index(['conversationId', 'senderId', 'clientTempId'])
 export class MessageEntity extends BaseModel {
   @Column({ type: 'text', nullable: true })
   content: string;
@@ -38,6 +40,20 @@ export class MessageEntity extends BaseModel {
   @ManyToOne(() => UserEntity)
   @JoinColumn({ name: 'senderId' })
   sender: UserEntity;
+
+  @Column({ name: 'reply_to_message_id', type: 'varchar', length: 36, nullable: true })
+  @Index()
+  replyToMessageId: string | null;
+
+  @ManyToOne(() => MessageEntity, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'reply_to_message_id' })
+  replyToMessage: MessageEntity | null;
+
+  @Column({ name: 'is_pinned', type: 'boolean', default: false })
+  isPinned: boolean;
+
+  @Column({ name: 'client_temp_id', type: 'varchar', length: 64, nullable: true })
+  clientTempId: string | null;
 
   @Column({ type: 'json' })
   readBy: string[];

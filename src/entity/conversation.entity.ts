@@ -21,6 +21,9 @@ export class ConversationEntity extends BaseModel {
   @Column({ nullable: true })
   avatar: string;
 
+  @Column({ name: 'direct_key', type: 'varchar', length: 80, nullable: true, unique: true })
+  directKey: string | null;
+
   @Column({ type: 'text', nullable: true })
   lastMessage: string;
 

@@ -1,6 +1,9 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { WsException } from '@nestjs/websockets';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
+import Redis from 'ioredis';
+
 interface RateLimitBucket {
   count: number;
   resetAt: number;
@@ -16,6 +19,7 @@ export class SocketRateLimiter implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SocketRateLimiter.name);
   private readonly buckets = new Map<string, RateLimitBucket>();
   private cleanupTimer: NodeJS.Timeout | null = null;
+  private readonly REDIS_PREFIX = 'ws:rl:';
 
   private readonly defaultRules: Record<string, RateLimitRule> = {
     join_room: { points: 30, windowMs: 10_000 },
@@ -23,20 +27,22 @@ export class SocketRateLimiter implements OnModuleInit, OnModuleDestroy {
     send_message: { points: 25, windowMs: 10_000 },
     edit_message: { points: 15, windowMs: 10_000 },
     recall_message: { points: 15, windowMs: 10_000 },
-    react_message: { points: 40, windowMs: 10_000 },
+    react_message: { points: 45, windowMs: 10_000 },
     pin_message: { points: 15, windowMs: 10_000 },
     typing: { points: 40, windowMs: 10_000 },
-    mark_read: { points: 40, windowMs: 10_000 },
-    message_received: { points: 100, windowMs: 10_000 },
+    mark_read: { points: 45, windowMs: 10_000 },
+    message_received: { points: 120, windowMs: 10_000 },
     'e2ee:register_key': { points: 10, windowMs: 60_000 },
-    'call:initiate': { points: 5, windowMs: 15_000 },
-    'call:accept': { points: 10, windowMs: 10_000 },
-    'call:reject': { points: 10, windowMs: 10_000 },
+    'call:initiate': { points: 6, windowMs: 15_000 },
+    'call:accept': { points: 12, windowMs: 10_000 },
+    'call:reject': { points: 12, windowMs: 10_000 },
     'call:hangup': { points: 15, windowMs: 10_000 },
-    'call:media_state': { points: 40, windowMs: 10_000 },
-    'call:signal': { points: 200, windowMs: 10_000 },
+    'call:media_state': { points: 50, windowMs: 10_000 },
+    'call:signal': { points: 300, windowMs: 10_000 },
     default: { points: 60, windowMs: 10_000 },
   };
+
+  constructor(@InjectRedis() private readonly redis?: Redis) {}
 
   onModuleInit(): void {
     this.cleanupTimer = setInterval(() => {
@@ -62,18 +68,33 @@ export class SocketRateLimiter implements OnModuleInit, OnModuleDestroy {
         count: 1,
         resetAt: now + rule.windowMs,
       });
-      return;
+    } else {
+      bucket.count += 1;
+      if (bucket.count > rule.points) {
+        this.logger.warn(`Rate limit exceeded for user ${userId} on event "${eventName}"`);
+        throw new WsException({
+          status: 429,
+          code: 'SOCKET_RATE_LIMIT_EXCEEDED',
+          message: `Thao tác "${eventName}" quá nhanh. Vui lòng thử lại sau giây lát.`,
+          retryAfterMs: bucket.resetAt - now,
+        });
+      }
     }
 
-    bucket.count += 1;
-    if (bucket.count > rule.points) {
-      this.logger.warn(`Rate limit exceeded for user ${userId} on event "${eventName}"`);
-      throw new WsException({
-        status: 429,
-        code: 'SOCKET_RATE_LIMIT_EXCEEDED',
-        message: `Thao tác "${eventName}" quá nhanh. Vui lòng thử lại sau giây lát.`,
-        retryAfterMs: bucket.resetAt - now,
-      });
+    if (this.redis) {
+      const redisKey = `${this.REDIS_PREFIX}${key}`;
+      this.redis
+        .multi()
+        .incr(redisKey)
+        .pexpire(redisKey, rule.windowMs, 'NX')
+        .exec()
+        .then((res) => {
+          const globalCount = Number(res?.[0]?.[1] ?? 1);
+          if (globalCount > rule.points && bucket) {
+            bucket.count = globalCount;
+          }
+        })
+        .catch(() => undefined);
     }
   }
 
