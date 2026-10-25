@@ -7,15 +7,16 @@ import { UserEntity } from './user.entity';
 @Entity('contacts')
 @Unique(['userId', 'contactId'])
 @Index(['userId', 'status'])
+@Index(['contactId', 'status'])
 export class ContactEntity extends BaseModel {
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
   userId: string;
 
   @ManyToOne(() => UserEntity, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: UserEntity;
 
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
   contactId: string;
 
   @ManyToOne(() => UserEntity, { onDelete: 'CASCADE' })
@@ -29,6 +30,6 @@ export class ContactEntity extends BaseModel {
   })
   status: ContactStatusEnum;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   alias: string | null;
 }

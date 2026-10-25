@@ -15,10 +15,10 @@ export class ConversationEntity extends BaseModel {
   })
   type: ConversationTypeEnum;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   name: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   avatar: string;
 
   @Column({ name: 'direct_key', type: 'varchar', length: 80, nullable: true, unique: true })
@@ -27,13 +27,13 @@ export class ConversationEntity extends BaseModel {
   @Column({ type: 'text', nullable: true })
   lastMessage: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', length: 36, nullable: true })
   lastMessageSenderId: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', length: 64, nullable: true })
   lastMessageType: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'datetime', nullable: true })
   lastMessageAt: Date;
 
   @OneToMany(() => ConversationParticipantEntity, (p) => p.conversation)

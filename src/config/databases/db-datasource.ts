@@ -22,15 +22,22 @@ export const dataSourceOptions: DataSourceOptions = {
 
   charset: 'utf8mb4',
   timezone: 'Z',
-  logging: process.env.DB_LOGGING === 'true' ? ['query', 'error', 'warn'] : ['error'],
+  maxQueryExecutionTime: Number(process.env.DB_SLOW_QUERY_THRESHOLD_MS || 2000),
+  logging:
+    process.env.DB_LOGGING === 'true' ? ['query', 'error', 'warn', 'schema'] : ['error', 'warn'],
 
   extra: {
     connectionLimit: Number(process.env.DB_POOL_SIZE || 20),
+    maxIdle: Number(process.env.DB_MAX_IDLE || 10),
+    idleTimeout: Number(process.env.DB_IDLE_TIMEOUT_MS || 60000),
     waitForConnections: true,
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000,
     connectTimeout: 10000,
+    supportBigNumbers: true,
+    bigNumberStrings: false,
+    dateStrings: false,
   },
 };
 

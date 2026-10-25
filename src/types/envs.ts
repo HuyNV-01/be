@@ -1,6 +1,7 @@
 import { FileProviderEnum } from 'src/common/enum';
 
 export type EnvConfig = {
+  NODE_ENV?: string;
   APP_URL: string;
   FE_URL: string;
   PORT: number;
@@ -14,6 +15,7 @@ export type EnvConfig = {
   REDIS_PASSWORD?: string;
   BCRYPT_SALT_ROUND: number;
   JWT_SECRET: string;
+  JWT_REFRESH_SECRET?: string;
   JWT_EXPIRES_IN: string;
   JWT_REFRESH_EXPIRES_IN: string;
   JWT_ACTIVATION_SECRET: string;

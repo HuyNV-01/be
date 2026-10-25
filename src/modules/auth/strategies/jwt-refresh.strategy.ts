@@ -1,37 +1,42 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { HttpStatus, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 
 import { Request } from 'express';
-import { Strategy } from 'passport-jwt';
+import { ExtractJwt, Strategy } from 'passport-jwt';
 import { envs } from 'src/config/envs';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { IJwtTokenPayload } from 'src/interface/auth.interface';
 
-const cookieExtractor = (req: Request): string | null => {
-  let token = null;
-  if (req && req.cookies) {
-    token = req.cookies['refresh_token'];
+const cookieOrBearerExtractor = (req: Request): string | null => {
+  if (req && req.cookies && req.cookies['refresh_token']) {
+    return req.cookies['refresh_token'] as string;
   }
-  return token;
+  return ExtractJwt.fromAuthHeaderAsBearerToken()(req);
 };
 
 @Injectable()
 export class JwtRefreshStrategy extends PassportStrategy(Strategy, 'jwt-refresh') {
   constructor() {
     super({
-      jwtFromRequest: cookieExtractor,
-
+      jwtFromRequest: cookieOrBearerExtractor,
       ignoreExpiration: false,
-
-      secretOrKey: envs.jwtSecret,
+      secretOrKey: envs.jwtRefreshSecret,
       passReqToCallback: true,
     });
   }
 
-  validate(req: Request, payload: any) {
-    const refreshToken = req.cookies['refresh_token'] ?? '';
+  validate(req: Request, payload: IJwtTokenPayload) {
+    if (payload.type && payload.type !== 'refresh') {
+      throw new UnauthorizedException({
+        status: HttpStatus.UNAUTHORIZED,
+        message: HTTP_RESPONSE.AUTH.UNAUTHORIZED.message,
+        code: HTTP_RESPONSE.AUTH.UNAUTHORIZED.code,
+      });
+    }
+
+    const refreshToken = cookieOrBearerExtractor(req) ?? '';
 
     if (!refreshToken) {
       throw new UnauthorizedException({

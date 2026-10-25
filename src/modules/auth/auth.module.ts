@@ -13,6 +13,7 @@ import { MailModule } from '../mail/mail.module';
 import { UserModule } from '../user/user.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AuthRateLimitGuard } from './guards/auth-rate-limit.guard';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -38,8 +39,16 @@ import { LocalStrategy } from './strategies/local.strategy';
     JwtStrategy,
     JwtRefreshStrategy,
     GoogleStrategy,
+    AuthRateLimitGuard,
     SocketStateService,
   ],
-  exports: [JwtStrategy, PassportModule, JwtModule, AuthService, SocketStateService],
+  exports: [
+    JwtStrategy,
+    PassportModule,
+    JwtModule,
+    AuthService,
+    AuthRateLimitGuard,
+    SocketStateService,
+  ],
 })
 export class AuthModule {}

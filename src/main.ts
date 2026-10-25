@@ -19,9 +19,13 @@ async function bootstrap(): Promise<void> {
     logger: ['log', 'fatal', 'error', 'warn', 'debug', 'verbose'],
   });
 
+  app.set('trust proxy', 1);
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
+      transform: true,
+      forbidUnknownValues: true,
     }),
   );
 

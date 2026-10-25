@@ -6,8 +6,9 @@ import { UserEntity } from './user.entity';
 
 @Entity('conversation_participants')
 @Index(['conversationId', 'userId'], { unique: true })
+@Index(['userId'])
 export class ConversationParticipantEntity extends BaseModel {
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
   conversationId: string;
 
   @ManyToOne(() => ConversationEntity, (c) => c.participants, {
@@ -16,17 +17,17 @@ export class ConversationParticipantEntity extends BaseModel {
   @JoinColumn({ name: 'conversationId' })
   conversation: ConversationEntity;
 
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
   userId: string;
 
-  @ManyToOne(() => UserEntity)
+  @ManyToOne(() => UserEntity, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: UserEntity;
 
   @Column({ default: false })
   isAdmin: boolean;
 
-  @Column({ nullable: true })
+  @Column({ type: 'datetime', nullable: true })
   lastReadAt: Date;
 
   @Column({ default: false })

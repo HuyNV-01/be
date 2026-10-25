@@ -1,12 +1,13 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 
-import { JwtPayload } from 'jsonwebtoken';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { envs } from 'src/config/envs';
+import { HTTP_RESPONSE } from 'src/constants/http-response';
+import { IJwtTokenPayload } from 'src/interface/auth.interface';
 
 import { AuthService } from '../auth.service';
 
@@ -20,9 +21,19 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     });
   }
 
-  async validate(payload: JwtPayload): Promise<any> {
-    const { id } = payload;
-    const user = await this.authService.validateUserById({ id });
+  async validate(payload: IJwtTokenPayload): Promise<any> {
+    if (payload.type && payload.type !== 'access') {
+      throw new UnauthorizedException({
+        status: HttpStatus.UNAUTHORIZED,
+        message: HTTP_RESPONSE.AUTH.UNAUTHORIZED.message,
+        code: HTTP_RESPONSE.AUTH.UNAUTHORIZED.code,
+      });
+    }
+
+    const user = await this.authService.validateUserById({
+      id: payload.id,
+      iat: payload.iat,
+    });
     return user;
   }
 }

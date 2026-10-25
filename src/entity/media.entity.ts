@@ -7,14 +7,15 @@ import { FileEntity } from './file.entity';
 @Entity('media')
 @Index(['targetId', 'type'])
 export class MediaEntity extends BaseModel {
-  @Column({ name: 'file_id' })
+  @Column({ name: 'file_id', type: 'varchar', length: 36 })
+  @Index()
   fileId: string;
 
   @ManyToOne(() => FileEntity, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'file_id' })
   file: FileEntity;
 
-  @Column({ name: 'target_id', type: 'uuid' })
+  @Column({ name: 'target_id', type: 'varchar', length: 36 })
   targetId: string;
 
   @Column({ type: 'enum', enum: MediaTypeEnum })

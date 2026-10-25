@@ -6,6 +6,7 @@ import { EnvConfig } from 'src/types/envs';
 
 const envVarsSchema = joi
   .object<EnvConfig>({
+    NODE_ENV: joi.string().valid('development', 'production', 'test').default('development'),
     APP_URL: joi.string().required(),
     FE_URL: joi.string().required(),
     PORT: joi.number().default(3000),
@@ -17,8 +18,9 @@ const envVarsSchema = joi
     REDIS_HOST: joi.string().required(),
     REDIS_PORT: joi.number().required(),
     REDIS_PASSWORD: joi.string().optional().allow(''),
-    BCRYPT_SALT_ROUND: joi.number().required(),
+    BCRYPT_SALT_ROUND: joi.number().min(8).max(16).required(),
     JWT_SECRET: joi.string().required(),
+    JWT_REFRESH_SECRET: joi.string().optional(),
     JWT_EXPIRES_IN: joi.string().required(),
     JWT_REFRESH_EXPIRES_IN: joi.string().required(),
     JWT_ACTIVATION_SECRET: joi.string().required(),
@@ -66,6 +68,10 @@ if (error) {
 }
 
 export const envs = {
+  nodeEnv: envVars.NODE_ENV || 'development',
+  isProduction:
+    (envVars.NODE_ENV || '').toLowerCase() === 'production' ||
+    envVars.FE_URL.startsWith('https://'),
   appUrl: envVars.APP_URL,
   feUrl: envVars.FE_URL,
   port: envVars.PORT,
@@ -77,8 +83,9 @@ export const envs = {
   redisHost: envVars.REDIS_HOST,
   redisPort: envVars.REDIS_PORT,
   redisPassword: envVars.REDIS_PASSWORD,
-  bcryptSaltRound: envVars.BCRYPT_SALT_ROUND,
+  bcryptSaltRound: Number(envVars.BCRYPT_SALT_ROUND),
   jwtSecret: envVars.JWT_SECRET,
+  jwtRefreshSecret: envVars.JWT_REFRESH_SECRET || `${envVars.JWT_SECRET}_refresh`,
   jwtExpiresIn: envVars.JWT_EXPIRES_IN,
   jwtRefreshExpiresIn: envVars.JWT_REFRESH_EXPIRES_IN,
   jwtActivationSecret: envVars.JWT_ACTIVATION_SECRET,

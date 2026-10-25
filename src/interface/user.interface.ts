@@ -7,6 +7,9 @@ export interface ICreateUser {
   name: string;
   status?: StatusEnum;
   role?: ValidRolesEnum;
+  provider?: string;
+  uid?: string | null;
+  emailVerifiedAt?: Date | null;
 }
 
 export interface IUpdateUser {
@@ -15,9 +18,16 @@ export interface IUpdateUser {
   email?: string;
   status?: StatusEnum;
   role?: ValidRolesEnum;
-  currentSignInAt?: Date;
-  lastSignInAt?: Date;
+  provider?: string;
+  uid?: string | null;
+  currentSignInAt?: Date | null;
+  lastSignInAt?: Date | null;
+  lastSignInIp?: string | null;
   refreshToken?: string | null;
+  emailVerifiedAt?: Date | null;
+  passwordChangedAt?: Date | null;
+  failedLoginAttempts?: number;
+  lockedUntil?: Date | null;
 }
 
 export interface IUserProfile extends UserEntity {

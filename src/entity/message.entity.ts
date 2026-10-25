@@ -24,7 +24,7 @@ export class MessageEntity extends BaseModel {
   @Column({ type: 'json', nullable: true })
   metadata: messageInterface.MessageMetadata;
 
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
   @Index()
   conversationId: string;
 
@@ -34,7 +34,8 @@ export class MessageEntity extends BaseModel {
   @JoinColumn({ name: 'conversationId' })
   conversation: ConversationEntity;
 
-  @Column()
+  @Column({ type: 'varchar', length: 36 })
+  @Index()
   senderId: string;
 
   @ManyToOne(() => UserEntity)

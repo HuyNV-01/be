@@ -6,6 +6,7 @@ import {
   Index,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
+  VersionColumn,
 } from 'typeorm';
 
 export class BaseModel extends BaseEntity {
@@ -21,8 +22,8 @@ export class BaseModel extends BaseEntity {
   @Index()
   createdAt: Date;
 
-  @Column({ name: 'created_by', type: 'varchar', nullable: true })
-  createdBy: string;
+  @Column({ name: 'created_by', type: 'varchar', length: 36, nullable: true })
+  createdBy: string | null;
 
   @UpdateDateColumn({
     name: 'updated_at',
@@ -33,8 +34,8 @@ export class BaseModel extends BaseEntity {
   })
   updatedAt: Date;
 
-  @Column({ name: 'updated_by', type: 'varchar', nullable: true })
-  updatedBy: string;
+  @Column({ name: 'updated_by', type: 'varchar', length: 36, nullable: true })
+  updatedBy: string | null;
 
   @DeleteDateColumn({
     name: 'deleted_at',
@@ -44,6 +45,9 @@ export class BaseModel extends BaseEntity {
   })
   deletedAt: Date | null;
 
-  @Column({ name: 'deleted_by', type: 'varchar', nullable: true })
+  @Column({ name: 'deleted_by', type: 'varchar', length: 36, nullable: true })
   deletedBy: string | null;
+
+  @VersionColumn({ name: 'version', default: 1 })
+  version: number;
 }

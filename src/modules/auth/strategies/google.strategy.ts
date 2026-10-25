@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 
@@ -35,15 +35,29 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     profile: any,
     done: VerifyCallback,
   ): Promise<any> {
+    const rawEmail = profile?.emails?.[0]?.value;
+    if (!rawEmail) {
+      done(new UnauthorizedException('Google account does not provide a valid email'), false);
+      return null;
+    }
+
+    const givenName = profile?.name?.givenName?.trim() || '';
+    const familyName = profile?.name?.familyName?.trim() || '';
+    const fullName =
+      [givenName, familyName].filter(Boolean).join(' ') ||
+      profile?.displayName?.trim() ||
+      rawEmail.split('@')[0];
+
     const googleUser: IGoogleUser = {
-      email: profile.emails[0].value,
-      name: profile.name.givenName + profile.name.familyName,
+      email: rawEmail.trim().toLowerCase(),
+      name: fullName,
       password: '',
       status: StatusEnum.ACTIVE,
-      provider: profile.provider,
-      uid: profile.id,
+      provider: profile?.provider || 'google',
+      uid: String(profile?.id || ''),
       accessToken,
     };
+
     const user = await this.authService.validateGoogleUser({ googleUser });
     done(null, user);
     return user;

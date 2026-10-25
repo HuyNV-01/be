@@ -24,6 +24,10 @@ export const HTTP_RESPONSE = {
       message: 'Not Found',
       code: 404,
     },
+    TOO_MANY_REQUESTS: {
+      message: 'Too many requests. Please try again later.',
+      code: 429,
+    },
     INTERNAL_SERVER_ERROR: {
       message: 'Internal Server Error',
       code: 500,
@@ -51,7 +55,7 @@ export const HTTP_RESPONSE = {
       code: 2000,
     },
     EMAIL_EXITED: {
-      message: 'Email exited',
+      message: 'Email already exists',
       code: 2001,
     },
   },
@@ -61,23 +65,23 @@ export const HTTP_RESPONSE = {
       code: 3000,
     },
     ACCESS_DENIED: {
-      message: 'Access Denied. User not found or not logged in.',
+      message: 'Access Denied. User not found or session has expired.',
       code: 3001,
     },
     NOT_MATCH_TOKEN: {
-      message: 'Access Denied. Invalid credentials.',
+      message: 'Access Denied. Refresh token is invalid or has been revoked.',
       code: 3002,
     },
     STATUS_ERROR: {
-      message: 'User status is not active.',
+      message: 'Account has not been activated yet. Please verify your email.',
       code: 3003,
     },
     CONFLICT: {
-      message: 'User account is deleted.',
+      message: 'User account has been deactivated or deleted.',
       code: 3004,
     },
     CREATE_SUCCESS: {
-      message: 'User registered successfully',
+      message: 'User registered successfully. Please check your email to activate your account.',
       code: 3005,
     },
     LOGIN_SUCCESS: {
@@ -101,11 +105,11 @@ export const HTTP_RESPONSE = {
       code: 3010,
     },
     ACTIVATE_FAILED: {
-      message: 'Account activation failed',
+      message: 'Account activation failed or token expired',
       code: 3011,
     },
     INVALID_OTP: {
-      message: 'Invalid OTP code',
+      message: 'Invalid or expired OTP code',
       code: 3012,
     },
     OTP_VERIFIED: {
@@ -117,7 +121,7 @@ export const HTTP_RESPONSE = {
       code: 3014,
     },
     FORGOT_PASSWORD_SUCCESS: {
-      message: 'Password reset OTP sent successfully',
+      message: 'If the email exists in our system, a password reset OTP has been sent.',
       code: 3015,
     },
     UNAUTHORIZED: {
@@ -127,6 +131,26 @@ export const HTTP_RESPONSE = {
     GOOGLE_ERROR: {
       message: 'Google authentication failed',
       code: 3017,
+    },
+    ACCOUNT_LOCKED: {
+      message: 'Account is temporarily locked due to multiple failed login attempts.',
+      code: 3018,
+    },
+    OTP_MAX_ATTEMPTS_EXCEEDED: {
+      message: 'Maximum OTP verification attempts exceeded. Please request a new OTP.',
+      code: 3019,
+    },
+    RESET_SESSION_EXPIRED: {
+      message: 'Password reset session is invalid or has expired. Please verify OTP again.',
+      code: 3020,
+    },
+    RATE_LIMIT_EXCEEDED: {
+      message: 'Too many authentication attempts. Please wait before trying again.',
+      code: 3021,
+    },
+    RESEND_ACTIVATION_SUCCESS: {
+      message: 'If your account is pending activation, a new activation link has been sent.',
+      code: 3022,
     },
   },
   EMAIL: {

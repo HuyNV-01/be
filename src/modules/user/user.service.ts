@@ -1,4 +1,10 @@
-import { BadRequestException, HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import * as bcrypt from 'bcrypt';
@@ -12,7 +18,7 @@ import { MediaEntity } from 'src/entity/media.entity';
 import { UserEntity } from 'src/entity/user.entity';
 import { ICreateUser, IUpdateUser } from 'src/interface/user.interface';
 import { PaginatedResult } from 'src/types/query.types';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 
 import { BufferedFile } from '../files/files.service';
 import { MediaService } from '../media/media.service';
@@ -28,9 +34,25 @@ export class UserService {
   async findUserByEmail(payload: {
     email: string;
     skipError?: boolean;
+    includeSecrets?: boolean;
+    withDeleted?: boolean;
   }): Promise<UserEntity | null> {
-    const { email, skipError = false } = payload;
-    const user = await this.userRepository.findOne({ where: { email } });
+    const { email, skipError = false, includeSecrets = false, withDeleted = false } = payload;
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const qb = this.userRepository
+      .createQueryBuilder('u')
+      .where('u.email = :email', { email: normalizedEmail });
+
+    if (withDeleted) {
+      qb.withDeleted();
+    }
+
+    if (includeSecrets) {
+      qb.addSelect(['u.password', 'u.refreshToken']);
+    }
+
+    const user = await qb.getOne();
     if (!user && !skipError) {
       throw new NotFoundException({
         status: HttpStatus.NOT_FOUND,
@@ -43,42 +65,90 @@ export class UserService {
 
   async createUser(payload: { data: ICreateUser }): Promise<UserEntity> {
     const { data: newUser } = payload;
-    const exitUser = await this.userRepository.findOne({
-      where: { email: newUser.email },
+    const normalizedEmail = newUser.email.trim().toLowerCase();
+
+    const existingUser = await this.userRepository.findOne({
+      where: { email: normalizedEmail },
+      withDeleted: true,
     });
-    if (exitUser) {
+
+    if (existingUser) {
       throw new BadRequestException({
         status: HttpStatus.BAD_REQUEST,
         message: HTTP_RESPONSE.USER.EMAIL_EXITED.message,
         code: HTTP_RESPONSE.USER.EMAIL_EXITED.code,
       });
     }
-    const userData = {
+
+    const hashedPassword = await bcrypt.hash(newUser.password, envs.bcryptSaltRound);
+    const userData: Partial<UserEntity> = {
       ...newUser,
-      password: bcrypt.hashSync(newUser.password, envs.bcryptSaltRound),
+      email: normalizedEmail,
+      name: newUser.name.trim(),
+      password: hashedPassword,
+      provider: newUser.provider || 'local',
     };
+
     const user = this.userRepository.create(userData);
-    return this.userRepository.save(user);
+    try {
+      const saved = await this.userRepository.save(user);
+      delete (saved as Partial<UserEntity>).password;
+      delete (saved as Partial<UserEntity>).refreshToken;
+      return saved;
+    } catch (error) {
+      if (
+        error instanceof QueryFailedError &&
+        ((error as any).code === 'ER_DUP_ENTRY' || (error as any).errno === 1062)
+      ) {
+        throw new ConflictException({
+          status: HttpStatus.CONFLICT,
+          message: HTTP_RESPONSE.USER.EMAIL_EXITED.message,
+          code: HTTP_RESPONSE.USER.EMAIL_EXITED.code,
+        });
+      }
+      throw error;
+    }
   }
 
-  async findUserById(payload: { userId: string }): Promise<UserEntity> {
-    const { userId } = payload;
-    const user = await this.userRepository.findOne({ where: { id: userId } });
-    if (!user) {
+  async findUserById(payload: {
+    userId: string;
+    includeSecrets?: boolean;
+    withDeleted?: boolean;
+    skipError?: boolean;
+  }): Promise<UserEntity> {
+    const { userId, includeSecrets = false, withDeleted = false, skipError = false } = payload;
+
+    const qb = this.userRepository.createQueryBuilder('u').where('u.id = :userId', { userId });
+
+    if (withDeleted) {
+      qb.withDeleted();
+    }
+
+    if (includeSecrets) {
+      qb.addSelect(['u.password', 'u.refreshToken']);
+    }
+
+    const user = await qb.getOne();
+    if (!user && !skipError) {
       throw new NotFoundException({
         status: HttpStatus.NOT_FOUND,
         message: HTTP_RESPONSE.USER.NOT_FOUND.message,
         code: HTTP_RESPONSE.USER.NOT_FOUND.code,
       });
     }
-    return user;
+    return user as UserEntity;
   }
 
   async updateUser(payload: { userId: string; data: IUpdateUser }): Promise<UserEntity> {
     const { userId, data: updateUser } = payload;
+    const sanitizedData: IUpdateUser = { ...updateUser };
+    if (sanitizedData.email) {
+      sanitizedData.email = sanitizedData.email.trim().toLowerCase();
+    }
+
     const user = await this.userRepository.preload({
       id: userId,
-      ...updateUser,
+      ...sanitizedData,
     });
 
     if (!user) {
@@ -89,7 +159,10 @@ export class UserService {
       });
     }
 
-    return this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    delete (saved as Partial<UserEntity>).password;
+    delete (saved as Partial<UserEntity>).refreshToken;
+    return saved;
   }
 
   async getList(payload: { query: GetListUserDto }): Promise<PaginatedResult<UserEntity>> {
