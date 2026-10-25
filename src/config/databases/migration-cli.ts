@@ -57,7 +57,6 @@ function createDataMigrationTemplate(name: string): void {
     name = '${className}';
 
     public async up(queryRunner: QueryRunner): Promise<void> {
-      // Ví dụ sử dụng SchemaMigrationHelper để thêm cột và tự động đồng bộ dữ liệu cũ mà không cần viết SQL thủ công:
       // await SchemaMigrationHelper.safeAddColumn(
       //   queryRunner,
       //   'users',
