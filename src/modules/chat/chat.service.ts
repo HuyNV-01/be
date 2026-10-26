@@ -18,11 +18,18 @@ import {
   MediaTypeEnum,
   MessageStatusEnum,
   MessageTypeEnum,
+  NotificationResourceTypeEnum,
+  NotificationTypeEnum,
 } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import { SocketStateService, UserPublicKeyBundle } from 'src/common/websocket/socket-state.service';
 import { envs } from 'src/config/envs/envs';
 import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
+import {
+  NotificationConversationReadEvent,
+  NotificationDispatchEvent,
+  NotificationEventEnum,
+} from 'src/config/websocket/events/notification.events';
 import {
   AddGroupMembersDto,
   EditMessageDto,
@@ -59,9 +66,6 @@ export class ChatService {
     timestamp: true,
   });
 
-  /**
-   * Bộ nhớ đệm quyền thành viên ngắn hạn (TTL 30s) giúp giảm 90% truy vấn DB khi gõ phím (typing) hoặc gửi tin liên tục
-   */
   private readonly membershipCache = new Map<string, { isMember: boolean; expiresAt: number }>();
   private readonly MEMBERSHIP_CACHE_TTL_MS = 30_000;
 
@@ -147,7 +151,7 @@ export class ChatService {
     const label = '[sendMessage]';
     const { senderId, dto } = payload;
 
-    // 1. Kiểm tra Idempotency (chống nhân bản tin nhắn khi mạng chập chờn hoặc gửi đúp)
+    // 1. Kiểm tra Idempotency
     if (dto.tempId) {
       const existingMsg = await this.msgRepository.findOne({
         where: {
@@ -173,14 +177,18 @@ export class ChatService {
 
     try {
       const participant = await this.ensureParticipant(dto.conversationId, senderId);
+      const now = new Date();
 
       let replyPreview: MessageReplyPreview | undefined;
+      let repliedUserId: string | null = null;
+
       if (dto.replyToMessageId) {
         const parentMsg = await queryRunner.manager.findOne(MessageEntity, {
           where: { id: dto.replyToMessageId, conversationId: dto.conversationId },
           relations: ['sender'],
         });
         if (parentMsg) {
+          repliedUserId = parentMsg.senderId;
           const decryptedParent = this.messageCryptoService.decryptForConversation(
             parentMsg.content,
             dto.conversationId,
@@ -239,9 +247,11 @@ export class ChatService {
         clientTempId: dto.tempId ? dto.tempId.slice(0, 64) : null,
         isPinned: false,
         metadata,
-        readBy: [],
-        deliveredTo: [],
+        readBy: [senderId],
+        deliveredTo: [senderId],
         status: MessageStatusEnum.SENT,
+        createdAt: now,
+        updatedAt: now,
       });
       const savedMessage = await queryRunner.manager.save(message);
 
@@ -277,13 +287,96 @@ export class ChatService {
 
       const participants = await this.partRepository.find({
         where: { conversationId: dto.conversationId },
-        select: ['userId'],
+        select: ['userId', 'isMuted'],
+      });
+
+      const conversation = await this.convRepository.findOne({
+        where: { id: dto.conversationId },
+        select: ['id', 'name', 'type'],
       });
 
       await queryRunner.commitTransaction();
 
       const finalMessage = await this.buildEnrichedMessageResponse(savedMessage.id);
       this.logger.debug(`${label} messageId -> ${JSON.stringify(message.id)}`);
+
+      // Phát sự kiện thông báo cho các thành viên chưa tắt thông báo (isMuted = false)
+      const unmutedRecipients = participants
+        .filter((p) => p.userId !== senderId && !p.isMuted)
+        .map((p) => p.userId);
+
+      if (unmutedRecipients.length > 0 && finalMessage) {
+        const senderName = finalMessage.sender?.name || 'Người dùng';
+        const isGroup = conversation?.type === ConversationTypeEnum.GROUP;
+        const previewText =
+          dto.type === MessageTypeEnum.IMAGE
+            ? 'đã gửi một hình ảnh'
+            : dto.type === MessageTypeEnum.VIDEO
+              ? 'đã gửi một video'
+              : dto.type === MessageTypeEnum.AUDIO
+                ? 'đã gửi một tin nhắn thoại'
+                : dto.type === MessageTypeEnum.FILE
+                  ? 'đã gửi một tệp đính kèm'
+                  : cleanContent.slice(0, 120);
+
+        // Nếu có người được reply trực tiếp thì gửi thông báo phản hồi riêng
+        if (
+          repliedUserId &&
+          repliedUserId !== senderId &&
+          unmutedRecipients.includes(repliedUserId)
+        ) {
+          this.eventEmitter.emit(
+            NotificationEventEnum.DISPATCH,
+            new NotificationDispatchEvent({
+              recipientIds: [repliedUserId],
+              actorId: senderId,
+              type: NotificationTypeEnum.MESSAGE_REPLY,
+              title: isGroup
+                ? `${senderName} đã trả lời bạn trong ${conversation?.name || 'nhóm'}`
+                : `${senderName} đã trả lời tin nhắn của bạn`,
+              content: previewText,
+              resourceType: NotificationResourceTypeEnum.CONVERSATION,
+              resourceId: dto.conversationId,
+              dedupeKey: `msg_unread:${dto.conversationId}`,
+              metadata: {
+                conversationId: dto.conversationId,
+                conversationName: conversation?.name,
+                conversationType: conversation?.type,
+                messageId: savedMessage.id,
+                messageType: savedMessage.type,
+                actionUrl: `/chat/${dto.conversationId}`,
+              },
+            }),
+          );
+        }
+
+        const normalRecipients = unmutedRecipients.filter((uid) => uid !== repliedUserId);
+        if (normalRecipients.length > 0) {
+          this.eventEmitter.emit(
+            NotificationEventEnum.DISPATCH,
+            new NotificationDispatchEvent({
+              recipientIds: normalRecipients,
+              actorId: senderId,
+              type: NotificationTypeEnum.NEW_MESSAGE,
+              title: isGroup
+                ? `Tin nhắn mới trong ${conversation?.name || 'nhóm'}`
+                : `Tin nhắn mới từ ${senderName}`,
+              content: isGroup ? `${senderName}: ${previewText}` : previewText,
+              resourceType: NotificationResourceTypeEnum.CONVERSATION,
+              resourceId: dto.conversationId,
+              dedupeKey: `msg_unread:${dto.conversationId}`,
+              metadata: {
+                conversationId: dto.conversationId,
+                conversationName: conversation?.name,
+                conversationType: conversation?.type,
+                messageId: savedMessage.id,
+                messageType: savedMessage.type,
+                actionUrl: `/chat/${dto.conversationId}`,
+              },
+            }),
+          );
+        }
+      }
 
       return {
         message: { ...finalMessage, tempId: dto.tempId },
@@ -471,6 +564,41 @@ export class ChatService {
     message.metadata = metadata;
     await this.msgRepository.save(message);
 
+    if (action === 'added' && message.senderId !== userId) {
+      const targetPart = await this.partRepository.findOne({
+        where: { conversationId: dto.conversationId, userId: message.senderId },
+        select: ['isMuted'],
+      });
+
+      if (!targetPart?.isMuted) {
+        const users = await this.userService.getBasicUsersInfo([userId]);
+        const actorName = users[0]?.name || 'Một người dùng';
+        const decryptedPreview = this.messageCryptoService
+          .decryptForConversation(message.content, dto.conversationId)
+          .slice(0, 80);
+
+        this.eventEmitter.emit(
+          NotificationEventEnum.DISPATCH,
+          new NotificationDispatchEvent({
+            recipientIds: [message.senderId],
+            actorId: userId,
+            type: NotificationTypeEnum.MESSAGE_REACTION,
+            title: `${actorName} đã bày tỏ cảm xúc ${dto.emoji}`,
+            content: `Về tin nhắn của bạn: "${decryptedPreview}"`,
+            resourceType: NotificationResourceTypeEnum.CONVERSATION,
+            resourceId: dto.conversationId,
+            dedupeKey: `react:${message.id}:${userId}`,
+            metadata: {
+              conversationId: dto.conversationId,
+              messageId: message.id,
+              emoji: dto.emoji,
+              actionUrl: `/chat/${dto.conversationId}`,
+            },
+          }),
+        );
+      }
+    }
+
     return {
       conversationId: dto.conversationId,
       messageId: message.id,
@@ -539,6 +667,7 @@ export class ChatService {
       params.conversationId,
     );
 
+    const now = new Date();
     const msg = this.msgRepository.create({
       conversationId: params.conversationId,
       senderId: params.initiatorId,
@@ -547,6 +676,8 @@ export class ChatService {
       status: MessageStatusEnum.SENT,
       readBy: [params.initiatorId],
       deliveredTo: params.participantIds,
+      createdAt: now,
+      updatedAt: now,
       metadata: {
         isEncrypted: true,
         encryptionAlg: 'AES-256-GCM',
@@ -557,7 +688,7 @@ export class ChatService {
           durationSeconds: params.durationSeconds,
           initiatorId: params.initiatorId,
           participantIds: params.participantIds,
-          endedAt: new Date().toISOString(),
+          endedAt: now.toISOString(),
         },
       },
     });
@@ -570,7 +701,36 @@ export class ChatService {
       lastMessageType: MessageTypeEnum.CALL,
     });
 
-    return this.buildEnrichedMessageResponse(saved.id);
+    const enriched = await this.buildEnrichedMessageResponse(saved.id);
+
+    // Thông báo cuộc gọi nhỡ cho người nhận
+    if (params.status === CallStatusEnum.MISSED || params.status === CallStatusEnum.CANCELLED) {
+      const targetIds = params.participantIds.filter((id) => id !== params.initiatorId);
+      if (targetIds.length > 0) {
+        const callerName = enriched?.sender?.name || 'Người dùng';
+        this.eventEmitter.emit(
+          NotificationEventEnum.DISPATCH,
+          new NotificationDispatchEvent({
+            recipientIds: targetIds,
+            actorId: params.initiatorId,
+            type: NotificationTypeEnum.MISSED_CALL,
+            title: `Cuộc gọi ${callLabel} nhỡ`,
+            content: `Bạn có cuộc gọi ${callLabel} nhỡ từ ${callerName}.`,
+            resourceType: NotificationResourceTypeEnum.CONVERSATION,
+            resourceId: params.conversationId,
+            dedupeKey: `missed_call:${params.conversationId}:${params.initiatorId}`,
+            metadata: {
+              conversationId: params.conversationId,
+              callId: params.callId,
+              callType: params.callType,
+              actionUrl: `/chat/${params.conversationId}`,
+            },
+          }),
+        );
+      }
+    }
+
+    return enriched;
   }
 
   async registerE2EEPublicKey(
@@ -631,16 +791,39 @@ export class ChatService {
     const newMemberIds = [...new Set(params.dto.memberIds)].filter((id) => !existingSet.has(id));
 
     if (newMemberIds.length > 0) {
+      const now = new Date();
       const entities = newMemberIds.map((uid) =>
         this.partRepository.create({
           conversationId: params.conversationId,
           userId: uid,
           isAdmin: false,
-          joinedAt: new Date(),
+          joinedAt: now,
+          lastReadAt: now,
         }),
       );
       await this.partRepository.save(entities);
       this.invalidateMembershipCache(params.conversationId);
+
+      const users = await this.userService.getBasicUsersInfo([params.requesterId]);
+      const requesterName = users[0]?.name || 'Quản trị viên';
+
+      this.eventEmitter.emit(
+        NotificationEventEnum.DISPATCH,
+        new NotificationDispatchEvent({
+          recipientIds: newMemberIds,
+          actorId: params.requesterId,
+          type: NotificationTypeEnum.GROUP_MEMBER_ADDED,
+          title: 'Được thêm vào nhóm trò chuyện',
+          content: `${requesterName} đã thêm bạn vào nhóm "${conv.name || 'Nhóm trò chuyện'}".`,
+          resourceType: NotificationResourceTypeEnum.CONVERSATION,
+          resourceId: params.conversationId,
+          metadata: {
+            conversationId: params.conversationId,
+            conversationName: conv.name,
+            actionUrl: `/chat/${params.conversationId}`,
+          },
+        }),
+      );
     }
 
     return {
@@ -712,6 +895,12 @@ export class ChatService {
 
     return {
       ...fullMessage,
+      createdAt: fullMessage.createdAt
+        ? new Date(fullMessage.createdAt).toISOString()
+        : new Date().toISOString(),
+      updatedAt: fullMessage.updatedAt
+        ? new Date(fullMessage.updatedAt).toISOString()
+        : new Date().toISOString(),
       content: decryptedContent,
       sender,
     };
@@ -793,6 +982,8 @@ export class ChatService {
 
       return {
         ...msg,
+        createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+        updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : new Date().toISOString(),
         content: decryptedContent,
         sender: cleanSender,
         status: computedStatus,
@@ -819,10 +1010,13 @@ export class ChatService {
     await queryRunner.startTransaction();
 
     try {
+      const now = new Date();
       const conversation = this.convRepository.create({
         name: dto.name.trim(),
         type: ConversationTypeEnum.GROUP,
-        lastMessageAt: new Date(),
+        lastMessageAt: now,
+        createdAt: now,
+        updatedAt: now,
       });
       const savedConv = await queryRunner.manager.save(conversation);
 
@@ -832,12 +1026,37 @@ export class ChatService {
           conversationId: savedConv.id,
           userId: uid,
           isAdmin: uid === creatorId,
-          joinedAt: new Date(),
+          joinedAt: now,
+          lastReadAt: now,
         }),
       );
 
       await queryRunner.manager.save(participants);
       await queryRunner.commitTransaction();
+
+      const invitedIds = uniqueIds.filter((uid) => uid !== creatorId);
+      if (invitedIds.length > 0) {
+        const users = await this.userService.getBasicUsersInfo([creatorId]);
+        const creatorName = users[0]?.name || 'Một người dùng';
+
+        this.eventEmitter.emit(
+          NotificationEventEnum.DISPATCH,
+          new NotificationDispatchEvent({
+            recipientIds: invitedIds,
+            actorId: creatorId,
+            type: NotificationTypeEnum.GROUP_INVITE,
+            title: 'Nhóm trò chuyện mới',
+            content: `${creatorName} đã thêm bạn vào nhóm "${savedConv.name}".`,
+            resourceType: NotificationResourceTypeEnum.CONVERSATION,
+            resourceId: savedConv.id,
+            metadata: {
+              conversationId: savedConv.id,
+              conversationName: savedConv.name,
+              actionUrl: `/chat/${savedConv.id}`,
+            },
+          }),
+        );
+      }
 
       return savedConv;
     } catch (err) {
@@ -887,6 +1106,10 @@ export class ChatService {
           .from(MessageEntity, 'm')
           .where(`m.conversationId = ${parentAlias}.id`)
           .andWhere('m.senderId != :userId')
+          .andWhere('m.status != :removedStatus', {
+            removedStatus: MessageStatusEnum.REMOVED,
+          })
+          .andWhere('(mp.joinedAt IS NULL OR m.createdAt >= mp.joinedAt)')
           .andWhere('(mp.lastReadAt IS NULL OR m.createdAt > mp.lastReadAt)');
       });
 
@@ -908,7 +1131,9 @@ export class ChatService {
       query.sort = 'lastMessageAt:DESC';
     }
 
-    const result = await helper.getPaginatedRaw(query);
+    const result = await helper.getPaginatedRaw(query, {
+      unreadCount: 'int',
+    });
 
     const partnerIds: string[] = result.data
       .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
@@ -940,13 +1165,23 @@ export class ChatService {
 
       return {
         ...conv,
+        unreadCount: Math.max(0, Number(conv.unreadCount || 0)),
         lastMessage: decryptedLastMessage,
+        lastMessageAt: conv.lastMessageAt
+          ? new Date(conv.lastMessageAt).toISOString()
+          : conv.createdAt
+            ? new Date(conv.createdAt).toISOString()
+            : null,
         isOnline,
         avatar,
         isAdmin: myParticipant?.isAdmin || false,
         isMuted: myParticipant?.isMuted || false,
-        joinedAt: myParticipant?.joinedAt || new Date(),
-        lastReadAt: myParticipant?.lastReadAt,
+        joinedAt: myParticipant?.joinedAt
+          ? new Date(myParticipant.joinedAt).toISOString()
+          : new Date().toISOString(),
+        lastReadAt: myParticipant?.lastReadAt
+          ? new Date(myParticipant.lastReadAt).toISOString()
+          : null,
       };
     });
 
@@ -1009,10 +1244,13 @@ export class ChatService {
     await queryRunner.startTransaction();
 
     try {
+      const now = new Date();
       const newConv = this.convRepository.create({
         type: ConversationTypeEnum.DIRECT,
         directKey,
-        lastMessageAt: new Date(),
+        lastMessageAt: now,
+        createdAt: now,
+        updatedAt: now,
       });
       const savedConv = await queryRunner.manager.save(newConv);
 
@@ -1020,7 +1258,8 @@ export class ChatService {
         this.partRepository.create({
           conversationId: savedConv.id,
           userId: uid,
-          joinedAt: new Date(),
+          joinedAt: now,
+          lastReadAt: now,
         }),
       );
       await queryRunner.manager.save(participants);
@@ -1050,6 +1289,7 @@ export class ChatService {
       name: partner?.name || conversation.name,
       avatar: partner?.avatarMedia?.file?.url || conversation.avatar || null,
       partnerId,
+      unreadCount: 0,
       isOnline: onlineSet.has(partnerId),
       lastMessage: conversation.lastMessage
         ? this.messageCryptoService.decryptForConversation(
@@ -1057,6 +1297,9 @@ export class ChatService {
             conversation.id,
           )
         : null,
+      lastMessageAt: conversation.lastMessageAt
+        ? new Date(conversation.lastMessageAt).toISOString()
+        : new Date().toISOString(),
       partnerInfo: partner
         ? {
             id: partner.id,
@@ -1103,7 +1346,13 @@ export class ChatService {
     const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo);
     this.eventEmitter.emit(ChatEventEnum.MESSAGE_READ, event);
 
-    return { success: true };
+    // Đồng bộ đánh dấu đã đọc các thông báo tin nhắn của hội thoại này
+    this.eventEmitter.emit(
+      NotificationEventEnum.MARK_CONVERSATION_READ,
+      new NotificationConversationReadEvent(userId, conversationId),
+    );
+
+    return { success: true, lastReadAt: now.toISOString() };
   }
 
   async markAsDelivered(payload: { userId: string; messageId: string }) {

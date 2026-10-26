@@ -19,6 +19,7 @@ import { ContactsModule } from './modules/contacts/contacts.module';
 import { FilesModule } from './modules/files/files.module';
 import { MailModule } from './modules/mail/mail.module';
 import { MediaModule } from './modules/media/media.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { UserModule } from './modules/user/user.module';
 import { parseExpiresIn } from './utils';
@@ -57,6 +58,7 @@ import { parseExpiresIn } from './utils';
     MailModule,
     ChatModule,
     ContactsModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

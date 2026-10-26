@@ -174,14 +174,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     });
 
     if (!isDuplicate) {
-      this.server
-        .to(`conversation:${dto.conversationId}`)
-        .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
-
-      recipientIds.forEach((userId) => {
-        if (userId !== senderId) {
-          this.server.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
-        }
+      const uniqueTargets = new Set([senderId, ...recipientIds]);
+      uniqueTargets.forEach((userId) => {
+        this.server.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
       });
     }
 
@@ -662,14 +657,16 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
   @OnEvent(ChatEventEnum.MESSAGE_READ)
   handleInternalMessageRead(event: ChatMessageReadEvent): void {
+    const payload = {
+      conversationId: event.conversationId,
+      userId: event.userId,
+      user: event.user,
+      lastReadAt: event.lastReadAt.toISOString(),
+    };
     this.server
       .to(`conversation:${event.conversationId}`)
-      .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_READ, {
-        conversationId: event.conversationId,
-        userId: event.userId,
-        user: event.user,
-        lastReadAt: event.lastReadAt.toISOString(),
-      });
+      .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
+    this.emitToUser(event.userId, SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
   }
 
   @SubscribeMessage('mark_read')

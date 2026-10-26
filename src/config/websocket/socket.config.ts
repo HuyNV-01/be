@@ -49,5 +49,12 @@ export const SOCKET_CONFIG = {
       REQUEST_ACCEPTED: 'contact.request_accepted',
       FRIEND_REMOVED: 'contact.friend_removed',
     },
+    NOTIFICATION: {
+      NEW: 'new_notification',
+      UPDATED: 'notification_updated',
+      MARK_READ: 'notification_read',
+      READ_ALL: 'read_all_notifications',
+      REMOVED: 'notification_removed',
+    },
   },
 } as const;
