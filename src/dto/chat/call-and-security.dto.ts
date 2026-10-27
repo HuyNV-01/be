@@ -197,3 +197,57 @@ export class ToggleCallMediaDto {
   @IsBoolean()
   isScreenSharing?: boolean;
 }
+
+// Thêm vào cuối file: src/dto/chat/call-and-security.dto.ts
+export class UpdateParticipantNicknameDto {
+  @ApiProperty({ description: 'User UUID của thành viên cần đặt biệt danh' })
+  @IsUUID()
+  @IsNotEmpty()
+  targetUserId: string;
+
+  @ApiPropertyOptional({ description: 'Biệt danh mới (rỗng để xoá biệt danh)', maxLength: 80 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  nickname?: string | null;
+}
+
+export class UpdateConversationSettingsDto {
+  @ApiPropertyOptional({ description: 'Tắt thông báo cuộc trò chuyện' })
+  @IsOptional()
+  @IsBoolean()
+  isMuted?: boolean;
+
+  @ApiPropertyOptional({ description: 'Bật/tắt âm thanh thông báo' })
+  @IsOptional()
+  @IsBoolean()
+  soundEnabled?: boolean;
+
+  @ApiPropertyOptional({ description: 'Bật/tắt gửi xác nhận đã đọc (Read Receipts)' })
+  @IsOptional()
+  @IsBoolean()
+  readReceiptsEnabled?: boolean;
+
+  @ApiPropertyOptional({ description: 'Hạn chế (Restrict) cuộc trò chuyện này' })
+  @IsOptional()
+  @IsBoolean()
+  isRestricted?: boolean;
+}
+
+export class UpdateDisappearingMessagesDto {
+  @ApiPropertyOptional({
+    description:
+      'Thời gian tự huỷ tin nhắn tính bằng giây (null hoặc 0 để tắt; 60, 3600, 86400, 604800)',
+    enum: [0, 60, 300, 3600, 86400, 604800],
+  })
+  @IsOptional()
+  @IsIn([0, 60, 300, 3600, 86400, 604800, null])
+  disappearingTtl?: number | null;
+}
+
+export class GetSharedAssetsQueryDto {
+  @ApiPropertyOptional({ enum: ['MEDIA', 'FILES', 'LINKS'], default: 'MEDIA' })
+  @IsOptional()
+  @IsIn(['MEDIA', 'FILES', 'LINKS'])
+  tab?: 'MEDIA' | 'FILES' | 'LINKS' = 'MEDIA';
+}

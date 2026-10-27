@@ -33,6 +33,24 @@ export class ConversationParticipantEntity extends BaseModel {
   @Column({ default: false })
   isMuted: boolean;
 
+  @Column({ name: 'sound_enabled', type: 'boolean', default: true })
+  soundEnabled: boolean;
+
+  @Column({ name: 'read_receipts_enabled', type: 'boolean', default: true })
+  readReceiptsEnabled: boolean;
+
+  @Column({ name: 'is_restricted', type: 'boolean', default: false })
+  isRestricted: boolean;
+
+  @Column({ name: 'is_hidden', type: 'boolean', default: false })
+  isHidden: boolean;
+
+  @Column({ name: 'cleared_at', type: 'datetime', nullable: true, default: null })
+  clearedAt: Date | null;
+
+  @Column({ name: 'nickname', type: 'varchar', length: 100, nullable: true, default: null })
+  nickname: string | null;
+
   @CreateDateColumn()
   joinedAt: Date;
 }

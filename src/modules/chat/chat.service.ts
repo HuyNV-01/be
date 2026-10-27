@@ -9,6 +9,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import {
@@ -21,6 +22,7 @@ import {
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
 } from 'src/common/enum';
+import { ContactStatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import { SocketStateService, UserPublicKeyBundle } from 'src/common/websocket/socket-state.service';
 import { envs } from 'src/config/envs/envs';
@@ -38,8 +40,15 @@ import {
   RecallMessageDto,
   RegisterPublicKeyDto,
 } from 'src/dto/chat/call-and-security.dto';
+import {
+  GetSharedAssetsQueryDto,
+  UpdateConversationSettingsDto,
+  UpdateDisappearingMessagesDto,
+  UpdateParticipantNicknameDto,
+} from 'src/dto/chat/call-and-security.dto';
 import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
+import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { FileEntity } from 'src/entity/file.entity';
@@ -54,6 +63,7 @@ import {
 } from 'src/interface/message.interface';
 import { PaginationOptions } from 'src/types/query.types';
 import { DataSource, In, Repository } from 'typeorm';
+import { LessThanOrEqual } from 'typeorm';
 
 import { BufferedFile } from '../files/files.service';
 import { MediaService } from '../media/media.service';
@@ -76,6 +86,8 @@ export class ChatService {
     private msgRepository: Repository<MessageEntity>,
     @InjectRepository(ConversationParticipantEntity)
     private partRepository: Repository<ConversationParticipantEntity>,
+    @InjectRepository(ContactEntity)
+    private contactRepository: Repository<ContactEntity>,
     private dataSource: DataSource,
     private readonly userService: UserService,
     private readonly mediaService: MediaService,
@@ -177,7 +189,19 @@ export class ChatService {
 
     try {
       const participant = await this.ensureParticipant(dto.conversationId, senderId);
+      await this.assertNotBlockedInConversation(dto.conversationId, senderId);
+
+      const conversation = await queryRunner.manager.findOne(ConversationEntity, {
+        where: { id: dto.conversationId },
+        select: ['id', 'name', 'type', 'disappearingTtl'],
+      });
+
       const now = new Date();
+      const disappearingTtl =
+        conversation?.disappearingTtl && conversation.disappearingTtl > 0
+          ? conversation.disappearingTtl
+          : null;
+      const expiresAt = disappearingTtl ? new Date(now.getTime() + disappearingTtl * 1000) : null;
 
       let replyPreview: MessageReplyPreview | undefined;
       let repliedUserId: string | null = null;
@@ -236,6 +260,9 @@ export class ChatService {
         ...(dto.isE2EE ? { isE2EE: true, e2eeKeyId: dto.e2eeKeyId } : {}),
         ...(dto.replyToMessageId ? { replyToMessageId: dto.replyToMessageId, replyPreview } : {}),
         ...(attachments ? { attachments } : {}),
+        ...(expiresAt
+          ? { expiresAt: expiresAt.toISOString(), disappearingTtl: disappearingTtl! }
+          : {}),
       };
 
       const message = this.msgRepository.create({
@@ -250,6 +277,7 @@ export class ChatService {
         readBy: [senderId],
         deliveredTo: [senderId],
         status: MessageStatusEnum.SENT,
+        expiresAt,
         createdAt: now,
         updatedAt: now,
       });
@@ -281,18 +309,19 @@ export class ChatService {
         lastMessageType: dto.type || MessageTypeEnum.TEXT,
       });
 
+      await queryRunner.manager.update(
+        ConversationParticipantEntity,
+        { conversationId: dto.conversationId },
+        { isHidden: false },
+      );
+
       await queryRunner.manager.update(ConversationParticipantEntity, participant.id, {
         lastReadAt: savedMessage.createdAt,
       });
 
       const participants = await this.partRepository.find({
         where: { conversationId: dto.conversationId },
-        select: ['userId', 'isMuted'],
-      });
-
-      const conversation = await this.convRepository.findOne({
-        where: { id: dto.conversationId },
-        select: ['id', 'name', 'type'],
+        select: ['userId', 'isMuted', 'isRestricted', 'nickname'],
       });
 
       await queryRunner.commitTransaction();
@@ -300,26 +329,39 @@ export class ChatService {
       const finalMessage = await this.buildEnrichedMessageResponse(savedMessage.id);
       this.logger.debug(`${label} messageId -> ${JSON.stringify(message.id)}`);
 
-      // Phát sự kiện thông báo cho các thành viên chưa tắt thông báo (isMuted = false)
+      const senderPart = participants.find((p) => p.userId === senderId);
       const unmutedRecipients = participants
-        .filter((p) => p.userId !== senderId && !p.isMuted)
+        .filter((p) => p.userId !== senderId && !p.isMuted && !p.isRestricted)
         .map((p) => p.userId);
 
       if (unmutedRecipients.length > 0 && finalMessage) {
-        const senderName = finalMessage.sender?.name || 'Người dùng';
+        const senderName = senderPart?.nickname || finalMessage.sender?.name || 'User';
         const isGroup = conversation?.type === ConversationTypeEnum.GROUP;
+        const msgType = dto.type || MessageTypeEnum.TEXT;
         const previewText =
-          dto.type === MessageTypeEnum.IMAGE
+          msgType === MessageTypeEnum.IMAGE
             ? 'đã gửi một hình ảnh'
-            : dto.type === MessageTypeEnum.VIDEO
+            : msgType === MessageTypeEnum.VIDEO
               ? 'đã gửi một video'
-              : dto.type === MessageTypeEnum.AUDIO
+              : msgType === MessageTypeEnum.AUDIO
                 ? 'đã gửi một tin nhắn thoại'
-                : dto.type === MessageTypeEnum.FILE
+                : msgType === MessageTypeEnum.FILE
                   ? 'đã gửi một tệp đính kèm'
                   : cleanContent.slice(0, 120);
 
-        // Nếu có người được reply trực tiếp thì gửi thông báo phản hồi riêng
+        const contentKey =
+          msgType === MessageTypeEnum.IMAGE
+            ? 'i18n.preview.image'
+            : msgType === MessageTypeEnum.VIDEO
+              ? 'i18n.preview.video'
+              : msgType === MessageTypeEnum.AUDIO
+                ? 'i18n.preview.audio'
+                : msgType === MessageTypeEnum.FILE
+                  ? 'i18n.preview.file'
+                  : isGroup
+                    ? 'i18n.newMessage.groupContent'
+                    : 'i18n.newMessage.directContent';
+
         if (
           repliedUserId &&
           repliedUserId !== senderId &&
@@ -345,6 +387,17 @@ export class ChatService {
                 messageId: savedMessage.id,
                 messageType: savedMessage.type,
                 actionUrl: `/chat/${dto.conversationId}`,
+                titleKey: isGroup
+                  ? 'i18n.messageReply.groupTitle'
+                  : 'i18n.messageReply.directTitle',
+                contentKey,
+                i18nParams: {
+                  senderName,
+                  conversationName: conversation?.name || '',
+                  isGroup,
+                  messageType: savedMessage.type,
+                  preview: cleanContent.slice(0, 120),
+                },
               },
             }),
           );
@@ -372,6 +425,15 @@ export class ChatService {
                 messageId: savedMessage.id,
                 messageType: savedMessage.type,
                 actionUrl: `/chat/${dto.conversationId}`,
+                titleKey: isGroup ? 'i18n.newMessage.groupTitle' : 'i18n.newMessage.directTitle',
+                contentKey,
+                i18nParams: {
+                  senderName,
+                  conversationName: conversation?.name || '',
+                  isGroup,
+                  messageType: savedMessage.type,
+                  preview: cleanContent.slice(0, 120),
+                },
               },
             }),
           );
@@ -593,6 +655,13 @@ export class ChatService {
               messageId: message.id,
               emoji: dto.emoji,
               actionUrl: `/chat/${dto.conversationId}`,
+              titleKey: 'i18n.messageReaction.title',
+              contentKey: 'i18n.messageReaction.content',
+              i18nParams: {
+                actorName,
+                emoji: dto.emoji,
+                preview: decryptedPreview,
+              },
             },
           }),
         );
@@ -724,6 +793,12 @@ export class ChatService {
               callId: params.callId,
               callType: params.callType,
               actionUrl: `/chat/${params.conversationId}`,
+              titleKey: 'i18n.missedCall.title',
+              contentKey: 'i18n.missedCall.content',
+              i18nParams: {
+                callerName,
+                callType: params.callType,
+              },
             },
           }),
         );
@@ -821,6 +896,12 @@ export class ChatService {
             conversationId: params.conversationId,
             conversationName: conv.name,
             actionUrl: `/chat/${params.conversationId}`,
+            titleKey: 'i18n.groupMemberAdded.title',
+            contentKey: 'i18n.groupMemberAdded.content',
+            i18nParams: {
+              requesterName,
+              conversationName: conv.name || '',
+            },
           },
         }),
       );
@@ -913,13 +994,34 @@ export class ChatService {
   }) {
     const { conversationId, userId, pagination } = payload;
 
-    const isMember = await this.isParticipant(conversationId, userId);
-    if (!isMember) throw new ForbiddenException('Not a member of this conversation');
+    const myPart = await this.ensureParticipant(conversationId, userId);
+    const allParts = await this.partRepository.find({
+      where: { conversationId },
+      select: ['userId', 'nickname', 'readReceiptsEnabled', 'isRestricted'],
+    });
+    const nicknameMap = new Map<string, string>();
+    const privacyHideReadSet = new Set<string>();
+    allParts.forEach((p) => {
+      if (p.nickname) nicknameMap.set(p.userId, p.nickname);
+      if (!p.readReceiptsEnabled || p.isRestricted) {
+        privacyHideReadSet.add(p.userId);
+      }
+    });
 
     const helper = AdvancedQueryHelper.from(this.msgRepository, 'm')
       .filter({ conversationId })
       .leftJoinRelation('sender', 'sender')
       .addSelect(['sender.id', 'sender.name']);
+
+    if (myPart.clearedAt) {
+      helper.getBuilder().andWhere('m.createdAt > :clearedAt', {
+        clearedAt: myPart.clearedAt,
+      });
+    }
+
+    helper.getBuilder().andWhere('(m.expiresAt IS NULL OR m.expiresAt > :nowTime)', {
+      nowTime: new Date(),
+    });
 
     helper
       .leftJoinAndMapOne(
@@ -937,7 +1039,9 @@ export class ChatService {
     result.data.forEach((msg: any) => {
       if (Array.isArray(msg.readBy)) {
         (msg.readBy as string[]).forEach((id: string) => {
-          if (id !== userId) readerIds.add(id);
+          if (id !== userId && !privacyHideReadSet.has(id)) {
+            readerIds.add(id);
+          }
         });
       }
     });
@@ -952,7 +1056,14 @@ export class ChatService {
       const sender = msg.sender;
       const avatarUrl = sender?.avatarMedia?.file?.url || null;
       if (sender) delete sender.avatarMedia;
-      const cleanSender = { ...sender, avatar: avatarUrl };
+      const senderNickname = sender?.id ? nicknameMap.get(sender.id) : null;
+      const cleanSender = {
+        ...sender,
+        name: senderNickname || sender?.name,
+        originalName: sender?.name,
+        nickname: senderNickname || null,
+        avatar: avatarUrl,
+      };
 
       const computedStatus = this.computeStatus(msg as MessageEntity, userId);
       const decryptedContent = this.messageCryptoService.decryptForConversation(
@@ -962,16 +1073,16 @@ export class ChatService {
 
       let readByUsers: { id: string; name: string; avatar: string | null }[] = [];
 
-      if (Array.isArray(msg.readBy)) {
+      if (myPart.readReceiptsEnabled && Array.isArray(msg.readBy)) {
         readByUsers = (msg.readBy as string[])
+          .filter((id) => !privacyHideReadSet.has(id))
           .map((id: string) => {
             const u = userMap.get(id);
             if (!u) return null;
             const userWithAvatar = u as any;
-
             return {
               id: u.id,
-              name: u.name,
+              name: nicknameMap.get(u.id) || u.name,
               avatar: userWithAvatar.avatarMedia?.file?.url || null,
             };
           })
@@ -984,6 +1095,7 @@ export class ChatService {
         ...msg,
         createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
         updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : new Date().toISOString(),
+        expiresAt: msg.expiresAt ? new Date(msg.expiresAt).toISOString() : null,
         content: decryptedContent,
         sender: cleanSender,
         status: computedStatus,
@@ -1053,6 +1165,12 @@ export class ChatService {
               conversationId: savedConv.id,
               conversationName: savedConv.name,
               actionUrl: `/chat/${savedConv.id}`,
+              titleKey: 'i18n.groupInvite.title',
+              contentKey: 'i18n.groupInvite.content',
+              i18nParams: {
+                creatorName,
+                conversationName: savedConv.name || '',
+              },
             },
           }),
         );
@@ -1074,10 +1192,20 @@ export class ChatService {
 
     helper
       .joinRelation('participants', 'mp', {
-        str: 'mp.userId = :userId',
+        str: 'mp.userId = :userId AND (mp.isHidden = false OR mp.isHidden IS NULL)',
         params: { userId },
       })
-      .addSelect(['mp.isAdmin', 'mp.isMuted', 'mp.joinedAt', 'mp.lastReadAt'])
+      .addSelect([
+        'mp.isAdmin',
+        'mp.isMuted',
+        'mp.soundEnabled',
+        'mp.readReceiptsEnabled',
+        'mp.isRestricted',
+        'mp.nickname',
+        'mp.clearedAt',
+        'mp.joinedAt',
+        'mp.lastReadAt',
+      ])
       .mapOneWithSubQuery({
         mapTo: 'partnerUser',
         entity: UserEntity,
@@ -1172,10 +1300,14 @@ export class ChatService {
           : conv.createdAt
             ? new Date(conv.createdAt).toISOString()
             : null,
-        isOnline,
+        isOnline: myParticipant?.isRestricted ? false : isOnline,
         avatar,
         isAdmin: myParticipant?.isAdmin || false,
         isMuted: myParticipant?.isMuted || false,
+        soundEnabled: myParticipant?.soundEnabled ?? true,
+        readReceiptsEnabled: myParticipant?.readReceiptsEnabled ?? true,
+        isRestricted: myParticipant?.isRestricted || false,
+        disappearingTtl: conv.disappearingTtl || null,
         joinedAt: myParticipant?.joinedAt
           ? new Date(myParticipant.joinedAt).toISOString()
           : new Date().toISOString(),
@@ -1311,14 +1443,24 @@ export class ChatService {
   }
 
   async markConversationAsRead(payload: { userId: string; conversationId: string }) {
-    const label = '[markConversationAsRead]';
     const { conversationId, userId } = payload;
-    this.logger.debug(`${label} conversationId -> ${conversationId}`);
-
-    await this.ensureParticipant(conversationId, userId);
+    const participant = await this.ensureParticipant(conversationId, userId);
     const now = new Date();
 
     await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
+
+    this.eventEmitter.emit(
+      NotificationEventEnum.MARK_CONVERSATION_READ,
+      new NotificationConversationReadEvent(userId, conversationId),
+    );
+
+    if (!participant.readReceiptsEnabled || participant.isRestricted) {
+      return {
+        success: true,
+        lastReadAt: now.toISOString(),
+        readReceiptSent: false,
+      };
+    }
 
     await this.msgRepository
       .createQueryBuilder()
@@ -1338,7 +1480,7 @@ export class ChatService {
     const userReaderInfo = user
       ? {
           id: user.id,
-          name: user.name,
+          name: participant.nickname || user.name,
           avatar: ((user as any).avatarMedia?.file?.url as string) || null,
         }
       : { id: userId, name: 'Unknown', avatar: null };
@@ -1346,13 +1488,11 @@ export class ChatService {
     const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo);
     this.eventEmitter.emit(ChatEventEnum.MESSAGE_READ, event);
 
-    // Đồng bộ đánh dấu đã đọc các thông báo tin nhắn của hội thoại này
-    this.eventEmitter.emit(
-      NotificationEventEnum.MARK_CONVERSATION_READ,
-      new NotificationConversationReadEvent(userId, conversationId),
-    );
-
-    return { success: true, lastReadAt: now.toISOString() };
+    return {
+      success: true,
+      lastReadAt: now.toISOString(),
+      readReceiptSent: true,
+    };
   }
 
   async markAsDelivered(payload: { userId: string; messageId: string }) {
@@ -1428,5 +1568,348 @@ export class ChatService {
     });
 
     return groupedResult;
+  }
+
+  async checkDirectBlockStatus(
+    conversationId: string,
+    requesterId: string,
+  ): Promise<{
+    isBlocked: boolean;
+    blockedByMe: boolean;
+    blockedByPartner: boolean;
+    partnerId: string | null;
+  }> {
+    const conv = await this.convRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'type'],
+    });
+    if (!conv || conv.type !== ConversationTypeEnum.DIRECT) {
+      return { isBlocked: false, blockedByMe: false, blockedByPartner: false, partnerId: null };
+    }
+
+    const parts = await this.partRepository.find({
+      where: { conversationId },
+      select: ['userId'],
+    });
+    const partner = parts.find((p) => p.userId !== requesterId);
+    if (!partner) {
+      return { isBlocked: false, blockedByMe: false, blockedByPartner: false, partnerId: null };
+    }
+
+    const blockRecords = await this.contactRepository.find({
+      where: [
+        { userId: requesterId, contactId: partner.userId, status: ContactStatusEnum.BLOCKED },
+        { userId: partner.userId, contactId: requesterId, status: ContactStatusEnum.BLOCKED },
+      ],
+    });
+
+    const blockedByMe = blockRecords.some((r) => r.userId === requesterId);
+    const blockedByPartner = blockRecords.some((r) => r.userId === partner.userId);
+
+    return {
+      isBlocked: blockedByMe || blockedByPartner,
+      blockedByMe,
+      blockedByPartner,
+      partnerId: partner.userId,
+    };
+  }
+
+  async assertNotBlockedInConversation(conversationId: string, userId: string): Promise<void> {
+    const blockState = await this.checkDirectBlockStatus(conversationId, userId);
+    if (blockState.blockedByMe) {
+      throw new ForbiddenException(
+        'You have blocked this user. Unblock them to continue messaging or calling.',
+      );
+    }
+    if (blockState.blockedByPartner) {
+      throw new ForbiddenException('You cannot send messages or make calls to this user.');
+    }
+  }
+
+  async getPinnedMessages(conversationId: string, userId: string) {
+    const myPart = await this.ensureParticipant(conversationId, userId);
+    const qb = this.msgRepository
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', { conversationId })
+      .andWhere('m.isPinned = :isPinned', { isPinned: true })
+      .andWhere('m.status != :removed', { removed: MessageStatusEnum.REMOVED })
+      .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :now)', { now: new Date() })
+      .leftJoinAndSelect('m.sender', 'sender')
+      .orderBy('m.updatedAt', 'DESC')
+      .take(20);
+
+    if (myPart.clearedAt) {
+      qb.andWhere('m.createdAt > :clearedAt', { clearedAt: myPart.clearedAt });
+    }
+
+    const list = await qb.getMany();
+    return list.map((msg) => ({
+      ...msg,
+      content: this.messageCryptoService.decryptForConversation(msg.content, conversationId),
+      createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+    }));
+  }
+
+  async getConversationSharedAssets(params: {
+    conversationId: string;
+    userId: string;
+    query: GetSharedAssetsQueryDto;
+  }) {
+    const { conversationId, userId, query } = params;
+    const myPart = await this.ensureParticipant(conversationId, userId);
+
+    const qb = this.msgRepository
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', { conversationId })
+      .andWhere('m.status != :removed', { removed: MessageStatusEnum.REMOVED })
+      .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :now)', { now: new Date() })
+      .leftJoinAndSelect('m.sender', 'sender')
+      .orderBy('m.createdAt', 'DESC')
+      .take(300);
+
+    if (myPart.clearedAt) {
+      qb.andWhere('m.createdAt > :clearedAt', { clearedAt: myPart.clearedAt });
+    }
+
+    const messages = await qb.getMany();
+    const mediaItems: any[] = [];
+    const fileItems: any[] = [];
+    const linkItems: any[] = [];
+
+    const urlRegex = /https?:\/\/[^\s<>"'`]+/gi;
+
+    for (const msg of messages) {
+      const attachments = msg.metadata?.attachments || [];
+      const senderName = msg.sender?.name || 'User';
+      const createdAt = msg.createdAt ? new Date(msg.createdAt).toISOString() : '';
+
+      if (msg.type === MessageTypeEnum.IMAGE || msg.type === MessageTypeEnum.VIDEO) {
+        for (const att of attachments) {
+          mediaItems.push({
+            messageId: msg.id,
+            fileId: att.fileId,
+            url: att.url,
+            thumbnailUrl: att.thumbnailUrl || att.url,
+            fileName: att.fileName,
+            mimeType: att.mimeType,
+            size: att.size,
+            type: msg.type,
+            senderId: msg.senderId,
+            senderName,
+            createdAt,
+          });
+        }
+      } else if (msg.type === MessageTypeEnum.FILE || msg.type === MessageTypeEnum.AUDIO) {
+        for (const att of attachments) {
+          fileItems.push({
+            messageId: msg.id,
+            fileId: att.fileId,
+            url: att.url,
+            fileName: att.fileName,
+            mimeType: att.mimeType,
+            size: att.size,
+            type: msg.type,
+            senderId: msg.senderId,
+            senderName,
+            createdAt,
+          });
+        }
+      }
+
+      if (msg.type === MessageTypeEnum.TEXT && msg.content) {
+        const decrypted = this.messageCryptoService.decryptForConversation(
+          msg.content,
+          conversationId,
+        );
+        const matches = decrypted.match(urlRegex);
+        if (matches) {
+          for (const rawUrl of matches) {
+            try {
+              const parsed = new URL(rawUrl);
+              if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                linkItems.push({
+                  messageId: msg.id,
+                  url: parsed.toString(),
+                  hostname: parsed.hostname,
+                  previewText: decrypted.slice(0, 150),
+                  senderId: msg.senderId,
+                  senderName,
+                  createdAt,
+                });
+              }
+            } catch {
+              /* empty */
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      media: mediaItems,
+      files: fileItems,
+      links: linkItems,
+      activeTab: query.tab || 'MEDIA',
+    };
+  }
+
+  async updateParticipantNickname(params: {
+    conversationId: string;
+    requesterId: string;
+    dto: UpdateParticipantNicknameDto;
+  }) {
+    await this.ensureParticipant(params.conversationId, params.requesterId);
+    const targetPart = await this.ensureParticipant(params.conversationId, params.dto.targetUserId);
+
+    const cleanNickname = params.dto.nickname ? params.dto.nickname.trim().slice(0, 80) : null;
+    targetPart.nickname = cleanNickname;
+    await this.partRepository.save(targetPart);
+
+    if (params.requesterId !== params.dto.targetUserId) {
+      await this.contactRepository
+        .update(
+          { userId: params.requesterId, contactId: params.dto.targetUserId },
+          { alias: cleanNickname },
+        )
+        .catch(() => undefined);
+    }
+
+    return {
+      conversationId: params.conversationId,
+      targetUserId: params.dto.targetUserId,
+      nickname: cleanNickname,
+      updatedBy: params.requesterId,
+    };
+  }
+
+  async updateConversationSettings(params: {
+    conversationId: string;
+    userId: string;
+    dto: UpdateConversationSettingsDto;
+  }) {
+    const part = await this.ensureParticipant(params.conversationId, params.userId);
+
+    if (typeof params.dto.isMuted === 'boolean') part.isMuted = params.dto.isMuted;
+    if (typeof params.dto.soundEnabled === 'boolean') part.soundEnabled = params.dto.soundEnabled;
+    if (typeof params.dto.readReceiptsEnabled === 'boolean') {
+      part.readReceiptsEnabled = params.dto.readReceiptsEnabled;
+    }
+    if (typeof params.dto.isRestricted === 'boolean') {
+      part.isRestricted = params.dto.isRestricted;
+      if (params.dto.isRestricted) {
+        part.isMuted = true;
+        part.soundEnabled = false;
+      }
+    }
+
+    await this.partRepository.save(part);
+
+    return {
+      conversationId: params.conversationId,
+      isMuted: part.isMuted,
+      soundEnabled: part.soundEnabled,
+      readReceiptsEnabled: part.readReceiptsEnabled,
+      isRestricted: part.isRestricted,
+    };
+  }
+
+  async updateDisappearingMessages(params: {
+    conversationId: string;
+    userId: string;
+    dto: UpdateDisappearingMessagesDto;
+  }) {
+    const part = await this.ensureParticipant(params.conversationId, params.userId);
+    const conv = await this.convRepository.findOne({ where: { id: params.conversationId } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+
+    if (conv.type === ConversationTypeEnum.GROUP && !part.isAdmin) {
+      throw new ForbiddenException(
+        'Chỉ quản trị viên nhóm mới có thể thay đổi cài đặt tin nhắn tự huỷ',
+      );
+    }
+
+    const nextTtl =
+      params.dto.disappearingTtl && params.dto.disappearingTtl > 0
+        ? params.dto.disappearingTtl
+        : null;
+
+    conv.disappearingTtl = nextTtl;
+    await this.convRepository.save(conv);
+
+    return {
+      conversationId: params.conversationId,
+      disappearingTtl: nextTtl,
+      updatedBy: params.userId,
+    };
+  }
+
+  async deleteConversationForUser(params: { conversationId: string; userId: string }) {
+    const part = await this.ensureParticipant(params.conversationId, params.userId);
+    const now = new Date();
+    part.clearedAt = now;
+    part.isHidden = true;
+    part.lastReadAt = now;
+    await this.partRepository.save(part);
+
+    return {
+      conversationId: params.conversationId,
+      clearedAt: now.toISOString(),
+      isHidden: true,
+    };
+  }
+
+  async getConversationDetails(conversationId: string, userId: string) {
+    const myPart = await this.ensureParticipant(conversationId, userId);
+    const conv = await this.convRepository.findOne({ where: { id: conversationId } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+
+    const participants = await this.partRepository.find({
+      where: { conversationId },
+    });
+    const memberIds = participants.map((p) => p.userId);
+    const users = await this.userService.getBasicUsersInfo(memberIds);
+    const userMap = new Map(users.map((u: any) => [u.id, u]));
+
+    const members = participants.map((p) => {
+      const u = userMap.get(p.userId);
+      return {
+        userId: p.userId,
+        name: u?.name || 'User',
+        email: u?.email || '',
+        avatar: u?.avatarMedia?.file?.url || null,
+        nickname: p.nickname || null,
+        isAdmin: p.isAdmin,
+        joinedAt: p.joinedAt,
+      };
+    });
+
+    const blockState = await this.checkDirectBlockStatus(conversationId, userId);
+
+    return {
+      conversationId,
+      type: conv.type,
+      name: conv.name,
+      disappearingTtl: conv.disappearingTtl,
+      mySettings: {
+        isMuted: myPart.isMuted,
+        soundEnabled: myPart.soundEnabled ?? true,
+        readReceiptsEnabled: myPart.readReceiptsEnabled ?? true,
+        isRestricted: myPart.isRestricted ?? false,
+        nickname: myPart.nickname || null,
+      },
+      blockState,
+      members,
+    };
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async cleanupExpiredDisappearingMessages(): Promise<void> {
+    try {
+      await this.msgRepository.delete({
+        expiresAt: LessThanOrEqual(new Date()),
+      });
+    } catch (err) {
+      this.logger.warn(`Failed cleaning expired messages: ${String(err)}`);
+    }
   }
 }

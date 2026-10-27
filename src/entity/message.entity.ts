@@ -68,4 +68,8 @@ export class MessageEntity extends BaseModel {
 
   @Column({ type: 'json' })
   deliveredTo: string[];
+
+  @Column({ name: 'expires_at', type: 'datetime', nullable: true, default: null })
+  @Index()
+  expiresAt: Date | null;
 }

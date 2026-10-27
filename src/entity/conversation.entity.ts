@@ -36,6 +36,9 @@ export class ConversationEntity extends BaseModel {
   @Column({ type: 'datetime', nullable: true })
   lastMessageAt: Date;
 
+  @Column({ name: 'disappearing_ttl', type: 'int', nullable: true, default: null })
+  disappearingTtl: number | null;
+
   @OneToMany(() => ConversationParticipantEntity, (p) => p.conversation)
   participants: ConversationParticipantEntity[];
 

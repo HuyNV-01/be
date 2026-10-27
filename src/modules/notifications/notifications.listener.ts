@@ -47,7 +47,7 @@ export class NotificationsListener {
     try {
       const users = await this.userService.getBasicUsersInfo([event.senderId]);
       const sender = users[0] as any;
-      const senderName = sender?.name || 'Một người dùng';
+      const senderName = sender?.name || 'User';
 
       await this.notificationsService.createAndDispatch({
         recipientIds: [event.targetUserId],
@@ -60,6 +60,11 @@ export class NotificationsListener {
         dedupeKey: `friend_req:${event.senderId}:${event.targetUserId}`,
         metadata: {
           actionUrl: '/contacts/directory?tab=PENDING_RECEIVED',
+          titleKey: 'i18n.friendRequest.title',
+          contentKey: 'i18n.friendRequest.content',
+          i18nParams: {
+            senderName,
+          },
         },
       });
     } catch (err) {
@@ -72,7 +77,7 @@ export class NotificationsListener {
     try {
       const users = await this.userService.getBasicUsersInfo([event.accepterId]);
       const accepter = users[0] as any;
-      const accepterName = accepter?.name || 'Một người dùng';
+      const accepterName = accepter?.name || 'User';
 
       await this.notificationsService.createAndDispatch({
         recipientIds: [event.requesterId],
@@ -85,6 +90,11 @@ export class NotificationsListener {
         dedupeKey: `friend_acc:${event.accepterId}:${event.requesterId}`,
         metadata: {
           actionUrl: `/profile/${event.accepterId}`,
+          titleKey: 'i18n.friendAccepted.title',
+          contentKey: 'i18n.friendAccepted.content',
+          i18nParams: {
+            accepterName,
+          },
         },
       });
     } catch (err) {

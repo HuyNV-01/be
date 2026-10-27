@@ -355,4 +355,51 @@ export class ContactsService {
 
     return { ...result, data: finalData };
   }
+
+  async blockUser(payload: { userId: string; targetId: string }) {
+    const { userId, targetId } = payload;
+    if (userId === targetId) {
+      throw new BadRequestException('Cannot block yourself');
+    }
+    await this.userService.findUserById({ userId: targetId });
+
+    await this.dataSource.transaction(async (manager) => {
+      const myRecord = await manager.findOne(ContactEntity, {
+        where: { userId, contactId: targetId },
+        withDeleted: true,
+      });
+
+      if (myRecord) {
+        myRecord.status = ContactStatusEnum.BLOCKED;
+        myRecord.deletedAt = null;
+        myRecord.deletedBy = null;
+        await manager.save(myRecord);
+      } else {
+        await manager.save(
+          manager.create(ContactEntity, {
+            userId,
+            contactId: targetId,
+            status: ContactStatusEnum.BLOCKED,
+          }),
+        );
+      }
+
+      await manager.softDelete(ContactEntity, {
+        userId: targetId,
+        contactId: userId,
+      });
+    });
+
+    return { success: true, status: ContactStatusEnum.BLOCKED };
+  }
+
+  async unblockUser(payload: { userId: string; targetId: string }) {
+    const { userId, targetId } = payload;
+    await this.contactRepo.softDelete({
+      userId,
+      contactId: targetId,
+      status: ContactStatusEnum.BLOCKED,
+    });
+    return { success: true, status: null };
+  }
 }

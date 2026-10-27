@@ -50,4 +50,6 @@ export interface MessageMetadata {
   reactions?: Record<string, string[]>;
   attachments?: MessageAttachmentMeta[];
   callInfo?: MessageCallInfoMeta;
+  expiresAt?: string;
+  disappearingTtl?: number;
 }

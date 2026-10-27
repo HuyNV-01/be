@@ -1,8 +1,10 @@
+// Sửa file: src/modules/chat/chat.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
 import { CallSessionEntity } from 'src/entity/call-session.entity';
+import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { FileEntity } from 'src/entity/file.entity';
@@ -24,6 +26,7 @@ import { MessageCryptoService } from './services/message-crypto.service';
       MessageEntity,
       FileEntity,
       CallSessionEntity,
+      ContactEntity,
     ]),
     UserModule,
     MediaModule,

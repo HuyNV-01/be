@@ -31,6 +31,8 @@ export const SOCKET_CONFIG = {
       USER_TYPING: 'user_typing',
       GROUP_UPDATED: 'group_updated',
       E2EE_KEY_UPDATED: 'e2ee_key_updated',
+      CONVERSATION_SETTINGS_UPDATED: 'conversation_settings_updated',
+      NICKNAME_UPDATED: 'nickname_updated',
     },
     CALL: {
       INCOMING: 'call:incoming',

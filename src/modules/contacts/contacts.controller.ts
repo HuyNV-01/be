@@ -319,4 +319,36 @@ export class ContactsController {
       data: result,
     };
   }
+
+  @ApiOperation({ summary: 'Block a user' })
+  @Post('block/:targetId')
+  @HttpCode(HttpStatus.OK)
+  async blockUser(@Req() req: IBaseReq, @Param('targetId') targetId: string) {
+    const result = await this.contactsService.blockUser({
+      userId: req.user.id,
+      targetId,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Unblock a user' })
+  @Delete('block/:targetId')
+  @HttpCode(HttpStatus.OK)
+  async unblockUser(@Req() req: IBaseReq, @Param('targetId') targetId: string) {
+    const result = await this.contactsService.unblockUser({
+      userId: req.user.id,
+      targetId,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data: result,
+    };
+  }
 }

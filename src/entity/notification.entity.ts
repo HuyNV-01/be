@@ -15,6 +15,10 @@ export interface NotificationMetadata {
   emoji?: string;
   unreadMessageCount?: number;
   actionUrl?: string;
+  // Bổ sung cho đa ngôn ngữ (i18n) trên FE
+  titleKey?: string;
+  contentKey?: string;
+  i18nParams?: Record<string, string | number | boolean | null | undefined>;
   extra?: Record<string, unknown>;
 }
 

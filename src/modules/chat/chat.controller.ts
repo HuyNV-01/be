@@ -38,10 +38,14 @@ import { DBaseQuery } from 'src/dto/base-query.dto';
 import {
   AddGroupMembersDto,
   EditMessageDto,
+  GetSharedAssetsQueryDto,
   MuteConversationDto,
   PinMessageDto,
   ReactMessageDto,
   RegisterPublicKeyDto,
+  UpdateConversationSettingsDto,
+  UpdateDisappearingMessagesDto,
+  UpdateParticipantNicknameDto,
 } from 'src/dto/chat/call-and-security.dto';
 import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
@@ -474,6 +478,150 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
       data: message,
+    };
+  }
+
+  @ApiOperation({ summary: 'Get conversation details, member nicknames, privacy and block state' })
+  @Get('conversations/:id/details')
+  @HttpCode(HttpStatus.OK)
+  async getConversationDetails(@Req() req, @Param('id') id: string) {
+    const data = await this.chatService.getConversationDetails(id, req.user.id);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({ summary: 'Get all pinned messages in a conversation' })
+  @Get('conversations/:id/pinned')
+  @HttpCode(HttpStatus.OK)
+  async getPinnedMessages(@Req() req, @Param('id') id: string) {
+    const data = await this.chatService.getPinnedMessages(id, req.user.id);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({ summary: 'Get shared media, files, and links in a conversation' })
+  @Get('conversations/:id/shared-assets')
+  @HttpCode(HttpStatus.OK)
+  async getSharedAssets(
+    @Req() req,
+    @Param('id') id: string,
+    @Query() query: GetSharedAssetsQueryDto,
+  ) {
+    const data = await this.chatService.getConversationSharedAssets({
+      conversationId: id,
+      userId: req.user.id,
+      query,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({ summary: 'Update nickname of a participant in a conversation' })
+  @Put('conversations/:id/nickname')
+  @HttpCode(HttpStatus.OK)
+  async updateNickname(
+    @Req() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateParticipantNicknameDto,
+  ) {
+    const result = await this.chatService.updateParticipantNickname({
+      conversationId: id,
+      requesterId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      id,
+      SOCKET_CONFIG.events.CHAT.NICKNAME_UPDATED,
+      result,
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'Update conversation notification, sound, read receipts & restrict settings',
+  })
+  @Patch('conversations/:id/settings')
+  @HttpCode(HttpStatus.OK)
+  async updateConversationSettings(
+    @Req() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateConversationSettingsDto,
+  ) {
+    const result = await this.chatService.updateConversationSettings({
+      conversationId: id,
+      userId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Configure disappearing (self-destructing) messages timer' })
+  @Patch('conversations/:id/disappearing')
+  @HttpCode(HttpStatus.OK)
+  async updateDisappearingMessages(
+    @Req() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateDisappearingMessagesDto,
+  ) {
+    const result = await this.chatService.updateDisappearingMessages({
+      conversationId: id,
+      userId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      id,
+      SOCKET_CONFIG.events.CHAT.CONVERSATION_SETTINGS_UPDATED,
+      result,
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Delete (clear & hide) conversation history for current user' })
+  @Delete('conversations/:id')
+  @HttpCode(HttpStatus.OK)
+  async deleteConversation(@Req() req, @Param('id') id: string) {
+    const result = await this.chatService.deleteConversationForUser({
+      conversationId: id,
+      userId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data: result,
     };
   }
 }

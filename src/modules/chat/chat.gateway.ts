@@ -309,6 +309,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     const callerId = client.data.user.id;
 
     await this.chatService.ensureParticipant(dto.conversationId, callerId);
+    await this.chatService.assertNotBlockedInConversation(dto.conversationId, callerId);
     const membersInfo = await this.chatService.getConversationMembersInfo(dto.conversationId);
     const memberIds = membersInfo.map((m) => m.id);
     const callerInfo = membersInfo.find((m) => m.id === callerId);
