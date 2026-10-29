@@ -266,8 +266,8 @@ export class ContactsController {
     });
     return {
       status: HttpStatus.OK,
-      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
-      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
       data: result,
     };
   }

@@ -13,10 +13,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { ContactStatusEnum, MediaTypeEnum, SortTypeEnum, StatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
 import {
+  ContactBlockedEvent,
   ContactEventEnum,
   ContactRemovedEvent,
   ContactRequestAcceptedEvent,
   ContactRequestSentEvent,
+  ContactUnblockedEvent,
 } from 'src/config/websocket/events/contact.events';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import { ContactEntity } from 'src/entity/contact.entity';
@@ -135,34 +137,50 @@ export class ContactsService {
       userId: targetUserId,
     });
 
-    const existing = await this.contactRepo.findOne({
-      where: { userId, contactId: targetUserId },
-      withDeleted: true,
-    });
+    const [existing, reverseExisting] = await Promise.all([
+      this.contactRepo.findOne({
+        where: { userId, contactId: targetUserId },
+        withDeleted: true,
+      }),
+      this.contactRepo.findOne({
+        where: { userId: targetUserId, contactId: userId },
+        withDeleted: true,
+      }),
+    ]);
 
-    if (existing) {
-      if (!existing.deletedAt) {
-        if (existing.status === ContactStatusEnum.FRIEND)
-          throw new ConflictException({
-            status: HttpStatus.CONFLICT,
-            message: HTTP_RESPONSE.CONTACT.CONFLICT_FRIEND.message,
-            code: HTTP_RESPONSE.CONTACT.CONFLICT_FRIEND.code,
-          });
-        if (existing.status === ContactStatusEnum.PENDING_SENT)
-          throw new ConflictException({
-            status: HttpStatus.CONFLICT,
-            message: HTTP_RESPONSE.CONTACT.CONFLICT_PENDING_SENT.message,
-            code: HTTP_RESPONSE.CONTACT.CONFLICT_PENDING_SENT.code,
-          });
-        if (existing.status === ContactStatusEnum.BLOCKED)
-          throw new BadRequestException({
-            status: HttpStatus.CONFLICT,
-            message: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.message,
-            code: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.code,
-          });
-        if (existing.status === ContactStatusEnum.PENDING_RECEIVED) {
-          return this.acceptFriendRequest({ userId, senderId: targetUserId });
-        }
+    if (
+      reverseExisting &&
+      !reverseExisting.deletedAt &&
+      reverseExisting.status === ContactStatusEnum.BLOCKED
+    ) {
+      throw new BadRequestException({
+        status: HttpStatus.FORBIDDEN,
+        message: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.message,
+        code: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.code,
+      });
+    }
+
+    if (existing && !existing.deletedAt) {
+      if (existing.status === ContactStatusEnum.FRIEND)
+        throw new ConflictException({
+          status: HttpStatus.CONFLICT,
+          message: HTTP_RESPONSE.CONTACT.CONFLICT_FRIEND.message,
+          code: HTTP_RESPONSE.CONTACT.CONFLICT_FRIEND.code,
+        });
+      if (existing.status === ContactStatusEnum.PENDING_SENT)
+        throw new ConflictException({
+          status: HttpStatus.CONFLICT,
+          message: HTTP_RESPONSE.CONTACT.CONFLICT_PENDING_SENT.message,
+          code: HTTP_RESPONSE.CONTACT.CONFLICT_PENDING_SENT.code,
+        });
+      if (existing.status === ContactStatusEnum.BLOCKED)
+        throw new BadRequestException({
+          status: HttpStatus.CONFLICT,
+          message: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.message,
+          code: HTTP_RESPONSE.CONTACT.CONFLICT_BLOCK.code,
+        });
+      if (existing.status === ContactStatusEnum.PENDING_RECEIVED) {
+        return this.acceptFriendRequest({ userId, senderId: targetUserId });
       }
     }
 
@@ -261,12 +279,27 @@ export class ContactsService {
   async removeContact(payload: { userId: string; targetId: string }) {
     const { userId, targetId } = payload;
     await this.dataSource.transaction(async (manager) => {
-      await manager.softDelete(ContactEntity, { userId, contactId: targetId });
-      await manager.softDelete(ContactEntity, {
-        userId: targetId,
-        contactId: userId,
+      const myRecord = await manager.findOne(ContactEntity, {
+        where: { userId, contactId: targetId },
       });
+
+      if (myRecord && myRecord.status !== ContactStatusEnum.BLOCKED) {
+        myRecord.alias = null;
+        await manager.save(myRecord);
+        await manager.softDelete(ContactEntity, { id: myRecord.id });
+      }
+
+      const theirRecord = await manager.findOne(ContactEntity, {
+        where: { userId: targetId, contactId: userId },
+      });
+
+      if (theirRecord && theirRecord.status !== ContactStatusEnum.BLOCKED) {
+        theirRecord.alias = null;
+        await manager.save(theirRecord);
+        await manager.softDelete(ContactEntity, { id: theirRecord.id });
+      }
     });
+
     this.eventEmitter.emit(
       ContactEventEnum.FRIEND_REMOVED,
       new ContactRemovedEvent(payload.userId, payload.targetId),
@@ -371,6 +404,7 @@ export class ContactsService {
 
       if (myRecord) {
         myRecord.status = ContactStatusEnum.BLOCKED;
+        myRecord.alias = null;
         myRecord.deletedAt = null;
         myRecord.deletedBy = null;
         await manager.save(myRecord);
@@ -384,11 +418,21 @@ export class ContactsService {
         );
       }
 
-      await manager.softDelete(ContactEntity, {
-        userId: targetId,
-        contactId: userId,
+      // Hanya xóa chiều ngược lại nếu đối phương KHÔNG phải cũng đang chặn mình
+      const theirRecord = await manager.findOne(ContactEntity, {
+        where: { userId: targetId, contactId: userId },
       });
+      if (theirRecord && theirRecord.status !== ContactStatusEnum.BLOCKED) {
+        theirRecord.alias = null;
+        await manager.save(theirRecord);
+        await manager.softDelete(ContactEntity, { id: theirRecord.id });
+      }
     });
+
+    this.eventEmitter.emit(
+      ContactEventEnum.USER_BLOCKED,
+      new ContactBlockedEvent(userId, targetId),
+    );
 
     return { success: true, status: ContactStatusEnum.BLOCKED };
   }
@@ -400,6 +444,12 @@ export class ContactsService {
       contactId: targetId,
       status: ContactStatusEnum.BLOCKED,
     });
+
+    this.eventEmitter.emit(
+      ContactEventEnum.USER_UNBLOCKED,
+      new ContactUnblockedEvent(userId, targetId),
+    );
+
     return { success: true, status: null };
   }
 }

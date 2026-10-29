@@ -12,7 +12,7 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
-import { CallTypeEnum } from 'src/common/enum';
+import { CallTypeEnum, GroupRoleEnum } from 'src/common/enum';
 
 export class EditMessageDto {
   @ApiProperty({ description: 'Conversation UUID' })
@@ -250,4 +250,35 @@ export class GetSharedAssetsQueryDto {
   @IsOptional()
   @IsIn(['MEDIA', 'FILES', 'LINKS'])
   tab?: 'MEDIA' | 'FILES' | 'LINKS' = 'MEDIA';
+}
+
+export class UpdateGroupMemberRoleDto {
+  @ApiProperty({
+    description:
+      'Vai trò mới của thành viên trong nhóm (OWNER = Chuyển quyền trưởng nhóm, ADMIN = Quản trị viên, MEMBER = Thành viên)',
+    enum: GroupRoleEnum,
+  })
+  @IsEnum(GroupRoleEnum)
+  @IsNotEmpty()
+  role: GroupRoleEnum;
+}
+
+export class ForwardMessageDto {
+  @ApiProperty({ description: 'Message UUID gốc cần chuyển tiếp' })
+  @IsUUID()
+  @IsNotEmpty()
+  messageId: string;
+
+  @ApiProperty({ description: 'Conversation UUID nguồn' })
+  @IsUUID()
+  @IsNotEmpty()
+  sourceConversationId: string;
+
+  @ApiProperty({
+    type: [String],
+    description: 'Danh sách Conversation UUID đích nhận tin nhắn chuyển tiếp',
+  })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  targetConversationIds: string[];
 }

@@ -38,6 +38,7 @@ import { DBaseQuery } from 'src/dto/base-query.dto';
 import {
   AddGroupMembersDto,
   EditMessageDto,
+  ForwardMessageDto,
   GetSharedAssetsQueryDto,
   MuteConversationDto,
   PinMessageDto,
@@ -45,6 +46,7 @@ import {
   RegisterPublicKeyDto,
   UpdateConversationSettingsDto,
   UpdateDisappearingMessagesDto,
+  UpdateGroupMemberRoleDto,
   UpdateParticipantNicknameDto,
 } from 'src/dto/chat/call-and-security.dto';
 import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
@@ -622,6 +624,77 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
       data: result,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'Update member role or transfer ownership in a group chat (Owner only)',
+  })
+  @ApiParam({ name: 'id', description: 'Group Conversation UUID' })
+  @ApiParam({ name: 'memberId', description: 'Target Member User UUID' })
+  @Patch('groups/:id/members/:memberId/role')
+  @HttpCode(HttpStatus.OK)
+  async updateGroupMemberRole(
+    @Req() req,
+    @Param('id') id: string,
+    @Param('memberId') memberId: string,
+    @Body() dto: UpdateGroupMemberRoleDto,
+  ) {
+    const result = await this.chatService.updateGroupMemberRole({
+      conversationId: id,
+      requesterId: req.user.id,
+      targetUserId: memberId,
+      role: dto.role,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      id,
+      SOCKET_CONFIG.events.CHAT.GROUP_UPDATED,
+      { action: 'role_updated', ...result },
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Forward a message to multiple conversations' })
+  @Post('messages/forward')
+  @HttpCode(HttpStatus.CREATED)
+  async forwardMessage(@Req() req, @Body() dto: ForwardMessageDto) {
+    const results = await this.chatService.forwardMessage({
+      senderId: req.user.id,
+      dto,
+    });
+
+    results.forEach(({ conversationId, message, recipientIds }) => {
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        conversationId,
+        SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+        message,
+      );
+      recipientIds.forEach((uid) => {
+        if (uid !== req.user.id) {
+          this.realtimeEmitter.emitToUser(
+            SOCKET_CONFIG.namespaces.CHAT,
+            uid,
+            SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+            message,
+          );
+        }
+      });
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: results.map((r) => r.message),
     };
   }
 }

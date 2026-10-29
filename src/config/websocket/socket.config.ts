@@ -50,6 +50,8 @@ export const SOCKET_CONFIG = {
       REQUEST_RECEIVED: 'contact.request_received',
       REQUEST_ACCEPTED: 'contact.request_accepted',
       FRIEND_REMOVED: 'contact.friend_removed',
+      USER_BLOCKED: 'contact.user_blocked',
+      USER_UNBLOCKED: 'contact.user_unblocked',
     },
     NOTIFICATION: {
       NEW: 'new_notification',

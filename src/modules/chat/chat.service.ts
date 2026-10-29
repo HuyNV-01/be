@@ -16,6 +16,7 @@ import {
   CallStatusEnum,
   CallTypeEnum,
   ConversationTypeEnum,
+  GroupRoleEnum,
   MediaTypeEnum,
   MessageStatusEnum,
   MessageTypeEnum,
@@ -35,6 +36,7 @@ import {
 import {
   AddGroupMembersDto,
   EditMessageDto,
+  ForwardMessageDto,
   PinMessageDto,
   ReactMessageDto,
   RecallMessageDto,
@@ -919,8 +921,39 @@ export class ChatService {
     targetUserId: string;
   }) {
     const requesterPart = await this.ensureParticipant(params.conversationId, params.requesterId);
-    if (params.requesterId !== params.targetUserId && !requesterPart.isAdmin) {
-      throw new ForbiddenException('Only group admins can remove other members');
+    const targetPart = await this.ensureParticipant(params.conversationId, params.targetUserId);
+
+    const requesterRole = this.resolveEffectiveRole(requesterPart);
+    const targetRole = this.resolveEffectiveRole(targetPart);
+    const isSelfLeave = params.requesterId === params.targetUserId;
+
+    if (!isSelfLeave) {
+      if (!this.isModeratorOrOwner(requesterPart)) {
+        throw new ForbiddenException(
+          'Chỉ Trưởng nhóm hoặc Quản trị viên mới có quyền xóa thành viên',
+        );
+      }
+      if (targetRole === GroupRoleEnum.OWNER) {
+        throw new ForbiddenException('Không thể xóa Trưởng nhóm khỏi cuộc trò chuyện');
+      }
+      if (requesterRole === GroupRoleEnum.ADMIN && targetRole === GroupRoleEnum.ADMIN) {
+        throw new ForbiddenException('Chỉ Trưởng nhóm mới có quyền xóa Quản trị viên khác');
+      }
+    }
+
+    let newOwnerUserId: string | null = null;
+    if (isSelfLeave && requesterRole === GroupRoleEnum.OWNER) {
+      const remainingMembers = await this.partRepository.find({
+        where: { conversationId: params.conversationId },
+        order: { isAdmin: 'DESC', joinedAt: 'ASC' },
+      });
+      const candidate = remainingMembers.find((m) => m.userId !== params.requesterId);
+      if (candidate) {
+        candidate.role = GroupRoleEnum.OWNER;
+        candidate.isAdmin = true;
+        await this.partRepository.save(candidate);
+        newOwnerUserId = candidate.userId;
+      }
     }
 
     await this.partRepository.delete({
@@ -932,6 +965,7 @@ export class ChatService {
     return {
       conversationId: params.conversationId,
       removedUserId: params.targetUserId,
+      newOwnerUserId,
     };
   }
 
@@ -1138,6 +1172,7 @@ export class ChatService {
           conversationId: savedConv.id,
           userId: uid,
           isAdmin: uid === creatorId,
+          role: uid === creatorId ? GroupRoleEnum.OWNER : GroupRoleEnum.MEMBER,
           joinedAt: now,
           lastReadAt: now,
         }),
@@ -1865,20 +1900,34 @@ export class ChatService {
 
     const participants = await this.partRepository.find({
       where: { conversationId },
+      order: { joinedAt: 'ASC' },
     });
     const memberIds = participants.map((p) => p.userId);
     const users = await this.userService.getBasicUsersInfo(memberIds);
     const userMap = new Map(users.map((u: any) => [u.id, u]));
 
+    const hasExplicitOwner = participants.some((p) => p.role === GroupRoleEnum.OWNER);
+    const firstAdminUserId = participants.find((p) => p.isAdmin)?.userId;
+
     const members = participants.map((p) => {
       const u = userMap.get(p.userId);
+      let effectiveRole = this.resolveEffectiveRole(p);
+      if (
+        conv.type === ConversationTypeEnum.GROUP &&
+        !hasExplicitOwner &&
+        p.userId === firstAdminUserId
+      ) {
+        effectiveRole = GroupRoleEnum.OWNER;
+      }
+
       return {
         userId: p.userId,
         name: u?.name || 'User',
         email: u?.email || '',
         avatar: u?.avatarMedia?.file?.url || null,
         nickname: p.nickname || null,
-        isAdmin: p.isAdmin,
+        isAdmin: p.isAdmin || effectiveRole !== GroupRoleEnum.MEMBER,
+        role: effectiveRole,
         joinedAt: p.joinedAt,
       };
     });
@@ -1911,5 +1960,131 @@ export class ChatService {
     } catch (err) {
       this.logger.warn(`Failed cleaning expired messages: ${String(err)}`);
     }
+  }
+
+  private resolveEffectiveRole(part: ConversationParticipantEntity): GroupRoleEnum {
+    if (part.role === GroupRoleEnum.OWNER) return GroupRoleEnum.OWNER;
+    if (part.role === GroupRoleEnum.ADMIN || part.isAdmin) return GroupRoleEnum.ADMIN;
+    return GroupRoleEnum.MEMBER;
+  }
+
+  private isModeratorOrOwner(part: ConversationParticipantEntity): boolean {
+    const role = this.resolveEffectiveRole(part);
+    return role === GroupRoleEnum.OWNER || role === GroupRoleEnum.ADMIN;
+  }
+
+  async updateGroupMemberRole(params: {
+    conversationId: string;
+    requesterId: string;
+    targetUserId: string;
+    role: GroupRoleEnum;
+  }) {
+    const conv = await this.convRepository.findOne({ where: { id: params.conversationId } });
+    if (!conv || conv.type !== ConversationTypeEnum.GROUP) {
+      throw new BadRequestException('Cuộc trò chuyện này không phải là nhóm');
+    }
+
+    if (params.requesterId === params.targetUserId) {
+      throw new BadRequestException('Không thể tự thay đổi vai trò của chính mình');
+    }
+
+    const allParts = await this.partRepository.find({
+      where: { conversationId: params.conversationId },
+      order: { joinedAt: 'ASC' },
+    });
+
+    const requesterPart = allParts.find((p) => p.userId === params.requesterId);
+    const targetPart = allParts.find((p) => p.userId === params.targetUserId);
+
+    if (!requesterPart || !targetPart) {
+      throw new NotFoundException('Không tìm thấy thành viên trong nhóm');
+    }
+
+    const hasExplicitOwner = allParts.some((p) => p.role === GroupRoleEnum.OWNER);
+    const isRequesterOwner =
+      requesterPart.role === GroupRoleEnum.OWNER || (!hasExplicitOwner && requesterPart.isAdmin);
+
+    if (!isRequesterOwner) {
+      throw new ForbiddenException('Chỉ Trưởng nhóm mới có quyền phân quyền thành viên');
+    }
+
+    if (params.role === GroupRoleEnum.OWNER) {
+      requesterPart.role = GroupRoleEnum.ADMIN;
+      requesterPart.isAdmin = true;
+      targetPart.role = GroupRoleEnum.OWNER;
+      targetPart.isAdmin = true;
+      await this.partRepository.save([requesterPart, targetPart]);
+    } else {
+      targetPart.role = params.role;
+      targetPart.isAdmin = params.role === GroupRoleEnum.ADMIN;
+      if (!hasExplicitOwner) {
+        requesterPart.role = GroupRoleEnum.OWNER;
+        requesterPart.isAdmin = true;
+        await this.partRepository.save([requesterPart, targetPart]);
+      } else {
+        await this.partRepository.save(targetPart);
+      }
+    }
+
+    return {
+      conversationId: params.conversationId,
+      targetUserId: params.targetUserId,
+      role: targetPart.role,
+      isAdmin: targetPart.isAdmin,
+      updatedBy: params.requesterId,
+    };
+  }
+
+  async forwardMessage(params: { senderId: string; dto: ForwardMessageDto }) {
+    const { senderId, dto } = params;
+    await this.ensureParticipant(dto.sourceConversationId, senderId);
+
+    const originalMsg = await this.msgRepository.findOne({
+      where: { id: dto.messageId, conversationId: dto.sourceConversationId },
+      relations: ['sender'],
+    });
+
+    if (!originalMsg || originalMsg.status === MessageStatusEnum.REMOVED) {
+      throw new NotFoundException('Tin nhắn gốc không tồn tại hoặc đã bị thu hồi');
+    }
+
+    const decryptedContent = this.messageCryptoService.decryptForConversation(
+      originalMsg.content,
+      dto.sourceConversationId,
+    );
+    const fileIds = (originalMsg.metadata?.attachments || []).map((a) => a.fileId);
+    const uniqueTargetIds = [...new Set(dto.targetConversationIds)];
+
+    const forwardedResults: Array<{
+      conversationId: string;
+      message: any;
+      recipientIds: string[];
+    }> = [];
+
+    for (const targetConvId of uniqueTargetIds) {
+      const res = await this.sendMessage({
+        senderId,
+        dto: {
+          conversationId: targetConvId,
+          content: decryptedContent,
+          type: originalMsg.type,
+          fileIds: fileIds.length > 0 ? fileIds : undefined,
+          metadata: {
+            forwardedFrom: {
+              messageId: originalMsg.id,
+              senderId: originalMsg.senderId,
+              senderName: originalMsg.sender?.name || 'Người dùng',
+            },
+          },
+        },
+      });
+      forwardedResults.push({
+        conversationId: targetConvId,
+        message: res.message,
+        recipientIds: res.recipientIds,
+      });
+    }
+
+    return forwardedResults;
   }
 }

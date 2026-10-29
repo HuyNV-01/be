@@ -11,10 +11,12 @@ import { SocketRateLimiter } from 'src/common/websocket/socket-rate-limiter';
 import { SocketStateService } from 'src/common/websocket/socket-state.service';
 import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
 import {
+  ContactBlockedEvent,
   ContactEventEnum,
   ContactRemovedEvent,
   ContactRequestAcceptedEvent,
   ContactRequestSentEvent,
+  ContactUnblockedEvent,
 } from 'src/config/websocket/events/contact.events';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
@@ -727,6 +729,36 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       removerId: event.removerId,
       timestamp: event.timestamp,
     });
+  }
+
+  @OnEvent(ContactEventEnum.USER_BLOCKED)
+  handleContactBlocked(event: ContactBlockedEvent): void {
+    const payload = {
+      blockerId: event.blockerId,
+      targetId: event.targetId,
+      timestamp: event.timestamp,
+    };
+    this.server
+      .to(`user:${event.targetId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
+    this.server
+      .to(`user:${event.blockerId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
+  }
+
+  @OnEvent(ContactEventEnum.USER_UNBLOCKED)
+  handleContactUnblocked(event: ContactUnblockedEvent): void {
+    const payload = {
+      unblockerId: event.unblockerId,
+      targetId: event.targetId,
+      timestamp: event.timestamp,
+    };
+    this.server
+      .to(`user:${event.targetId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_UNBLOCKED, payload);
+    this.server
+      .to(`user:${event.unblockerId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_UNBLOCKED, payload);
   }
 
   private async syncUndeliveredMessages(userId: string): Promise<void> {
