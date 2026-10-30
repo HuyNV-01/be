@@ -12,11 +12,14 @@ export interface CallParticipantRecord {
   isAudioMuted: boolean;
   isVideoOff: boolean;
   isScreenSharing: boolean;
+  isHandRaised?: boolean;
+  raisedHandAt?: string | null;
 }
 
 @Entity('call_sessions')
-@Index(['conversationId', 'createdAt'])
-@Index(['initiatorId', 'status'])
+@Index('idx_call_conv_status_created', ['conversationId', 'status', 'createdAt'])
+@Index('idx_call_initiator_created', ['initiatorId', 'createdAt'])
+@Index('idx_call_status_created', ['status', 'createdAt'])
 export class CallSessionEntity extends BaseModel {
   @Column({ name: 'conversation_id', type: 'varchar', length: 36 })
   conversationId: string;
@@ -67,4 +70,15 @@ export class CallSessionEntity extends BaseModel {
 
   @Column({ name: 'end_reason', type: 'varchar', length: 64, nullable: true })
   endReason: string | null;
+
+  @Column({
+    name: 'topology',
+    type: 'varchar',
+    length: 16,
+    default: 'MESH',
+  })
+  topology: 'MESH' | 'SFU';
+
+  @Column({ name: 'max_concurrent_participants', type: 'int', default: 1 })
+  maxConcurrentParticipants: number;
 }

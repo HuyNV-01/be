@@ -48,7 +48,13 @@ import {
   UpdateDisappearingMessagesDto,
   UpdateParticipantNicknameDto,
 } from 'src/dto/chat/call-and-security.dto';
-import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
+import {
+  ClosePollDto,
+  CreateGroupDto,
+  CreatePollDto,
+  SendMessageDto,
+  VotePollDto,
+} from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
@@ -66,10 +72,12 @@ import {
 import { PaginationOptions } from 'src/types/query.types';
 import { DataSource, In, Repository } from 'typeorm';
 import { LessThanOrEqual } from 'typeorm';
+import { v4 as uuidv4 } from 'uuid';
 
 import { BufferedFile } from '../files/files.service';
 import { MediaService } from '../media/media.service';
 import { UserService } from '../user/user.service';
+import { LinkPreviewService } from './services/link-preview.service';
 import { MessageCryptoService } from './services/message-crypto.service';
 
 @Injectable()
@@ -95,6 +103,7 @@ export class ChatService {
     private readonly mediaService: MediaService,
     private readonly socketStateService: SocketStateService,
     private readonly messageCryptoService: MessageCryptoService,
+    private readonly linkPreviewService: LinkPreviewService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -262,6 +271,8 @@ export class ChatService {
         ...(dto.isE2EE ? { isE2EE: true, e2eeKeyId: dto.e2eeKeyId } : {}),
         ...(dto.replyToMessageId ? { replyToMessageId: dto.replyToMessageId, replyPreview } : {}),
         ...(attachments ? { attachments } : {}),
+        ...(dto.mentionedUserIds?.length ? { mentionedUserIds: dto.mentionedUserIds } : {}),
+        ...(dto.mentionAll ? { mentionAll: true } : {}),
         ...(expiresAt
           ? { expiresAt: expiresAt.toISOString(), disappearingTtl: disappearingTtl! }
           : {}),
@@ -442,6 +453,64 @@ export class ChatService {
         }
       }
 
+      const isGroup = conversation?.type === ConversationTypeEnum.GROUP;
+      if (
+        isGroup &&
+        finalMessage &&
+        (dto.mentionAll || (dto.mentionedUserIds && dto.mentionedUserIds.length > 0))
+      ) {
+        const senderPart = participants.find((p) => p.userId === senderId);
+        const senderName = senderPart?.nickname || finalMessage.sender?.name || 'Thành viên';
+        const mentionedSet = new Set(dto.mentionedUserIds || []);
+
+        const mentionTargets = participants
+          .filter(
+            (p) =>
+              p.userId !== senderId &&
+              !p.isRestricted &&
+              (dto.mentionAll || mentionedSet.has(p.userId)),
+          )
+          .map((p) => p.userId);
+
+        if (mentionTargets.length > 0) {
+          this.eventEmitter.emit(
+            NotificationEventEnum.DISPATCH,
+            new NotificationDispatchEvent({
+              recipientIds: mentionTargets,
+              actorId: senderId,
+              type: NotificationTypeEnum.MESSAGE_MENTION,
+              title: `${senderName} đã nhắc đến bạn trong ${conversation?.name || 'nhóm'}`,
+              content: cleanContent.slice(0, 120),
+              resourceType: NotificationResourceTypeEnum.CONVERSATION,
+              resourceId: dto.conversationId,
+              dedupeKey: `msg_mention:${savedMessage.id}`,
+              metadata: {
+                conversationId: dto.conversationId,
+                conversationName: conversation?.name,
+                conversationType: conversation?.type,
+                messageId: savedMessage.id,
+                messageType: savedMessage.type,
+                actionUrl: `/chat/${dto.conversationId}?messageId=${savedMessage.id}`,
+                titleKey: 'i18n.messageMention.title',
+                contentKey: 'i18n.messageMention.content',
+                i18nParams: {
+                  senderName,
+                  conversationName: conversation?.name || '',
+                  preview: cleanContent.slice(0, 120),
+                },
+              },
+            }),
+          );
+        }
+      }
+
+      if ((dto.type === MessageTypeEnum.TEXT || !dto.type) && !metadata.linkPreview) {
+        const firstUrl = this.linkPreviewService.extractFirstUrl(cleanContent);
+        if (firstUrl) {
+          void this.enrichMessageWithLinkPreview(savedMessage.id, dto.conversationId, firstUrl);
+        }
+      }
+
       return {
         message: { ...finalMessage, tempId: dto.tempId },
         recipientIds: participants.map((p) => p.userId),
@@ -453,6 +522,260 @@ export class ChatService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  private async enrichMessageWithLinkPreview(
+    messageId: string,
+    conversationId: string,
+    url: string,
+  ): Promise<void> {
+    try {
+      const preview = await this.linkPreviewService.fetchLinkPreview(url);
+      if (!preview) return;
+
+      const msg = await this.msgRepository.findOne({
+        where: { id: messageId, conversationId },
+      });
+      if (!msg || msg.status === MessageStatusEnum.REMOVED) return;
+
+      msg.metadata = {
+        ...(msg.metadata || {}),
+        linkPreview: preview,
+      };
+      await this.msgRepository.save(msg);
+
+      this.eventEmitter.emit('chat.link_preview.ready', {
+        conversationId,
+        messageId,
+        linkPreview: preview,
+      });
+    } catch (err) {
+      this.logger.debug(`Async link preview enrichment skipped: ${String(err)}`);
+    }
+  }
+
+  async createPollMessage(params: { senderId: string; dto: CreatePollDto }) {
+    const { senderId, dto } = params;
+    await this.ensureParticipant(dto.conversationId, senderId);
+
+    const cleanOptions = dto.options
+      .map((opt) => opt.trim())
+      .filter(Boolean)
+      .map((text) => ({
+        id: uuidv4(),
+        text,
+        voterIds: [] as string[],
+      }));
+
+    if (cleanOptions.length < 2) {
+      throw new BadRequestException('Cuộc bình chọn phải có ít nhất 2 phương án hợp lệ');
+    }
+
+    const sendRes = await this.sendMessage({
+      senderId,
+      dto: {
+        conversationId: dto.conversationId,
+        content: `📊 ${dto.question.trim()}`,
+        type: MessageTypeEnum.POLL,
+        metadata: {
+          ...(dto.isPinned
+            ? {
+                isPinned: true,
+                pinnedBy: senderId,
+                pinnedAt: new Date().toISOString(),
+              }
+            : {}),
+          poll: {
+            question: dto.question.trim(),
+            options: cleanOptions,
+            allowMultipleAnswers: Boolean(dto.allowMultipleAnswers),
+            isAnonymous: Boolean(dto.isAnonymous),
+            isClosed: false,
+          },
+        },
+      },
+    });
+
+    if (dto.isPinned && sendRes.message?.id) {
+      await this.msgRepository.update(sendRes.message.id, { isPinned: true });
+      sendRes.message.isPinned = true;
+    }
+
+    return sendRes;
+  }
+
+  async votePollMessage(params: { userId: string; dto: VotePollDto }) {
+    const { userId, dto } = params;
+    await this.ensureParticipant(dto.conversationId, userId);
+
+    const message = await this.msgRepository.findOne({
+      where: {
+        id: dto.messageId,
+        conversationId: dto.conversationId,
+        type: MessageTypeEnum.POLL,
+      },
+    });
+
+    if (!message || !message.metadata?.poll) {
+      throw new NotFoundException('Không tìm thấy cuộc bình chọn');
+    }
+
+    const poll = message.metadata.poll;
+    if (poll.isClosed) {
+      throw new BadRequestException('Cuộc bình chọn này đã kết thúc');
+    }
+
+    const selectedSet = new Set(dto.optionIds);
+    if (!poll.allowMultipleAnswers && selectedSet.size > 1) {
+      throw new BadRequestException('Cuộc bình chọn này chỉ cho phép chọn 1 phương án');
+    }
+
+    const updatedOptions = poll.options.map((opt) => {
+      const voters = new Set(opt.voterIds || []);
+      if (selectedSet.has(opt.id)) {
+        voters.add(userId);
+      } else {
+        voters.delete(userId);
+      }
+      return {
+        ...opt,
+        voterIds: Array.from(voters),
+      };
+    });
+
+    const updatedPoll = {
+      ...poll,
+      options: updatedOptions,
+    };
+
+    message.metadata = {
+      ...(message.metadata || {}),
+      poll: updatedPoll,
+    };
+
+    await this.msgRepository.save(message);
+
+    return {
+      conversationId: dto.conversationId,
+      messageId: message.id,
+      poll: updatedPoll,
+      votedBy: userId,
+    };
+  }
+
+  async closePollMessage(params: { userId: string; dto: ClosePollDto }) {
+    const { userId, dto } = params;
+    const participant = await this.ensureParticipant(dto.conversationId, userId);
+
+    const message = await this.msgRepository.findOne({
+      where: {
+        id: dto.messageId,
+        conversationId: dto.conversationId,
+        type: MessageTypeEnum.POLL,
+      },
+    });
+
+    if (!message || !message.metadata?.poll) {
+      throw new NotFoundException('Không tìm thấy cuộc bình chọn');
+    }
+
+    if (message.senderId !== userId && !participant.isAdmin) {
+      throw new ForbiddenException(
+        'Chỉ người tạo bình chọn hoặc Quản trị viên mới có thể khóa bình chọn',
+      );
+    }
+
+    const updatedPoll = {
+      ...message.metadata.poll,
+      isClosed: true,
+      closedAt: new Date().toISOString(),
+      closedBy: userId,
+    };
+
+    message.metadata = {
+      ...(message.metadata || {}),
+      poll: updatedPoll,
+    };
+
+    await this.msgRepository.save(message);
+
+    return {
+      conversationId: dto.conversationId,
+      messageId: message.id,
+      poll: updatedPoll,
+      closedBy: userId,
+    };
+  }
+
+  async getOrCreateSavedMessages(userId: string) {
+    const directKey = `self:${userId}`;
+    const existing = await this.convRepository.findOne({
+      where: { directKey },
+    });
+
+    if (existing) {
+      await this.partRepository.update(
+        { conversationId: existing.id, userId },
+        { isHidden: false },
+      );
+      return this.enrichSavedMessagesInfo(existing, userId);
+    }
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const now = new Date();
+      const conv = this.convRepository.create({
+        type: ConversationTypeEnum.DIRECT,
+        name: 'Cloud của tôi',
+        directKey,
+        lastMessageAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const savedConv = await queryRunner.manager.save(conv);
+
+      const selfParticipant = this.partRepository.create({
+        conversationId: savedConv.id,
+        userId,
+        isAdmin: true,
+        joinedAt: now,
+        lastReadAt: now,
+      });
+      await queryRunner.manager.save(selfParticipant);
+      await queryRunner.commitTransaction();
+
+      return this.enrichSavedMessagesInfo(savedConv, userId);
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      const fallback = await this.convRepository.findOne({ where: { directKey } });
+      if (fallback) return this.enrichSavedMessagesInfo(fallback, userId);
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private enrichSavedMessagesInfo(conversation: ConversationEntity, userId: string) {
+    return {
+      ...conversation,
+      name: conversation.name || 'Cloud của tôi',
+      partnerId: userId,
+      isSavedMessages: true,
+      isOnline: true,
+      unreadCount: 0,
+      lastMessage: conversation.lastMessage
+        ? this.messageCryptoService.decryptForConversation(
+            conversation.lastMessage,
+            conversation.id,
+          )
+        : null,
+      lastMessageAt: conversation.lastMessageAt
+        ? new Date(conversation.lastMessageAt).toISOString()
+        : new Date().toISOString(),
+    };
   }
 
   async uploadAndSendAttachmentMessage(params: {
@@ -1322,12 +1645,25 @@ export class ChatService {
           )
         : null;
 
+      const isSavedMessages = conv.directKey === `self:${userId}`;
+      if (isSavedMessages) {
+        conv.name = conv.name || 'Cloud của tôi';
+        conv.partnerId = userId;
+        isOnline = true;
+      } else if (conv.type === ConversationTypeEnum.DIRECT && conv.partnerUser) {
+        conv.name = conv.partnerUser.name;
+        avatar = conv.partnerUser.avatarMedia?.file?.url || null;
+        conv.partnerId = conv.partnerUser.id;
+        isOnline = onlineSet.has(String(conv.partnerUser.id));
+      }
+
       delete conv.partner;
       delete conv.partnerUser;
       delete conv.participants;
 
       return {
         ...conv,
+        isSavedMessages,
         unreadCount: Math.max(0, Number(conv.unreadCount || 0)),
         lastMessage: decryptedLastMessage,
         lastMessageAt: conv.lastMessageAt
@@ -1954,9 +2290,15 @@ export class ChatService {
   @Cron(CronExpression.EVERY_MINUTE)
   async cleanupExpiredDisappearingMessages(): Promise<void> {
     try {
-      await this.msgRepository.delete({
-        expiresAt: LessThanOrEqual(new Date()),
-      });
+      const now = new Date();
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+      await this.msgRepository
+        .createQueryBuilder()
+        .delete()
+        .from(MessageEntity)
+        .where('created_at >= :thirtyDaysAgo', { thirtyDaysAgo })
+        .andWhere('expires_at IS NOT NULL AND expires_at <= :now', { now })
+        .execute();
     } catch (err) {
       this.logger.warn(`Failed cleaning expired messages: ${String(err)}`);
     }

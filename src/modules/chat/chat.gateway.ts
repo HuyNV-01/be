@@ -22,16 +22,18 @@ import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import {
   EditMessageDto,
+  HostMuteParticipantDto,
   InitiateCallDto,
   PinMessageDto,
   ReactMessageDto,
   RecallMessageDto,
   RegisterPublicKeyDto,
   RespondCallDto,
+  RingCallParticipantDto,
   ToggleCallMediaDto,
   WebRtcSignalDto,
 } from 'src/dto/chat/call-and-security.dto';
-import { SendMessageDto } from 'src/dto/chat/chat.dto';
+import { ClosePollDto, SendMessageDto, VotePollDto } from 'src/dto/chat/chat.dto';
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
 import { ChatService } from './chat.service';
@@ -126,6 +128,53 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]): void {
     const payload = { userId, isOnline, lastActive: new Date() };
     recipients.forEach((id) => this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload));
+  }
+
+  @SubscribeMessage('vote_poll')
+  async handleVotePoll(
+    @MessageBody() dto: VotePollDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'vote_poll');
+    const result = await this.chatService.votePollMessage({
+      userId: client.data.user.id,
+      dto,
+    });
+
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.POLL_UPDATED, result);
+
+    return { status: HttpStatus.OK, data: result };
+  }
+
+  @SubscribeMessage('close_poll')
+  async handleClosePoll(
+    @MessageBody() dto: ClosePollDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'close_poll');
+    const result = await this.chatService.closePollMessage({
+      userId: client.data.user.id,
+      dto,
+    });
+
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.POLL_UPDATED, result);
+
+    return { status: HttpStatus.OK, data: result };
+  }
+
+  @OnEvent('chat.link_preview.ready')
+  handleLinkPreviewReady(payload: {
+    conversationId: string;
+    messageId: string;
+    linkPreview: any;
+  }): void {
+    this.server
+      .to(`conversation:${payload.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.LINK_PREVIEW_READY, payload);
   }
 
   @SubscribeMessage('join_room')
@@ -394,6 +443,19 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       });
     }
 
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+        callId: session.callId,
+        conversationId: session.conversationId,
+        callType: session.callType,
+        isGroupCall: session.isGroupCall,
+        initiatorId: session.initiatorId,
+        status: session.status,
+        participants: session.participants,
+        membersInfo,
+      });
+
     return {
       status: HttpStatus.OK,
       data: {
@@ -444,6 +506,24 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       participants: session.participants,
       membersInfo,
     });
+
+    client.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CALL.HANDLED_ELSEWHERE, {
+      callId: session.callId,
+      action: 'accepted',
+    });
+
+    this.server
+      .to(`conversation:${session.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+        callId: session.callId,
+        conversationId: session.conversationId,
+        callType: session.callType,
+        isGroupCall: session.isGroupCall,
+        initiatorId: session.initiatorId,
+        status: session.status,
+        participants: session.participants,
+        membersInfo,
+      });
 
     return {
       status: HttpStatus.OK,
@@ -502,6 +582,11 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
           .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
       }
     }
+
+    client.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CALL.HANDLED_ELSEWHERE, {
+      callId: dto.callId,
+      action: 'rejected',
+    });
 
     return { status: HttpStatus.OK, data: outcome };
   }
@@ -573,6 +658,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       callId: dto.callId,
       userId,
       reason: 'hangup',
+      endForAll: dto.endForAll,
     });
 
     await client.leave(`call:${dto.callId}`);
@@ -606,12 +692,29 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         this.server
           .to(`conversation:${outcome.session.conversationId}`)
           .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
+        this.server
+          .to(`conversation:${outcome.session.conversationId}`)
+          .emit(SOCKET_CONFIG.events.CALL.SESSION_ENDED, {
+            callId: dto.callId,
+            conversationId: outcome.session.conversationId,
+          });
       } else {
         this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_LEFT, {
           callId: dto.callId,
           userId,
           remainingParticipants: outcome.session.participants,
         });
+        this.server
+          .to(`conversation:${outcome.session.conversationId}`)
+          .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+            callId: outcome.session.callId,
+            conversationId: outcome.session.conversationId,
+            callType: outcome.session.callType,
+            isGroupCall: outcome.session.isGroupCall,
+            initiatorId: outcome.session.initiatorId,
+            status: outcome.session.status,
+            participants: outcome.session.participants,
+          });
       }
     }
 
@@ -787,5 +890,84 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Error syncing: ${msg}`);
     }
+  }
+
+  @SubscribeMessage('call:host_mute')
+  async handleHostMuteParticipant(
+    @MessageBody() dto: HostMuteParticipantDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'call:host_mute');
+    const requesterId = client.data.user.id;
+    const currentSession = await this.callSignalingService.getCallSession(dto.callId);
+    if (!currentSession) {
+      throw new WsException('Call session has ended');
+    }
+
+    const requesterPart = await this.chatService.ensureParticipant(
+      currentSession.conversationId,
+      requesterId,
+    );
+
+    const updatedSession = await this.callSignalingService.hostMuteParticipant({
+      callId: dto.callId,
+      requesterId,
+      targetUserId: dto.targetUserId,
+      isRequesterGroupAdmin: requesterPart.isAdmin,
+    });
+
+    this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.MEDIA_STATE, {
+      callId: dto.callId,
+      userId: dto.targetUserId,
+      callType: updatedSession.callType,
+      participantState: updatedSession.participants[dto.targetUserId],
+    });
+
+    this.emitToUser(dto.targetUserId, SOCKET_CONFIG.events.CALL.HOST_MUTED, {
+      callId: dto.callId,
+      mutedBy: requesterId,
+    });
+
+    return { status: HttpStatus.OK };
+  }
+
+  @SubscribeMessage('call:ring_user')
+  async handleRingParticipant(
+    @MessageBody() dto: RingCallParticipantDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'call:ring_user');
+    const callerId = client.data.user.id;
+    const session = await this.callSignalingService.getCallSession(dto.callId);
+    if (!session) {
+      throw new WsException('Call session has ended');
+    }
+
+    await this.chatService.ensureParticipant(session.conversationId, callerId);
+    const isTargetMember = await this.chatService.isParticipant(
+      session.conversationId,
+      dto.targetUserId,
+    );
+    if (!isTargetMember) {
+      throw new WsException('Target user is not a member of this conversation');
+    }
+
+    const membersInfo = await this.chatService.getConversationMembersInfo(session.conversationId);
+    const callerInfo = membersInfo.find((m) => m.id === callerId);
+
+    this.emitToUser(dto.targetUserId, SOCKET_CONFIG.events.CALL.INCOMING, {
+      callId: session.callId,
+      conversationId: session.conversationId,
+      callType: session.callType,
+      isGroupCall: session.isGroupCall,
+      callerId,
+      callerName: callerInfo?.name || 'Thành viên nhóm',
+      callerAvatar: callerInfo?.avatar || null,
+      createdAt: session.createdAt,
+      participants: session.participants,
+      membersInfo,
+    });
+
+    return { status: HttpStatus.OK };
   }
 }

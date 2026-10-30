@@ -33,6 +33,8 @@ export const SOCKET_CONFIG = {
       E2EE_KEY_UPDATED: 'e2ee_key_updated',
       CONVERSATION_SETTINGS_UPDATED: 'conversation_settings_updated',
       NICKNAME_UPDATED: 'nickname_updated',
+      POLL_UPDATED: 'poll_updated',
+      LINK_PREVIEW_READY: 'link_preview_ready',
     },
     CALL: {
       INCOMING: 'call:incoming',
@@ -45,6 +47,11 @@ export const SOCKET_CONFIG = {
       PARTICIPANT_JOINED: 'call:participant_joined',
       PARTICIPANT_LEFT: 'call:participant_left',
       ENDED: 'call:ended',
+      HANDLED_ELSEWHERE: 'call:handled_elsewhere',
+      HAND_RAISED: 'call:hand_raised',
+      HOST_MUTED: 'call:host_muted',
+      SESSION_STARTED: 'call:session_started',
+      SESSION_ENDED: 'call:session_ended',
     },
     CONTACT: {
       REQUEST_RECEIVED: 'contact.request_received',

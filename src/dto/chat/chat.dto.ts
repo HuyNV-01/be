@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -8,6 +10,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  IsUrl,
   MaxLength,
 } from 'class-validator';
 import { MessageTypeEnum } from 'src/common/enum';
@@ -68,6 +71,23 @@ export class SendMessageDto {
   @IsOptional()
   @IsString()
   tempId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Danh sách User UUID được nhắc tên (@Mention) trong tin nhắn',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  mentionedUserIds?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Đánh dấu nhắc tên toàn bộ thành viên nhóm (@All)',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  mentionAll?: boolean;
 }
 
 export class CreateGroupDto {
@@ -81,4 +101,86 @@ export class CreateGroupDto {
   @IsArray()
   @IsUUID('4', { each: true })
   memberIds: string[];
+}
+
+export class CreatePollDto {
+  @ApiProperty({ description: 'Conversation UUID' })
+  @IsUUID()
+  @IsNotEmpty()
+  conversationId: string;
+
+  @ApiProperty({ example: 'Cuối tuần này họp nhóm ở đâu?' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(300)
+  question: string;
+
+  @ApiProperty({
+    type: [String],
+    example: ['Quán Cafe A', 'Văn phòng công ty', 'Họp Online Google Meet'],
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @MaxLength(150, { each: true })
+  options: string[];
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  allowMultipleAnswers?: boolean = false;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  isAnonymous?: boolean = false;
+
+  @ApiPropertyOptional({
+    description: 'Tự động ghim cuộc bình chọn ngay sau khi tạo',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  isPinned?: boolean = false;
+}
+
+export class VotePollDto {
+  @ApiProperty({ description: 'Conversation UUID' })
+  @IsUUID()
+  @IsNotEmpty()
+  conversationId: string;
+
+  @ApiProperty({ description: 'Poll Message UUID' })
+  @IsUUID()
+  @IsNotEmpty()
+  messageId: string;
+
+  @ApiProperty({
+    type: [String],
+    description: 'Danh sách ID các phương án mà người dùng chọn',
+  })
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  optionIds: string[];
+}
+
+export class ClosePollDto {
+  @ApiProperty({ description: 'Conversation UUID' })
+  @IsUUID()
+  @IsNotEmpty()
+  conversationId: string;
+
+  @ApiProperty({ description: 'Poll Message UUID' })
+  @IsUUID()
+  @IsNotEmpty()
+  messageId: string;
+}
+
+export class FetchLinkPreviewQueryDto {
+  @ApiProperty({ example: 'https://nextjs.org' })
+  @IsNotEmpty()
+  @IsUrl({ protocols: ['http', 'https'], require_protocol: true })
+  url: string;
 }

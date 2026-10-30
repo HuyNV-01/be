@@ -147,6 +147,14 @@ export class RespondCallDto {
   @IsOptional()
   @IsString()
   reason?: string;
+
+  @ApiPropertyOptional({
+    description: 'Nếu là Host/Admin nhóm: kết thúc cuộc gọi cho tất cả mọi người',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  endForAll?: boolean;
 }
 
 export class WebRtcSignalDto {
@@ -196,6 +204,11 @@ export class ToggleCallMediaDto {
   @IsOptional()
   @IsBoolean()
   isScreenSharing?: boolean;
+
+  @ApiPropertyOptional({ description: 'Trạng thái giơ tay phát biểu (Google Meet style)' })
+  @IsOptional()
+  @IsBoolean()
+  isHandRaised?: boolean;
 }
 
 // Thêm vào cuối file: src/dto/chat/call-and-security.dto.ts
@@ -281,4 +294,28 @@ export class ForwardMessageDto {
   @IsArray()
   @IsUUID('4', { each: true })
   targetConversationIds: string[];
+}
+
+export class HostMuteParticipantDto {
+  @ApiProperty({ description: 'Call Session ID' })
+  @IsUUID()
+  @IsNotEmpty()
+  callId: string;
+
+  @ApiProperty({ description: 'User UUID của thành viên cần tắt mic' })
+  @IsUUID()
+  @IsNotEmpty()
+  targetUserId: string;
+}
+
+export class RingCallParticipantDto {
+  @ApiProperty({ description: 'Call Session ID' })
+  @IsUUID()
+  @IsNotEmpty()
+  callId: string;
+
+  @ApiProperty({ description: 'User UUID của thành viên cần gọi nhắc vào phòng' })
+  @IsUUID()
+  @IsNotEmpty()
+  targetUserId: string;
 }
