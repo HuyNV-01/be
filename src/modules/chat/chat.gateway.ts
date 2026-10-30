@@ -48,7 +48,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     jwtService: JwtService,
     private readonly chatService: ChatService,
     private readonly callSignalingService: CallSignalingService,
-    private readonly eventEmitter: EventEmitter2,
   ) {
     super(
       socketStateService,

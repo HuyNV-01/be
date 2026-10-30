@@ -40,12 +40,18 @@ export class AuthController {
     timestamp: true,
   });
 
-  private getRefreshCookieOptions(): express.CookieOptions {
+  private getClearRefreshCookieOptions(): express.CookieOptions {
     return {
       httpOnly: true,
       secure: envs.isProduction,
       sameSite: envs.isProduction ? 'strict' : 'lax',
       path: '/api/auth/refresh',
+    };
+  }
+
+  private getRefreshCookieOptions(): express.CookieOptions {
+    return {
+      ...this.getClearRefreshCookieOptions(),
       maxAge: parseExpiresInMs(envs.jwtRefreshExpiresIn),
     };
   }
@@ -131,7 +137,7 @@ export class AuthController {
   async login(
     @Request() req: express.Request & { user: { id: string } },
     @Res({ passthrough: true }) res: express.Response,
-    @Body() loginDto: LoginDto,
+    @Body() _loginDto: LoginDto,
   ) {
     const ipAddress = this.extractClientIp(req);
     const result = await this.authService.login({
@@ -169,8 +175,7 @@ export class AuthController {
   ) {
     const userId = req.user.id;
     await this.authService.logout({ userId });
-    const { maxAge, ...clearOptions } = this.getRefreshCookieOptions();
-    res.clearCookie('refresh_token', clearOptions);
+    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions());
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.AUTH.LOGOUT_SUCCESS.message,
@@ -322,7 +327,7 @@ export class AuthController {
   @UseGuards(GoogleAuthGuard)
   @Get('google')
   @HttpCode(HttpStatus.OK)
-  async googleAuth(@Req() req) {}
+  async googleAuth() {}
 
   @UseGuards(GoogleAuthGuard)
   @Get('google/redirect')

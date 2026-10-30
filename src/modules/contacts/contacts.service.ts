@@ -300,6 +300,7 @@ export class ContactsService {
       }
     });
 
+    this.logger.debug(`Removed contact relation between ${userId} and ${targetId}`);
     this.eventEmitter.emit(
       ContactEventEnum.FRIEND_REMOVED,
       new ContactRemovedEvent(payload.userId, payload.targetId),
