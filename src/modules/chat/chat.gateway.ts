@@ -808,6 +808,11 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     try {
       const myPart = await this.chatService.ensureParticipant(payload.conversationId, userId);
       if (myPart.isRestricted) return;
+      const blockState = await this.chatService.checkDirectBlockStatus(
+        payload.conversationId,
+        userId,
+      );
+      if (blockState.isBlocked) return;
 
       client
         .to(`conversation:${payload.conversationId}`)
@@ -862,10 +867,22 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.server
       .to(`user:${event.blockerId}`)
       .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
+
+    // Lý do nghiệp vụ: Ẩn trạng thái online từ cả 2 phía ngay lập tức khi có hành động chặn
+    this.emitToUser(event.targetId, SOCKET_CONFIG.events.USER_STATUS, {
+      userId: event.blockerId,
+      isOnline: false,
+      lastActive: new Date(),
+    });
+    this.emitToUser(event.blockerId, SOCKET_CONFIG.events.USER_STATUS, {
+      userId: event.targetId,
+      isOnline: false,
+      lastActive: new Date(),
+    });
   }
 
   @OnEvent(ContactEventEnum.USER_UNBLOCKED)
-  handleContactUnblocked(event: ContactUnblockedEvent): void {
+  async handleContactUnblocked(event: ContactUnblockedEvent): Promise<void> {
     const payload = {
       unblockerId: event.unblockerId,
       targetId: event.targetId,
@@ -877,6 +894,31 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.server
       .to(`user:${event.unblockerId}`)
       .emit(SOCKET_CONFIG.events.CONTACT.USER_UNBLOCKED, payload);
+
+    try {
+      const [unblockerVisibleRecipients, targetVisibleRecipients] = await Promise.all([
+        this.chatService.getVisiblePresenceRecipientIds(event.unblockerId),
+        this.chatService.getVisiblePresenceRecipientIds(event.targetId),
+      ]);
+      if (unblockerVisibleRecipients.includes(event.targetId)) {
+        const isUnblockerOnline = await this.socketStateService.isUserOnline(event.unblockerId);
+        this.emitToUser(event.targetId, SOCKET_CONFIG.events.USER_STATUS, {
+          userId: event.unblockerId,
+          isOnline: isUnblockerOnline,
+          lastActive: new Date(),
+        });
+      }
+      if (targetVisibleRecipients.includes(event.unblockerId)) {
+        const isTargetOnline = await this.socketStateService.isUserOnline(event.targetId);
+        this.emitToUser(event.unblockerId, SOCKET_CONFIG.events.USER_STATUS, {
+          userId: event.targetId,
+          isOnline: isTargetOnline,
+          lastActive: new Date(),
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Failed syncing presence after unblock: ${String(err)}`);
+    }
   }
 
   private async syncUndeliveredMessages(userId: string): Promise<void> {

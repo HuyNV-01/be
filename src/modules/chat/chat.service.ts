@@ -557,6 +557,7 @@ export class ChatService {
   async createPollMessage(params: { senderId: string; dto: CreatePollDto }) {
     const { senderId, dto } = params;
     await this.ensureParticipant(dto.conversationId, senderId);
+    await this.assertNotBlockedInConversation(dto.conversationId, senderId);
 
     const cleanOptions = dto.options
       .map((opt) => opt.trim())
@@ -787,6 +788,7 @@ export class ChatService {
     tempId?: string;
   }) {
     await this.ensureParticipant(params.conversationId, params.senderId);
+    await this.assertNotBlockedInConversation(params.conversationId, params.senderId);
 
     const uploadedFiles = await this.mediaService.processMultipleUploads({
       files: params.files,
@@ -1598,6 +1600,18 @@ export class ChatService {
         { avatarType: MediaTypeEnum.USER_AVATAR },
       )
       .leftJoinAndSelect('m_avatar.file', 'f_avatar')
+      .leftJoinEntity(
+        ConversationParticipantEntity,
+        'cp_partner',
+        'cp_partner.conversationId = c.id AND cp_partner.userId != :userId AND c.type = :typeDirect',
+        { userId, typeDirect: ConversationTypeEnum.DIRECT },
+      )
+      .leftJoinEntity(
+        ContactEntity,
+        'c_contact',
+        'c_contact.userId = :userId AND c_contact.contactId = u_partner.id AND c_contact.deletedAt IS NULL',
+        { userId },
+      )
       .selectSubQuery('unreadCount', (sub, parentAlias) => {
         return sub
           .select('COUNT(m.id)', 'count')
@@ -1614,12 +1628,27 @@ export class ChatService {
       });
 
     if (query.search) {
+      // Lý do nghiệp vụ:
+      // 1. Trò chuyện 1-1 (DIRECT): Tìm kiếm theo 3 trường (tên hiển thị, biệt danh hội thoại/danh bạ, email) và ẩn người dùng đang chặn/bị chặn.
+      // 2. Trò chuyện nhóm (GROUP): Chỉ tìm kiếm theo tên nhóm (c.name), tuyệt đối không tìm theo email hay biệt danh thành viên.
       helper.smartSearch(query.search, (builder) => {
         builder
           .matchCase(
-            'c.type = :searchTypeDirect',
-            { searchTypeDirect: ConversationTypeEnum.DIRECT },
-            ['u_partner.name', 'u_partner.email'],
+            `c.type = :searchTypeDirect AND NOT EXISTS (
+              SELECT 1 FROM contacts c_blk
+              WHERE c_blk.deleted_at IS NULL
+                AND c_blk.status = :blockedStatusSearch
+                AND (
+                  (c_blk.userId = :userId AND c_blk.contactId = u_partner.id)
+                  OR (c_blk.userId = u_partner.id AND c_blk.contactId = :userId)
+                )
+            )`,
+            {
+              searchTypeDirect: ConversationTypeEnum.DIRECT,
+              blockedStatusSearch: ContactStatusEnum.BLOCKED,
+              userId,
+            },
+            ['u_partner.name', 'cp_partner.nickname', 'c_contact.alias', 'u_partner.email'],
           )
           .matchCase('c.type = :searchTypeGroup', { searchTypeGroup: ConversationTypeEnum.GROUP }, [
             'c.name',
@@ -1674,9 +1703,16 @@ export class ChatService {
     });
 
     const blockedPartnerSet = new Set<string>();
+    const blockedByMeSet = new Set<string>();
+    const blockedByPartnerSet = new Set<string>();
     blockRecords.forEach((r) => {
-      const otherId = r.userId === userId ? r.contactId : r.userId;
-      blockedPartnerSet.add(otherId);
+      if (r.userId === userId) {
+        blockedByMeSet.add(r.contactId);
+        blockedPartnerSet.add(r.contactId);
+      } else {
+        blockedByPartnerSet.add(r.userId);
+        blockedPartnerSet.add(r.userId);
+      }
     });
 
     // Truy vấn tin nhắn hợp lệ mới nhất (chưa hết hạn tự hủy & sau thời điểm clearedAt)
@@ -1708,6 +1744,10 @@ export class ChatService {
       let avatar = conv.avatar || null;
       let originalName: string | undefined;
       let partnerNickname: string | null = null;
+      let partnerEmail: string | null = null;
+      let isBlocked = false;
+      let blockedByMe = false;
+      let blockedByPartner = false;
 
       const isSavedMessages = conv.directKey === `self:${userId}`;
       if (isSavedMessages) {
@@ -1719,6 +1759,10 @@ export class ChatService {
         const partnerPart = partnerPartMap.get(`${conv.id}:${partnerIdStr}`);
         partnerNickname = partnerPart?.nickname || null;
         originalName = conv.partnerUser.name;
+        partnerEmail = conv.partnerUser.email || null;
+        blockedByMe = blockedByMeSet.has(partnerIdStr);
+        blockedByPartner = blockedByPartnerSet.has(partnerIdStr);
+        isBlocked = blockedByMe || blockedByPartner;
         // Ưu tiên hiển thị biệt danh được đặt trong hội thoại 1-1
         conv.name = partnerNickname || conv.partnerUser.name;
         avatar = conv.partnerUser.avatarMedia?.file?.url || null;
@@ -1779,6 +1823,10 @@ export class ChatService {
         ...conv,
         originalName,
         partnerNickname,
+        partnerEmail,
+        isBlocked,
+        blockedByMe,
+        blockedByPartner,
         isSavedMessages,
         unreadCount: Math.max(0, Number(conv.unreadCount || 0)),
         lastMessage: decryptedLastMessage,
@@ -1865,6 +1913,20 @@ export class ChatService {
     await this.userService.findUserById({
       userId: receiverId,
     });
+
+    const existingBlock = await this.contactRepository.findOne({
+      where: [
+        { userId: senderId, contactId: receiverId, status: ContactStatusEnum.BLOCKED },
+        { userId: receiverId, contactId: senderId, status: ContactStatusEnum.BLOCKED },
+      ],
+    });
+    if (existingBlock) {
+      throw new ForbiddenException(
+        existingBlock.userId === senderId
+          ? 'Bạn đã chặn người dùng này. Hãy bỏ chặn để bắt đầu cuộc trò chuyện.'
+          : 'Bạn không thể nhắn tin cho người dùng này.',
+      );
+    }
 
     const directKey = [senderId, receiverId].sort().join(':');
 

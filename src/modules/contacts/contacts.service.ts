@@ -327,6 +327,9 @@ export class ContactsService {
     return contact;
   }
 
+  /**
+   * Tìm kiếm người dùng để kết bạn, loại bỏ hoàn toàn các người dùng đã chặn hoặc bị chặn.
+   */
   async findContactUsers(payload: { query: IBaseQuery; userId: string }) {
     const { query, userId } = payload;
 
@@ -335,6 +338,23 @@ export class ContactsService {
     helper
       .filter('u.id != :userId', { userId })
       .select(['u.id', 'u.email', 'u.name', 'u.status', 'u.createdAt']);
+
+    // Lý do nghiệp vụ: Khi User A chặn User B, cả hai phía không hiển thị trên thanh tìm kiếm của nhau
+    helper.getBuilder().andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM contacts c_blk
+        WHERE c_blk.deleted_at IS NULL
+          AND c_blk.status = :blockedStatus
+          AND (
+            (c_blk.userId = :userId AND c_blk.contactId = u.id)
+            OR (c_blk.userId = u.id AND c_blk.contactId = :userId)
+          )
+      )`,
+      {
+        userId,
+        blockedStatus: ContactStatusEnum.BLOCKED,
+      },
+    );
 
     helper
       .leftJoinAndMapOne(
