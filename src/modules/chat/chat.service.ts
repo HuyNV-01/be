@@ -856,7 +856,8 @@ export class ChatService {
       order: { createdAt: 'DESC' },
       select: ['id'],
     });
-    if (latestMsg && latestMsg.id === message.id) {
+    const isLastMessage = Boolean(latestMsg && latestMsg.id === message.id);
+    if (isLastMessage) {
       await this.convRepository.update(dto.conversationId, {
         lastMessage: encrypted.ciphertext,
       });
@@ -865,7 +866,10 @@ export class ChatService {
     const enriched = await this.buildEnrichedMessageResponse(message.id);
     const recipientIds = await this.getConversationMemberIds(dto.conversationId);
 
-    return { message: enriched, recipientIds };
+    return {
+      message: enriched ? { ...enriched, isLastMessage } : enriched,
+      recipientIds,
+    };
   }
 
   async recallMessage(payload: { userId: string; dto: RecallMessageDto }) {
@@ -902,7 +906,8 @@ export class ChatService {
       order: { createdAt: 'DESC' },
       select: ['id'],
     });
-    if (latestMsg && latestMsg.id === message.id) {
+    const isLastMessage = Boolean(latestMsg && latestMsg.id === message.id);
+    if (isLastMessage) {
       await this.convRepository.update(dto.conversationId, {
         lastMessage: recalledPlaceholder.ciphertext,
       });
@@ -915,6 +920,7 @@ export class ChatService {
       messageId: message.id,
       recalledBy: userId,
       recalledAt: new Date().toISOString(),
+      isLastMessage,
       recipientIds,
     };
   }
@@ -1422,7 +1428,12 @@ export class ChatService {
         avatar: avatarUrl,
       };
 
-      const computedStatus = this.computeStatus(msg as MessageEntity, userId);
+      const computedStatus = this.computeStatus(
+        msg as MessageEntity,
+        userId,
+        Boolean(myPart.readReceiptsEnabled && !myPart.isRestricted),
+        privacyHideReadSet,
+      );
       const decryptedContent = this.messageCryptoService.decryptForConversation(
         msg.content as string,
         conversationId,
@@ -1545,6 +1556,7 @@ export class ChatService {
 
   async getUserInbox(payload: { userId: string; query: IBaseQuery }) {
     const { userId, query } = payload;
+    const nowTime = new Date();
 
     const helper = AdvancedQueryHelper.from(this.convRepository, 'c');
 
@@ -1595,6 +1607,8 @@ export class ChatService {
           .andWhere('m.status != :removedStatus', {
             removedStatus: MessageStatusEnum.REMOVED,
           })
+          .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :nowTime)', { nowTime })
+          .andWhere('(mp.clearedAt IS NULL OR m.createdAt > mp.clearedAt)')
           .andWhere('(mp.joinedAt IS NULL OR m.createdAt >= mp.joinedAt)')
           .andWhere('(mp.lastReadAt IS NULL OR m.createdAt > mp.lastReadAt)');
       });
@@ -1621,29 +1635,79 @@ export class ChatService {
       unreadCount: 'int',
     });
 
+    const convIds: string[] = result.data.map((c: any) => String(c.id));
     const partnerIds: string[] = result.data
       .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
       .map((c: any) => String(c.partnerUser.id));
 
-    const onlineSet = await this.socketStateService.getOnlineUsers(partnerIds);
+    const [onlineSet, allConvParticipants, blockRecords] = await Promise.all([
+      this.socketStateService.getOnlineUsers(partnerIds),
+      convIds.length > 0
+        ? this.partRepository.find({
+            where: { conversationId: In(convIds) },
+            select: ['conversationId', 'userId', 'nickname', 'isRestricted', 'readReceiptsEnabled'],
+          })
+        : Promise.resolve([]),
+      partnerIds.length > 0
+        ? this.contactRepository.find({
+            where: [
+              { userId, contactId: In(partnerIds), status: ContactStatusEnum.BLOCKED },
+              { userId: In(partnerIds), contactId: userId, status: ContactStatusEnum.BLOCKED },
+            ],
+            select: ['userId', 'contactId', 'status'],
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const partnerPartMap = new Map<string, ConversationParticipantEntity>();
+    const privacyHideReadByConv = new Map<string, Set<string>>();
+
+    allConvParticipants.forEach((p) => {
+      if (p.userId !== userId) {
+        partnerPartMap.set(`${p.conversationId}:${p.userId}`, p);
+      }
+      if (!p.readReceiptsEnabled || p.isRestricted) {
+        const set = privacyHideReadByConv.get(p.conversationId) || new Set<string>();
+        set.add(p.userId);
+        privacyHideReadByConv.set(p.conversationId, set);
+      }
+    });
+
+    const blockedPartnerSet = new Set<string>();
+    blockRecords.forEach((r) => {
+      const otherId = r.userId === userId ? r.contactId : r.userId;
+      blockedPartnerSet.add(otherId);
+    });
+
+    // Truy vấn tin nhắn hợp lệ mới nhất (chưa hết hạn tự hủy & sau thời điểm clearedAt)
+    const latestValidMsgByConv = new Map<string, MessageEntity>();
+    if (convIds.length > 0) {
+      await Promise.all(
+        result.data.map(async (conv: any) => {
+          const myPart = conv.participants?.[0];
+          const qb = this.msgRepository
+            .createQueryBuilder('m')
+            .where('m.conversationId = :convId', { convId: conv.id })
+            .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :nowTime)', { nowTime });
+
+          if (myPart?.clearedAt) {
+            qb.andWhere('m.createdAt > :clearedAt', { clearedAt: myPart.clearedAt });
+          }
+
+          const latestMsg = await qb.orderBy('m.createdAt', 'DESC').getOne();
+          if (latestMsg) {
+            latestValidMsgByConv.set(String(conv.id), latestMsg);
+          }
+        }),
+      );
+    }
 
     const finalData = result.data.map((conv: any) => {
       const myParticipant = conv.participants?.[0];
       let isOnline = false;
       let avatar = conv.avatar || null;
-      if (conv.type === ConversationTypeEnum.DIRECT && conv.partnerUser) {
-        conv.name = conv.partnerUser.name;
-        avatar = conv.partnerUser.avatarMedia?.file?.url || null;
-        conv.partnerId = conv.partnerUser.id;
-        isOnline = onlineSet.has(String(conv.partnerUser.id));
-      }
-
-      const decryptedLastMessage = conv.lastMessage
-        ? this.messageCryptoService.decryptForConversation(
-            conv.lastMessage as string,
-            conv.id as string,
-          )
-        : null;
+      let originalName: string | undefined;
+      let partnerNickname: string | null = null;
 
       const isSavedMessages = conv.directKey === `self:${userId}`;
       if (isSavedMessages) {
@@ -1651,10 +1715,60 @@ export class ChatService {
         conv.partnerId = userId;
         isOnline = true;
       } else if (conv.type === ConversationTypeEnum.DIRECT && conv.partnerUser) {
-        conv.name = conv.partnerUser.name;
+        const partnerIdStr = String(conv.partnerUser.id);
+        const partnerPart = partnerPartMap.get(`${conv.id}:${partnerIdStr}`);
+        partnerNickname = partnerPart?.nickname || null;
+        originalName = conv.partnerUser.name;
+        // Ưu tiên hiển thị biệt danh được đặt trong hội thoại 1-1
+        conv.name = partnerNickname || conv.partnerUser.name;
         avatar = conv.partnerUser.avatarMedia?.file?.url || null;
-        conv.partnerId = conv.partnerUser.id;
-        isOnline = onlineSet.has(String(conv.partnerUser.id));
+        conv.partnerId = partnerIdStr;
+
+        // Lý do nghiệp vụ: Khi đối phương bật hạn chế (partnerPart.isRestricted) hoặc có chặn 2 chiều,
+        // ẩn trạng thái Online của đối phương đối với người dùng hiện tại.
+        // Ngược lại, nếu chính mình hạn chế đối phương (myParticipant.isRestricted), mình vẫn thấy đối phương Online.
+        const isPartnerHidingPresence =
+          Boolean(partnerPart?.isRestricted) || blockedPartnerSet.has(partnerIdStr);
+        isOnline = isPartnerHidingPresence ? false : onlineSet.has(partnerIdStr);
+      }
+
+      const validLatestMsg = latestValidMsgByConv.get(String(conv.id));
+      let decryptedLastMessage: string | null = null;
+      let effectiveLastMessageAt: string | null = conv.createdAt
+        ? new Date(conv.createdAt).toISOString()
+        : null;
+      let effectiveLastMessageType: string | null = null;
+      let effectiveLastMessageSenderId: string | null = null;
+      let effectiveLastMessageStatus: MessageStatusEnum | null = null;
+      let lastMessageExpiresAt: string | null = null;
+
+      if (validLatestMsg) {
+        const rawDecrypted = this.messageCryptoService.decryptForConversation(
+          validLatestMsg.content,
+          String(conv.id),
+        );
+        decryptedLastMessage =
+          validLatestMsg.status === MessageStatusEnum.REMOVED
+            ? '[Tin nhắn đã được thu hồi]'
+            : validLatestMsg.type === MessageTypeEnum.TEXT ||
+                validLatestMsg.type === MessageTypeEnum.CALL ||
+                validLatestMsg.type === MessageTypeEnum.POLL
+              ? rawDecrypted
+              : `[${validLatestMsg.type}] ${rawDecrypted || ''}`.trim();
+        effectiveLastMessageAt = validLatestMsg.createdAt
+          ? new Date(validLatestMsg.createdAt).toISOString()
+          : effectiveLastMessageAt;
+        effectiveLastMessageType = validLatestMsg.type;
+        effectiveLastMessageSenderId = validLatestMsg.senderId;
+        lastMessageExpiresAt = validLatestMsg.expiresAt
+          ? new Date(validLatestMsg.expiresAt).toISOString()
+          : null;
+        effectiveLastMessageStatus = this.computeStatus(
+          validLatestMsg,
+          userId,
+          Boolean((myParticipant?.readReceiptsEnabled ?? true) && !myParticipant?.isRestricted),
+          privacyHideReadByConv.get(String(conv.id)),
+        );
       }
 
       delete conv.partner;
@@ -1663,15 +1777,17 @@ export class ChatService {
 
       return {
         ...conv,
+        originalName,
+        partnerNickname,
         isSavedMessages,
         unreadCount: Math.max(0, Number(conv.unreadCount || 0)),
         lastMessage: decryptedLastMessage,
-        lastMessageAt: conv.lastMessageAt
-          ? new Date(conv.lastMessageAt).toISOString()
-          : conv.createdAt
-            ? new Date(conv.createdAt).toISOString()
-            : null,
-        isOnline: myParticipant?.isRestricted ? false : isOnline,
+        lastMessageAt: effectiveLastMessageAt,
+        lastMessageType: effectiveLastMessageType,
+        lastMessageSenderId: effectiveLastMessageSenderId,
+        lastMessageStatus: effectiveLastMessageStatus,
+        lastMessageExpiresAt,
+        isOnline,
         avatar,
         isAdmin: myParticipant?.isAdmin || false,
         isMuted: myParticipant?.isMuted || false,
@@ -1689,6 +1805,41 @@ export class ChatService {
     });
 
     return { ...result, data: finalData };
+  }
+
+  async getVisiblePresenceRecipientIds(userId: string): Promise<string[]> {
+    const allRelatedIds = await this.getRelatedUserIds(userId);
+    if (allRelatedIds.length === 0) return [];
+
+    const restrictedRows = await this.partRepository
+      .createQueryBuilder('target')
+      .select('DISTINCT target.userId', 'userId')
+      .innerJoin(
+        ConversationParticipantEntity,
+        'me',
+        'me.conversationId = target.conversationId AND me.userId = :userId AND me.isRestricted = :isRestricted',
+        { userId, isRestricted: true },
+      )
+      .innerJoin(ConversationEntity, 'c', 'c.id = target.conversationId AND c.type = :directType', {
+        directType: ConversationTypeEnum.DIRECT,
+      })
+      .where('target.userId != :userId', { userId })
+      .getRawMany<{ userId: string }>();
+
+    const blockRecords = await this.contactRepository.find({
+      where: [
+        { userId, contactId: In(allRelatedIds), status: ContactStatusEnum.BLOCKED },
+        { userId: In(allRelatedIds), contactId: userId, status: ContactStatusEnum.BLOCKED },
+      ],
+      select: ['userId', 'contactId'],
+    });
+
+    const hiddenSet = new Set<string>(restrictedRows.map((r) => r.userId));
+    blockRecords.forEach((b) => {
+      hiddenSet.add(b.userId === userId ? b.contactId : b.userId);
+    });
+
+    return allRelatedIds.filter((id) => !hiddenSet.has(id));
   }
 
   async getRelatedUserIds(userId: string): Promise<string[]> {
@@ -1783,30 +1934,49 @@ export class ChatService {
   }
 
   private async enrichConversationInfo(conversation: ConversationEntity, partnerId: string) {
-    const partnerUsers = await this.userService.getBasicUsersInfo([partnerId]);
+    const [partnerUsers, onlineSet, partnerPart, latestValidMsg] = await Promise.all([
+      this.userService.getBasicUsersInfo([partnerId]),
+      this.socketStateService.getOnlineUsers([partnerId]),
+      this.partRepository.findOne({
+        where: { conversationId: conversation.id, userId: partnerId },
+        select: ['nickname', 'isRestricted'],
+      }),
+      this.msgRepository
+        .createQueryBuilder('m')
+        .where('m.conversationId = :convId', { convId: conversation.id })
+        .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :nowTime)', { nowTime: new Date() })
+        .orderBy('m.createdAt', 'DESC')
+        .getOne(),
+    ]);
     const partner = partnerUsers[0] as any;
-    const onlineSet = await this.socketStateService.getOnlineUsers([partnerId]);
+    const displayName = partnerPart?.nickname || partner?.name || conversation.name;
+    const isPartnerOnline = partnerPart?.isRestricted ? false : onlineSet.has(partnerId);
 
     return {
       ...conversation,
-      name: partner?.name || conversation.name,
+      name: displayName,
+      originalName: partner?.name || conversation.name,
+      partnerNickname: partnerPart?.nickname || null,
       avatar: partner?.avatarMedia?.file?.url || conversation.avatar || null,
       partnerId,
       unreadCount: 0,
-      isOnline: onlineSet.has(partnerId),
-      lastMessage: conversation.lastMessage
-        ? this.messageCryptoService.decryptForConversation(
-            conversation.lastMessage,
-            conversation.id,
-          )
+      isOnline: isPartnerOnline,
+      lastMessage: latestValidMsg
+        ? this.messageCryptoService.decryptForConversation(latestValidMsg.content, conversation.id)
         : null,
-      lastMessageAt: conversation.lastMessageAt
-        ? new Date(conversation.lastMessageAt).toISOString()
-        : new Date().toISOString(),
+      lastMessageAt: latestValidMsg?.createdAt
+        ? new Date(latestValidMsg.createdAt).toISOString()
+        : conversation.lastMessageAt
+          ? new Date(conversation.lastMessageAt).toISOString()
+          : new Date().toISOString(),
+      lastMessageExpiresAt: latestValidMsg?.expiresAt
+        ? new Date(latestValidMsg.expiresAt).toISOString()
+        : null,
       partnerInfo: partner
         ? {
             id: partner.id,
             name: partner.name,
+            nickname: partnerPart?.nickname || null,
             avatar: partner?.avatarMedia?.file?.url || null,
           }
         : null,
@@ -1824,6 +1994,18 @@ export class ChatService {
       NotificationEventEnum.MARK_CONVERSATION_READ,
       new NotificationConversationReadEvent(userId, conversationId),
     );
+
+    await this.msgRepository
+      .createQueryBuilder()
+      .update(MessageEntity)
+      .set({
+        deliveredTo: () => `JSON_ARRAY_APPEND(COALESCE(deliveredTo, JSON_ARRAY()), '$', :userId)`,
+      })
+      .where('conversationId = :conversationId', { conversationId })
+      .andWhere('senderId != :userId', { userId })
+      .andWhere(`NOT JSON_CONTAINS(COALESCE(deliveredTo, JSON_ARRAY()), JSON_QUOTE(:userId), '$')`)
+      .setParameters({ userId, conversationId })
+      .execute();
 
     if (!participant.readReceiptsEnabled || participant.isRestricted) {
       return {
@@ -1845,7 +2027,10 @@ export class ChatService {
       .setParameters({ userId, conversationId })
       .execute();
 
-    const users = await this.userService.getBasicUsersInfo([userId]);
+    const [users, memberIds] = await Promise.all([
+      this.userService.getBasicUsersInfo([userId]),
+      this.getConversationMemberIds(conversationId),
+    ]);
     const user = users[0];
 
     const userReaderInfo = user
@@ -1856,7 +2041,7 @@ export class ChatService {
         }
       : { id: userId, name: 'Unknown', avatar: null };
 
-    const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo);
+    const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo, memberIds);
     this.eventEmitter.emit(ChatEventEnum.MESSAGE_READ, event);
 
     return {
@@ -1868,6 +2053,14 @@ export class ChatService {
 
   async markAsDelivered(payload: { userId: string; messageId: string }) {
     const { userId, messageId } = payload;
+
+    const msg = await this.msgRepository.findOne({
+      where: { id: messageId },
+      select: ['id', 'senderId', 'conversationId'],
+    });
+    if (!msg || msg.senderId === userId) {
+      return { success: true, senderId: null };
+    }
 
     await this.msgRepository
       .createQueryBuilder()
@@ -1881,19 +2074,32 @@ export class ChatService {
       .setParameters({ userId, messageId })
       .execute();
 
-    return { success: true };
+    return {
+      success: true,
+      senderId: msg.senderId,
+      conversationId: msg.conversationId,
+    };
   }
 
-  private computeStatus(msg: MessageEntity, currentUserId: string): MessageStatusEnum {
+  private computeStatus(
+    msg: MessageEntity,
+    currentUserId: string,
+    canSeeReadReceipts = true,
+    privacyHideReadSet?: Set<string>,
+  ): MessageStatusEnum {
     if (msg.status === MessageStatusEnum.REMOVED) return MessageStatusEnum.REMOVED;
     if (msg.status === MessageStatusEnum.FAILED) return MessageStatusEnum.FAILED;
 
     if (msg.senderId !== currentUserId) return MessageStatusEnum.READ;
 
-    const hasRead = msg.readBy?.some((id) => id !== currentUserId);
-    if (hasRead) return MessageStatusEnum.READ;
+    const hasVisibleRead =
+      canSeeReadReceipts &&
+      msg.readBy?.some((id) => id !== currentUserId && !privacyHideReadSet?.has(id));
+    if (hasVisibleRead) return MessageStatusEnum.READ;
 
-    const hasDelivered = msg.deliveredTo?.some((id) => id !== currentUserId);
+    const hasDelivered =
+      msg.deliveredTo?.some((id) => id !== currentUserId) ||
+      msg.readBy?.some((id) => id !== currentUserId);
     if (hasDelivered) return MessageStatusEnum.DELIVERED;
 
     return MessageStatusEnum.SENT;
@@ -2129,6 +2335,18 @@ export class ChatService {
     requesterId: string;
     dto: UpdateParticipantNicknameDto;
   }) {
+    const conv = await this.convRepository.findOne({
+      where: { id: params.conversationId },
+      select: ['id', 'type'],
+    });
+    if (!conv) {
+      throw new NotFoundException('Conversation not found');
+    }
+    // Lý do nghiệp vụ: Chỉ cho phép đặt biệt danh trong hội thoại 1-1 (DIRECT)
+    if (conv.type !== ConversationTypeEnum.DIRECT) {
+      throw new BadRequestException('Chỉ hỗ trợ đặt biệt danh trong cuộc trò chuyện 1-1');
+    }
+
     await this.ensureParticipant(params.conversationId, params.requesterId);
     const targetPart = await this.ensureParticipant(params.conversationId, params.dto.targetUserId);
 
@@ -2145,11 +2363,20 @@ export class ChatService {
         .catch(() => undefined);
     }
 
+    const [targetUsers, memberIds] = await Promise.all([
+      this.userService.getBasicUsersInfo([params.dto.targetUserId]),
+      this.getConversationMemberIds(params.conversationId),
+    ]);
+    const originalName = targetUsers[0]?.name || null;
+
     return {
       conversationId: params.conversationId,
       targetUserId: params.dto.targetUserId,
       nickname: cleanNickname,
+      originalName,
+      displayName: cleanNickname || originalName,
       updatedBy: params.requesterId,
+      recipientIds: memberIds,
     };
   }
 
@@ -2159,6 +2386,12 @@ export class ChatService {
     dto: UpdateConversationSettingsDto;
   }) {
     const part = await this.ensureParticipant(params.conversationId, params.userId);
+    const conv = await this.convRepository.findOne({
+      where: { id: params.conversationId },
+      select: ['id', 'type'],
+    });
+
+    const wasRestricted = Boolean(part.isRestricted);
 
     if (typeof params.dto.isMuted === 'boolean') part.isMuted = params.dto.isMuted;
     if (typeof params.dto.soundEnabled === 'boolean') part.soundEnabled = params.dto.soundEnabled;
@@ -2175,12 +2408,37 @@ export class ChatService {
 
     await this.partRepository.save(part);
 
+    let partnerId: string | null = null;
+    let isUserCurrentlyOnline = false;
+    let shouldBroadcastPresenceChange = false;
+
+    if (
+      conv?.type === ConversationTypeEnum.DIRECT &&
+      typeof params.dto.isRestricted === 'boolean' &&
+      wasRestricted !== part.isRestricted
+    ) {
+      const members = await this.getConversationMemberIds(params.conversationId);
+      partnerId = members.find((id) => id !== params.userId) || null;
+      if (partnerId) {
+        const blockState = await this.checkDirectBlockStatus(params.conversationId, params.userId);
+        if (!blockState.isBlocked) {
+          shouldBroadcastPresenceChange = true;
+          isUserCurrentlyOnline = part.isRestricted
+            ? false
+            : await this.socketStateService.isUserOnline(params.userId);
+        }
+      }
+    }
+
     return {
       conversationId: params.conversationId,
       isMuted: part.isMuted,
       soundEnabled: part.soundEnabled,
       readReceiptsEnabled: part.readReceiptsEnabled,
       isRestricted: part.isRestricted,
+      partnerId,
+      shouldBroadcastPresenceChange,
+      isUserCurrentlyOnline,
     };
   }
 
@@ -2269,11 +2527,19 @@ export class ChatService {
     });
 
     const blockState = await this.checkDirectBlockStatus(conversationId, userId);
+    const partnerMember =
+      conv.type === ConversationTypeEnum.DIRECT
+        ? members.find((m) => m.userId !== userId)
+        : undefined;
+    const resolvedName =
+      conv.type === ConversationTypeEnum.DIRECT
+        ? partnerMember?.nickname || partnerMember?.name || conv.name
+        : conv.name;
 
     return {
       conversationId,
       type: conv.type,
-      name: conv.name,
+      name: resolvedName,
       disappearingTtl: conv.disappearingTtl,
       mySettings: {
         isMuted: myPart.isMuted,
@@ -2292,6 +2558,16 @@ export class ChatService {
     try {
       const now = new Date();
       const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+
+      const expiredRows = await this.msgRepository
+        .createQueryBuilder('m')
+        .select('DISTINCT m.conversationId', 'conversationId')
+        .where('m.createdAt >= :thirtyDaysAgo', { thirtyDaysAgo })
+        .andWhere('m.expiresAt IS NOT NULL AND m.expiresAt <= :now', { now })
+        .getRawMany<{ conversationId: string }>();
+
+      const affectedConvIds = expiredRows.map((r) => r.conversationId);
+
       await this.msgRepository
         .createQueryBuilder()
         .delete()
@@ -2299,6 +2575,35 @@ export class ChatService {
         .where('created_at >= :thirtyDaysAgo', { thirtyDaysAgo })
         .andWhere('expires_at IS NOT NULL AND expires_at <= :now', { now })
         .execute();
+
+      for (const convId of affectedConvIds) {
+        const latestRemaining = await this.msgRepository
+          .createQueryBuilder('m')
+          .where('m.conversationId = :convId', { convId })
+          .andWhere('(m.expiresAt IS NULL OR m.expiresAt > :now)', { now })
+          .orderBy('m.createdAt', 'DESC')
+          .getOne();
+
+        if (latestRemaining) {
+          await this.convRepository.update(convId, {
+            lastMessage: latestRemaining.content,
+            lastMessageSenderId: latestRemaining.senderId,
+            lastMessageAt: latestRemaining.createdAt,
+            lastMessageType: latestRemaining.type,
+          });
+        } else {
+          await this.convRepository
+            .createQueryBuilder()
+            .update(ConversationEntity)
+            .set({
+              lastMessage: () => 'NULL',
+              lastMessageSenderId: () => 'NULL',
+              lastMessageType: () => 'NULL',
+            })
+            .where('id = :convId', { convId })
+            .execute();
+        }
+      }
     } catch (err) {
       this.logger.warn(`Failed cleaning expired messages: ${String(err)}`);
     }

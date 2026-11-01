@@ -441,6 +441,14 @@ export class ChatController {
       SOCKET_CONFIG.events.CHAT.MESSAGE_RECALLED,
       result,
     );
+    result.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.CHAT.MESSAGE_RECALLED,
+        result,
+      );
+    });
 
     return {
       status: HttpStatus.OK,
@@ -699,6 +707,15 @@ export class ChatController {
       result,
     );
 
+    result.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.CHAT.NICKNAME_UPDATED,
+        result,
+      );
+    });
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
@@ -722,6 +739,20 @@ export class ChatController {
       userId: req.user.id,
       dto,
     });
+
+    if (result.shouldBroadcastPresenceChange && result.partnerId) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        result.partnerId,
+        SOCKET_CONFIG.events.USER_STATUS,
+        {
+          userId: req.user.id,
+          isOnline: result.isUserCurrentlyOnline,
+          lastActive: new Date(),
+        },
+      );
+    }
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,

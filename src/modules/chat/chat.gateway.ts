@@ -60,13 +60,13 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   async handleUserOnline(userId: string): Promise<void> {
-    const recipientIds = await this.chatService.getRelatedUserIds(userId);
+    const recipientIds = await this.chatService.getVisiblePresenceRecipientIds(userId);
     this.broadcastStatus(userId, true, recipientIds);
     await this.syncUndeliveredMessages(userId);
   }
 
   async handleUserOffline(userId: string): Promise<void> {
-    const recipientIds = await this.chatService.getRelatedUserIds(userId);
+    const recipientIds = await this.chatService.getVisiblePresenceRecipientIds(userId);
     this.broadcastStatus(userId, false, recipientIds);
 
     try {
@@ -729,7 +729,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       this.enforceRateLimit(client, 'message_received');
       const userId = client.data.user.id;
 
-      await this.chatService.markAsDelivered({
+      const deliveredRes = await this.chatService.markAsDelivered({
         userId,
         messageId: payload.messageId,
       });
@@ -745,6 +745,14 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       this.server
         .to(`conversation:${payload.conversationId}`)
         .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_UPDATE, updatePayload);
+
+      if (deliveredRes?.senderId) {
+        this.emitToUser(
+          deliveredRes.senderId,
+          SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_UPDATE,
+          updatePayload,
+        );
+      }
 
       return { status: HttpStatus.OK };
     } catch (err: unknown) {
@@ -771,7 +779,11 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.server
       .to(`conversation:${event.conversationId}`)
       .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
-    this.emitToUser(event.userId, SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
+
+    const targets = new Set([event.userId, ...(event.recipientIds || [])]);
+    targets.forEach((uid) => {
+      this.emitToUser(uid, SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
+    });
   }
 
   @SubscribeMessage('mark_read')
@@ -793,16 +805,20 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   ): Promise<void> {
     this.enforceRateLimit(client, 'typing');
     const userId = client.data.user.id;
-    const isMember = await this.chatService.isParticipant(payload.conversationId, userId);
-    if (!isMember) return;
+    try {
+      const myPart = await this.chatService.ensureParticipant(payload.conversationId, userId);
+      if (myPart.isRestricted) return;
 
-    client
-      .to(`conversation:${payload.conversationId}`)
-      .emit(SOCKET_CONFIG.events.CHAT.USER_TYPING, {
-        userId,
-        conversationId: payload.conversationId,
-        isTyping: Boolean(payload.isTyping),
-      });
+      client
+        .to(`conversation:${payload.conversationId}`)
+        .emit(SOCKET_CONFIG.events.CHAT.USER_TYPING, {
+          userId,
+          conversationId: payload.conversationId,
+          isTyping: Boolean(payload.isTyping),
+        });
+    } catch {
+      return;
+    }
   }
 
   @OnEvent(ContactEventEnum.REQUEST_SENT)
@@ -870,7 +886,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
       if (conversationIds.length === 0) return;
 
-      conversationIds.forEach((convId) => {
+      for (const convId of conversationIds) {
         const messageIds = groupedMessages[convId];
 
         const batchPayload = {
@@ -884,7 +900,14 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         this.server
           .to(`conversation:${convId}`)
           .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH, batchPayload);
-      });
+
+        const memberIds = await this.chatService.getConversationMemberIds(convId);
+        memberIds.forEach((uid) => {
+          if (uid !== userId) {
+            this.emitToUser(uid, SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH, batchPayload);
+          }
+        });
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Error syncing: ${msg}`);
