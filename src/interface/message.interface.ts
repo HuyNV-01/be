@@ -50,6 +50,62 @@ export interface MessageMetadata {
   reactions?: Record<string, string[]>;
   attachments?: MessageAttachmentMeta[];
   callInfo?: MessageCallInfoMeta;
+  poll?: MessagePollMeta;
+  linkPreview?: MessageLinkPreviewMeta;
+  mentionedUserIds?: string[];
+  mentionAll?: boolean;
   expiresAt?: string;
   disappearingTtl?: number;
+}
+
+export interface MessagePollOptionMeta {
+  id: string;
+  text: string;
+  voterIds: string[];
+}
+
+export interface MessagePollMeta {
+  question: string;
+  options: MessagePollOptionMeta[];
+  allowMultipleAnswers: boolean;
+  isAnonymous?: boolean;
+  isClosed: boolean;
+  closedAt?: string;
+  closedBy?: string;
+}
+
+export interface MessageLinkPreviewMeta {
+  url: string;
+  hostname: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+}
+
+export interface AttachmentE2EEWrappedKey {
+  ivB64: string;
+  wrappedKeyB64: string;
+}
+
+export interface AttachmentE2EEMeta {
+  algorithm: 'AES-256-GCM';
+  fileIvB64: string;
+  originalMimeType: string;
+  senderUserId: string;
+  senderPublicKeyB64: string;
+  senderKeyId: string;
+  wrappedKeys: Record<string, AttachmentE2EEWrappedKey>;
+}
+
+export interface MessageAttachmentMeta {
+  fileId: string;
+  url: string;
+  thumbnailUrl?: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  e2ee?: AttachmentE2EEMeta;
 }

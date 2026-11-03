@@ -12,7 +12,7 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
-import { CallTypeEnum } from 'src/common/enum';
+import { CallTypeEnum, GroupRoleEnum } from 'src/common/enum';
 
 export class EditMessageDto {
   @ApiProperty({ description: 'Conversation UUID' })
@@ -147,6 +147,14 @@ export class RespondCallDto {
   @IsOptional()
   @IsString()
   reason?: string;
+
+  @ApiPropertyOptional({
+    description: 'Nếu là Host/Admin nhóm: kết thúc cuộc gọi cho tất cả mọi người',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  endForAll?: boolean;
 }
 
 export class WebRtcSignalDto {
@@ -196,6 +204,11 @@ export class ToggleCallMediaDto {
   @IsOptional()
   @IsBoolean()
   isScreenSharing?: boolean;
+
+  @ApiPropertyOptional({ description: 'Trạng thái giơ tay phát biểu (Google Meet style)' })
+  @IsOptional()
+  @IsBoolean()
+  isHandRaised?: boolean;
 }
 
 // Thêm vào cuối file: src/dto/chat/call-and-security.dto.ts
@@ -250,4 +263,59 @@ export class GetSharedAssetsQueryDto {
   @IsOptional()
   @IsIn(['MEDIA', 'FILES', 'LINKS'])
   tab?: 'MEDIA' | 'FILES' | 'LINKS' = 'MEDIA';
+}
+
+export class UpdateGroupMemberRoleDto {
+  @ApiProperty({
+    description:
+      'Vai trò mới của thành viên trong nhóm (OWNER = Chuyển quyền trưởng nhóm, ADMIN = Quản trị viên, MEMBER = Thành viên)',
+    enum: GroupRoleEnum,
+  })
+  @IsEnum(GroupRoleEnum)
+  @IsNotEmpty()
+  role: GroupRoleEnum;
+}
+
+export class ForwardMessageDto {
+  @ApiProperty({ description: 'Message UUID gốc cần chuyển tiếp' })
+  @IsUUID()
+  @IsNotEmpty()
+  messageId: string;
+
+  @ApiProperty({ description: 'Conversation UUID nguồn' })
+  @IsUUID()
+  @IsNotEmpty()
+  sourceConversationId: string;
+
+  @ApiProperty({
+    type: [String],
+    description: 'Danh sách Conversation UUID đích nhận tin nhắn chuyển tiếp',
+  })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  targetConversationIds: string[];
+}
+
+export class HostMuteParticipantDto {
+  @ApiProperty({ description: 'Call Session ID' })
+  @IsUUID()
+  @IsNotEmpty()
+  callId: string;
+
+  @ApiProperty({ description: 'User UUID của thành viên cần tắt mic' })
+  @IsUUID()
+  @IsNotEmpty()
+  targetUserId: string;
+}
+
+export class RingCallParticipantDto {
+  @ApiProperty({ description: 'Call Session ID' })
+  @IsUUID()
+  @IsNotEmpty()
+  callId: string;
+
+  @ApiProperty({ description: 'User UUID của thành viên cần gọi nhắc vào phòng' })
+  @IsUUID()
+  @IsNotEmpty()
+  targetUserId: string;
 }

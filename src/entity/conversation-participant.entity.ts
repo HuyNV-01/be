@@ -1,3 +1,4 @@
+import { GroupRoleEnum } from 'src/common/enum';
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -26,6 +27,13 @@ export class ConversationParticipantEntity extends BaseModel {
 
   @Column({ default: false })
   isAdmin: boolean;
+
+  @Column({
+    type: 'enum',
+    enum: GroupRoleEnum,
+    default: GroupRoleEnum.MEMBER,
+  })
+  role: GroupRoleEnum;
 
   @Column({ type: 'datetime', nullable: true })
   lastReadAt: Date;

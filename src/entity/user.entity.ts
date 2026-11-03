@@ -1,5 +1,6 @@
 import { Exclude } from 'class-transformer';
 import { StatusEnum, ValidRolesEnum } from 'src/common/enum';
+import { IUserPrivacySettings } from 'src/interface/user.interface';
 import { Column, Entity, Index, ValueTransformer } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -11,6 +12,14 @@ const emailNormalizationTransformer: ValueTransformer = {
   from(this: void, value?: string): string | undefined {
     return value;
   },
+};
+
+export const DEFAULT_USER_PRIVACY_SETTINGS: IUserPrivacySettings = {
+  showEmail: true,
+  showPhone: true,
+  showAlias: true,
+  showOnlineStatus: true,
+  showSharedMedia: true,
 };
 
 @Entity('users')
@@ -32,6 +41,31 @@ export class UserEntity extends BaseModel {
 
   @Column({ name: 'name', type: 'varchar', length: 100 })
   name: string;
+
+  @Column({
+    name: 'bio',
+    type: 'varchar',
+    length: 500,
+    default: null,
+    nullable: true,
+  })
+  bio?: string | null;
+
+  @Column({
+    name: 'phone',
+    type: 'varchar',
+    length: 32,
+    default: null,
+    nullable: true,
+  })
+  phone?: string | null;
+
+  @Column({
+    name: 'privacy_settings',
+    type: 'json',
+    nullable: true,
+  })
+  privacySettings?: IUserPrivacySettings | null;
 
   @Column({
     name: 'role',

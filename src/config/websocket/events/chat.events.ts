@@ -24,5 +24,6 @@ export class ChatMessageReadEvent {
     public readonly userId: string,
     public readonly lastReadAt: Date,
     public readonly user: { id: string; name: string; avatar: string | null },
+    public readonly recipientIds?: string[],
   ) {}
 }

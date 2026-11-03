@@ -11,25 +11,29 @@ import { SocketRateLimiter } from 'src/common/websocket/socket-rate-limiter';
 import { SocketStateService } from 'src/common/websocket/socket-state.service';
 import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
 import {
+  ContactBlockedEvent,
   ContactEventEnum,
   ContactRemovedEvent,
   ContactRequestAcceptedEvent,
   ContactRequestSentEvent,
+  ContactUnblockedEvent,
 } from 'src/config/websocket/events/contact.events';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import {
   EditMessageDto,
+  HostMuteParticipantDto,
   InitiateCallDto,
   PinMessageDto,
   ReactMessageDto,
   RecallMessageDto,
   RegisterPublicKeyDto,
   RespondCallDto,
+  RingCallParticipantDto,
   ToggleCallMediaDto,
   WebRtcSignalDto,
 } from 'src/dto/chat/call-and-security.dto';
-import { SendMessageDto } from 'src/dto/chat/chat.dto';
+import { ClosePollDto, SendMessageDto, VotePollDto } from 'src/dto/chat/chat.dto';
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
 import { ChatService } from './chat.service';
@@ -44,7 +48,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     jwtService: JwtService,
     private readonly chatService: ChatService,
     private readonly callSignalingService: CallSignalingService,
-    private readonly eventEmitter: EventEmitter2,
   ) {
     super(
       socketStateService,
@@ -57,13 +60,13 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   }
 
   async handleUserOnline(userId: string): Promise<void> {
-    const recipientIds = await this.chatService.getRelatedUserIds(userId);
+    const recipientIds = await this.chatService.getVisiblePresenceRecipientIds(userId);
     this.broadcastStatus(userId, true, recipientIds);
     await this.syncUndeliveredMessages(userId);
   }
 
   async handleUserOffline(userId: string): Promise<void> {
-    const recipientIds = await this.chatService.getRelatedUserIds(userId);
+    const recipientIds = await this.chatService.getVisiblePresenceRecipientIds(userId);
     this.broadcastStatus(userId, false, recipientIds);
 
     try {
@@ -124,6 +127,53 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]): void {
     const payload = { userId, isOnline, lastActive: new Date() };
     recipients.forEach((id) => this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload));
+  }
+
+  @SubscribeMessage('vote_poll')
+  async handleVotePoll(
+    @MessageBody() dto: VotePollDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'vote_poll');
+    const result = await this.chatService.votePollMessage({
+      userId: client.data.user.id,
+      dto,
+    });
+
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.POLL_UPDATED, result);
+
+    return { status: HttpStatus.OK, data: result };
+  }
+
+  @SubscribeMessage('close_poll')
+  async handleClosePoll(
+    @MessageBody() dto: ClosePollDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'close_poll');
+    const result = await this.chatService.closePollMessage({
+      userId: client.data.user.id,
+      dto,
+    });
+
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.POLL_UPDATED, result);
+
+    return { status: HttpStatus.OK, data: result };
+  }
+
+  @OnEvent('chat.link_preview.ready')
+  handleLinkPreviewReady(payload: {
+    conversationId: string;
+    messageId: string;
+    linkPreview: any;
+  }): void {
+    this.server
+      .to(`conversation:${payload.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CHAT.LINK_PREVIEW_READY, payload);
   }
 
   @SubscribeMessage('join_room')
@@ -392,6 +442,19 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       });
     }
 
+    this.server
+      .to(`conversation:${dto.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+        callId: session.callId,
+        conversationId: session.conversationId,
+        callType: session.callType,
+        isGroupCall: session.isGroupCall,
+        initiatorId: session.initiatorId,
+        status: session.status,
+        participants: session.participants,
+        membersInfo,
+      });
+
     return {
       status: HttpStatus.OK,
       data: {
@@ -442,6 +505,24 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       participants: session.participants,
       membersInfo,
     });
+
+    client.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CALL.HANDLED_ELSEWHERE, {
+      callId: session.callId,
+      action: 'accepted',
+    });
+
+    this.server
+      .to(`conversation:${session.conversationId}`)
+      .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+        callId: session.callId,
+        conversationId: session.conversationId,
+        callType: session.callType,
+        isGroupCall: session.isGroupCall,
+        initiatorId: session.initiatorId,
+        status: session.status,
+        participants: session.participants,
+        membersInfo,
+      });
 
     return {
       status: HttpStatus.OK,
@@ -500,6 +581,11 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
           .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
       }
     }
+
+    client.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CALL.HANDLED_ELSEWHERE, {
+      callId: dto.callId,
+      action: 'rejected',
+    });
 
     return { status: HttpStatus.OK, data: outcome };
   }
@@ -571,6 +657,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       callId: dto.callId,
       userId,
       reason: 'hangup',
+      endForAll: dto.endForAll,
     });
 
     await client.leave(`call:${dto.callId}`);
@@ -604,12 +691,29 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         this.server
           .to(`conversation:${outcome.session.conversationId}`)
           .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, callLog);
+        this.server
+          .to(`conversation:${outcome.session.conversationId}`)
+          .emit(SOCKET_CONFIG.events.CALL.SESSION_ENDED, {
+            callId: dto.callId,
+            conversationId: outcome.session.conversationId,
+          });
       } else {
         this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_LEFT, {
           callId: dto.callId,
           userId,
           remainingParticipants: outcome.session.participants,
         });
+        this.server
+          .to(`conversation:${outcome.session.conversationId}`)
+          .emit(SOCKET_CONFIG.events.CALL.SESSION_STARTED, {
+            callId: outcome.session.callId,
+            conversationId: outcome.session.conversationId,
+            callType: outcome.session.callType,
+            isGroupCall: outcome.session.isGroupCall,
+            initiatorId: outcome.session.initiatorId,
+            status: outcome.session.status,
+            participants: outcome.session.participants,
+          });
       }
     }
 
@@ -625,7 +729,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       this.enforceRateLimit(client, 'message_received');
       const userId = client.data.user.id;
 
-      await this.chatService.markAsDelivered({
+      const deliveredRes = await this.chatService.markAsDelivered({
         userId,
         messageId: payload.messageId,
       });
@@ -641,6 +745,14 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       this.server
         .to(`conversation:${payload.conversationId}`)
         .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_UPDATE, updatePayload);
+
+      if (deliveredRes?.senderId) {
+        this.emitToUser(
+          deliveredRes.senderId,
+          SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_UPDATE,
+          updatePayload,
+        );
+      }
 
       return { status: HttpStatus.OK };
     } catch (err: unknown) {
@@ -667,7 +779,11 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     this.server
       .to(`conversation:${event.conversationId}`)
       .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
-    this.emitToUser(event.userId, SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
+
+    const targets = new Set([event.userId, ...(event.recipientIds || [])]);
+    targets.forEach((uid) => {
+      this.emitToUser(uid, SOCKET_CONFIG.events.CHAT.MESSAGE_READ, payload);
+    });
   }
 
   @SubscribeMessage('mark_read')
@@ -689,16 +805,25 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   ): Promise<void> {
     this.enforceRateLimit(client, 'typing');
     const userId = client.data.user.id;
-    const isMember = await this.chatService.isParticipant(payload.conversationId, userId);
-    if (!isMember) return;
-
-    client
-      .to(`conversation:${payload.conversationId}`)
-      .emit(SOCKET_CONFIG.events.CHAT.USER_TYPING, {
+    try {
+      const myPart = await this.chatService.ensureParticipant(payload.conversationId, userId);
+      if (myPart.isRestricted) return;
+      const blockState = await this.chatService.checkDirectBlockStatus(
+        payload.conversationId,
         userId,
-        conversationId: payload.conversationId,
-        isTyping: Boolean(payload.isTyping),
-      });
+      );
+      if (blockState.isBlocked) return;
+
+      client
+        .to(`conversation:${payload.conversationId}`)
+        .emit(SOCKET_CONFIG.events.CHAT.USER_TYPING, {
+          userId,
+          conversationId: payload.conversationId,
+          isTyping: Boolean(payload.isTyping),
+        });
+    } catch {
+      return;
+    }
   }
 
   @OnEvent(ContactEventEnum.REQUEST_SENT)
@@ -729,6 +854,73 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     });
   }
 
+  @OnEvent(ContactEventEnum.USER_BLOCKED)
+  handleContactBlocked(event: ContactBlockedEvent): void {
+    const payload = {
+      blockerId: event.blockerId,
+      targetId: event.targetId,
+      timestamp: event.timestamp,
+    };
+    this.server
+      .to(`user:${event.targetId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
+    this.server
+      .to(`user:${event.blockerId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
+
+    // Lý do nghiệp vụ: Ẩn trạng thái online từ cả 2 phía ngay lập tức khi có hành động chặn
+    this.emitToUser(event.targetId, SOCKET_CONFIG.events.USER_STATUS, {
+      userId: event.blockerId,
+      isOnline: false,
+      lastActive: new Date(),
+    });
+    this.emitToUser(event.blockerId, SOCKET_CONFIG.events.USER_STATUS, {
+      userId: event.targetId,
+      isOnline: false,
+      lastActive: new Date(),
+    });
+  }
+
+  @OnEvent(ContactEventEnum.USER_UNBLOCKED)
+  async handleContactUnblocked(event: ContactUnblockedEvent): Promise<void> {
+    const payload = {
+      unblockerId: event.unblockerId,
+      targetId: event.targetId,
+      timestamp: event.timestamp,
+    };
+    this.server
+      .to(`user:${event.targetId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_UNBLOCKED, payload);
+    this.server
+      .to(`user:${event.unblockerId}`)
+      .emit(SOCKET_CONFIG.events.CONTACT.USER_UNBLOCKED, payload);
+
+    try {
+      const [unblockerVisibleRecipients, targetVisibleRecipients] = await Promise.all([
+        this.chatService.getVisiblePresenceRecipientIds(event.unblockerId),
+        this.chatService.getVisiblePresenceRecipientIds(event.targetId),
+      ]);
+      if (unblockerVisibleRecipients.includes(event.targetId)) {
+        const isUnblockerOnline = await this.socketStateService.isUserOnline(event.unblockerId);
+        this.emitToUser(event.targetId, SOCKET_CONFIG.events.USER_STATUS, {
+          userId: event.unblockerId,
+          isOnline: isUnblockerOnline,
+          lastActive: new Date(),
+        });
+      }
+      if (targetVisibleRecipients.includes(event.unblockerId)) {
+        const isTargetOnline = await this.socketStateService.isUserOnline(event.targetId);
+        this.emitToUser(event.unblockerId, SOCKET_CONFIG.events.USER_STATUS, {
+          userId: event.targetId,
+          isOnline: isTargetOnline,
+          lastActive: new Date(),
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Failed syncing presence after unblock: ${String(err)}`);
+    }
+  }
+
   private async syncUndeliveredMessages(userId: string): Promise<void> {
     try {
       const groupedMessages = await this.chatService.processUndeliveredMessages(userId);
@@ -736,7 +928,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
 
       if (conversationIds.length === 0) return;
 
-      conversationIds.forEach((convId) => {
+      for (const convId of conversationIds) {
         const messageIds = groupedMessages[convId];
 
         const batchPayload = {
@@ -750,10 +942,96 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         this.server
           .to(`conversation:${convId}`)
           .emit(SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH, batchPayload);
-      });
+
+        const memberIds = await this.chatService.getConversationMemberIds(convId);
+        memberIds.forEach((uid) => {
+          if (uid !== userId) {
+            this.emitToUser(uid, SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH, batchPayload);
+          }
+        });
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Error syncing: ${msg}`);
     }
+  }
+
+  @SubscribeMessage('call:host_mute')
+  async handleHostMuteParticipant(
+    @MessageBody() dto: HostMuteParticipantDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'call:host_mute');
+    const requesterId = client.data.user.id;
+    const currentSession = await this.callSignalingService.getCallSession(dto.callId);
+    if (!currentSession) {
+      throw new WsException('Call session has ended');
+    }
+
+    const requesterPart = await this.chatService.ensureParticipant(
+      currentSession.conversationId,
+      requesterId,
+    );
+
+    const updatedSession = await this.callSignalingService.hostMuteParticipant({
+      callId: dto.callId,
+      requesterId,
+      targetUserId: dto.targetUserId,
+      isRequesterGroupAdmin: requesterPart.isAdmin,
+    });
+
+    this.server.to(`call:${dto.callId}`).emit(SOCKET_CONFIG.events.CALL.MEDIA_STATE, {
+      callId: dto.callId,
+      userId: dto.targetUserId,
+      callType: updatedSession.callType,
+      participantState: updatedSession.participants[dto.targetUserId],
+    });
+
+    this.emitToUser(dto.targetUserId, SOCKET_CONFIG.events.CALL.HOST_MUTED, {
+      callId: dto.callId,
+      mutedBy: requesterId,
+    });
+
+    return { status: HttpStatus.OK };
+  }
+
+  @SubscribeMessage('call:ring_user')
+  async handleRingParticipant(
+    @MessageBody() dto: RingCallParticipantDto,
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'call:ring_user');
+    const callerId = client.data.user.id;
+    const session = await this.callSignalingService.getCallSession(dto.callId);
+    if (!session) {
+      throw new WsException('Call session has ended');
+    }
+
+    await this.chatService.ensureParticipant(session.conversationId, callerId);
+    const isTargetMember = await this.chatService.isParticipant(
+      session.conversationId,
+      dto.targetUserId,
+    );
+    if (!isTargetMember) {
+      throw new WsException('Target user is not a member of this conversation');
+    }
+
+    const membersInfo = await this.chatService.getConversationMembersInfo(session.conversationId);
+    const callerInfo = membersInfo.find((m) => m.id === callerId);
+
+    this.emitToUser(dto.targetUserId, SOCKET_CONFIG.events.CALL.INCOMING, {
+      callId: session.callId,
+      conversationId: session.conversationId,
+      callType: session.callType,
+      isGroupCall: session.isGroupCall,
+      callerId,
+      callerName: callerInfo?.name || 'Thành viên nhóm',
+      callerAvatar: callerInfo?.avatar || null,
+      createdAt: session.createdAt,
+      participants: session.participants,
+      membersInfo,
+    });
+
+    return { status: HttpStatus.OK };
   }
 }

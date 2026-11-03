@@ -14,6 +14,12 @@ export enum ConversationTypeEnum {
   GROUP = 'GROUP',
 }
 
+export enum GroupRoleEnum {
+  OWNER = 'OWNER',
+  ADMIN = 'ADMIN',
+  MEMBER = 'MEMBER',
+}
+
 export enum MessageTypeEnum {
   TEXT = 'TEXT',
   IMAGE = 'IMAGE',
@@ -21,6 +27,7 @@ export enum MessageTypeEnum {
   AUDIO = 'AUDIO',
   VIDEO = 'VIDEO',
   CALL = 'CALL',
+  POLL = 'POLL',
   SYSTEM = 'SYSTEM',
 }
 
@@ -76,6 +83,7 @@ export enum MessageStatusEnum {
 export enum NotificationTypeEnum {
   NEW_MESSAGE = 'NEW_MESSAGE',
   MESSAGE_REPLY = 'MESSAGE_REPLY',
+  MESSAGE_MENTION = 'MESSAGE_MENTION',
   MESSAGE_REACTION = 'MESSAGE_REACTION',
   MESSAGE_PINNED = 'MESSAGE_PINNED',
   FRIEND_REQUEST = 'FRIEND_REQUEST',

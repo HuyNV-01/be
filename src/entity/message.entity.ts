@@ -7,6 +7,7 @@ import { ConversationEntity } from './conversation.entity';
 import { UserEntity } from './user.entity';
 
 @Entity('messages')
+@Index('idx_msg_id_lookup', ['id'])
 @Index(['conversationId', 'createdAt'])
 @Index(['conversationId', 'isPinned'])
 @Index(['conversationId', 'senderId', 'clientTempId'])
@@ -30,6 +31,7 @@ export class MessageEntity extends BaseModel {
 
   @ManyToOne(() => ConversationEntity, (c) => c.messages, {
     onDelete: 'CASCADE',
+    createForeignKeyConstraints: false,
   })
   @JoinColumn({ name: 'conversationId' })
   conversation: ConversationEntity;
@@ -38,7 +40,9 @@ export class MessageEntity extends BaseModel {
   @Index()
   senderId: string;
 
-  @ManyToOne(() => UserEntity)
+  @ManyToOne(() => UserEntity, {
+    createForeignKeyConstraints: false,
+  })
   @JoinColumn({ name: 'senderId' })
   sender: UserEntity;
 
@@ -46,7 +50,11 @@ export class MessageEntity extends BaseModel {
   @Index()
   replyToMessageId: string | null;
 
-  @ManyToOne(() => MessageEntity, { nullable: true, onDelete: 'SET NULL' })
+  @ManyToOne(() => MessageEntity, {
+    nullable: true,
+    onDelete: 'SET NULL',
+    createForeignKeyConstraints: false,
+  })
   @JoinColumn({ name: 'reply_to_message_id' })
   replyToMessage: MessageEntity | null;
 

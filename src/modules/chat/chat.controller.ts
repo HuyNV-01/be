@@ -38,6 +38,7 @@ import { DBaseQuery } from 'src/dto/base-query.dto';
 import {
   AddGroupMembersDto,
   EditMessageDto,
+  ForwardMessageDto,
   GetSharedAssetsQueryDto,
   MuteConversationDto,
   PinMessageDto,
@@ -45,14 +46,24 @@ import {
   RegisterPublicKeyDto,
   UpdateConversationSettingsDto,
   UpdateDisappearingMessagesDto,
+  UpdateGroupMemberRoleDto,
   UpdateParticipantNicknameDto,
 } from 'src/dto/chat/call-and-security.dto';
-import { CreateGroupDto, SendMessageDto } from 'src/dto/chat/chat.dto';
+import {
+  ClosePollDto,
+  CreateGroupDto,
+  CreatePollDto,
+  FetchLinkPreviewQueryDto,
+  SendMessageDto,
+  VotePollDto,
+} from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import * as queryTypes from 'src/types/query.types';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ChatService } from './chat.service';
+import { CallSignalingService } from './services/call-signaling.service';
+import { LinkPreviewService } from './services/link-preview.service';
 
 @ApiTags('Chat & Real-Time Communication')
 @Controller('chat')
@@ -66,7 +77,146 @@ export class ChatController {
   constructor(
     private readonly chatService: ChatService,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly linkPreviewService: LinkPreviewService,
+    private readonly callSignalingService: CallSignalingService,
   ) {}
+
+  @ApiOperation({
+    summary: 'Get active ongoing call in a conversation (for Group Call Banner / Rejoin)',
+  })
+  @Get('conversations/:id/active-call')
+  @HttpCode(HttpStatus.OK)
+  async getConversationActiveCall(@Req() req, @Param('id') id: string) {
+    await this.chatService.ensureParticipant(id, req.user.id);
+    const session = await this.callSignalingService.getActiveCallByConversation(id);
+    if (!session) {
+      return {
+        status: HttpStatus.OK,
+        message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+        code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+        data: null,
+      };
+    }
+    const membersInfo = await this.chatService.getConversationMembersInfo(id);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data: {
+        ...session,
+        membersInfo,
+      },
+    };
+  }
+
+  @ApiOperation({ summary: 'Get or create personal Saved Messages (My Cloud) conversation' })
+  @Post('saved-messages')
+  @HttpCode(HttpStatus.OK)
+  async getOrCreateSavedMessages(@Req() req) {
+    const result = await this.chatService.getOrCreateSavedMessages(req.user.id);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Create a group poll message' })
+  @Post('polls')
+  @HttpCode(HttpStatus.CREATED)
+  async createPoll(@Req() req, @Body() dto: CreatePollDto) {
+    const { message, recipientIds } = await this.chatService.createPollMessage({
+      senderId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      dto.conversationId,
+      SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+      message,
+    );
+
+    recipientIds.forEach((uid) => {
+      if (uid !== req.user.id) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+          message,
+        );
+      }
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: message,
+    };
+  }
+
+  @ApiOperation({ summary: 'Vote on a poll message' })
+  @Post('polls/vote')
+  @HttpCode(HttpStatus.OK)
+  async votePoll(@Req() req, @Body() dto: VotePollDto) {
+    const result = await this.chatService.votePollMessage({
+      userId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      dto.conversationId,
+      SOCKET_CONFIG.events.CHAT.POLL_UPDATED,
+      result,
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Close a poll message' })
+  @Patch('polls/close')
+  @HttpCode(HttpStatus.OK)
+  async closePoll(@Req() req, @Body() dto: ClosePollDto) {
+    const result = await this.chatService.closePollMessage({
+      userId: req.user.id,
+      dto,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      dto.conversationId,
+      SOCKET_CONFIG.events.CHAT.POLL_UPDATED,
+      result,
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Fetch OpenGraph link preview metadata (SSRF-safe)' })
+  @Get('link-preview')
+  @HttpCode(HttpStatus.OK)
+  async getLinkPreview(@Query() query: FetchLinkPreviewQueryDto) {
+    const data = await this.linkPreviewService.fetchLinkPreview(query.url);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
 
   @ApiOperation({ summary: 'Create a new group chat' })
   @ApiBody({ type: CreateGroupDto })
@@ -291,6 +441,14 @@ export class ChatController {
       SOCKET_CONFIG.events.CHAT.MESSAGE_RECALLED,
       result,
     );
+    result.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.CHAT.MESSAGE_RECALLED,
+        result,
+      );
+    });
 
     return {
       status: HttpStatus.OK,
@@ -549,6 +707,15 @@ export class ChatController {
       result,
     );
 
+    result.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.CHAT.NICKNAME_UPDATED,
+        result,
+      );
+    });
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
@@ -572,6 +739,20 @@ export class ChatController {
       userId: req.user.id,
       dto,
     });
+
+    if (result.shouldBroadcastPresenceChange && result.partnerId) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        result.partnerId,
+        SOCKET_CONFIG.events.USER_STATUS,
+        {
+          userId: req.user.id,
+          isOnline: result.isUserCurrentlyOnline,
+          lastActive: new Date(),
+        },
+      );
+    }
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
@@ -622,6 +803,77 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
       data: result,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'Update member role or transfer ownership in a group chat (Owner only)',
+  })
+  @ApiParam({ name: 'id', description: 'Group Conversation UUID' })
+  @ApiParam({ name: 'memberId', description: 'Target Member User UUID' })
+  @Patch('groups/:id/members/:memberId/role')
+  @HttpCode(HttpStatus.OK)
+  async updateGroupMemberRole(
+    @Req() req,
+    @Param('id') id: string,
+    @Param('memberId') memberId: string,
+    @Body() dto: UpdateGroupMemberRoleDto,
+  ) {
+    const result = await this.chatService.updateGroupMemberRole({
+      conversationId: id,
+      requesterId: req.user.id,
+      targetUserId: memberId,
+      role: dto.role,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      id,
+      SOCKET_CONFIG.events.CHAT.GROUP_UPDATED,
+      { action: 'role_updated', ...result },
+    );
+
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data: result,
+    };
+  }
+
+  @ApiOperation({ summary: 'Forward a message to multiple conversations' })
+  @Post('messages/forward')
+  @HttpCode(HttpStatus.CREATED)
+  async forwardMessage(@Req() req, @Body() dto: ForwardMessageDto) {
+    const results = await this.chatService.forwardMessage({
+      senderId: req.user.id,
+      dto,
+    });
+
+    results.forEach(({ conversationId, message, recipientIds }) => {
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        conversationId,
+        SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+        message,
+      );
+      recipientIds.forEach((uid) => {
+        if (uid !== req.user.id) {
+          this.realtimeEmitter.emitToUser(
+            SOCKET_CONFIG.namespaces.CHAT,
+            uid,
+            SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+            message,
+          );
+        }
+      });
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: results.map((r) => r.message),
     };
   }
 }

@@ -5,6 +5,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
 import { CallStatusEnum, CallTypeEnum } from 'src/common/enum';
+import {
+  CallParticipantEntity,
+  CallParticipantStatusEnum,
+} from 'src/entity/call-participant.entity';
 import { CallSessionEntity } from 'src/entity/call-session.entity';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,6 +20,8 @@ export interface CallParticipantState {
   isAudioMuted: boolean;
   isVideoOff: boolean;
   isScreenSharing: boolean;
+  isHandRaised?: boolean;
+  raisedHandAt?: string | null;
 }
 
 export interface ActiveCallSession {
@@ -23,12 +29,14 @@ export interface ActiveCallSession {
   conversationId: string;
   callType: CallTypeEnum;
   isGroupCall: boolean;
+  topology: 'MESH' | 'SFU';
   initiatorId: string;
   invitedUserIds: string[];
   status: CallStatusEnum;
   createdAt: string;
   answeredAt?: string;
   endedAt?: string;
+  maxConcurrentParticipants: number;
   participants: Record<string, CallParticipantState>;
 }
 
@@ -41,12 +49,60 @@ export class CallSignalingService {
   private readonly CALL_TTL_SECONDS = 3600 * 4; // Tối đa 4 giờ
   private readonly RINGING_TIMEOUT_MS = 60_000; // Tự giải phóng nếu đổ chuông > 60s
   private readonly ringingTimers = new Map<string, NodeJS.Timeout>();
+  private readonly SAFE_DEL_USER_CALL_LUA = `
+    for i = 1, #KEYS do
+      if redis.call("GET", KEYS[i]) == ARGV[1] then
+        redis.call("DEL", KEYS[i])
+      end
+    end
+    return 1
+  `;
+
+  private readonly ATOMIC_UPDATE_PARTICIPANT_LUA = `
+    local raw = redis.call("GET", KEYS[1])
+    if not raw then return nil end
+    local session = cjson.decode(raw)
+    local userId = ARGV[1]
+    local patch = cjson.decode(ARGV[2])
+    local ttl = tonumber(ARGV[3])
+
+    if not session.participants or not session.participants[userId] then
+      return nil
+    end
+
+    local p = session.participants[userId]
+    if patch.isAudioMuted ~= nil then p.isAudioMuted = patch.isAudioMuted end
+    if patch.isVideoOff ~= nil then
+      p.isVideoOff = patch.isVideoOff
+      if patch.isVideoOff == false and session.callType == "AUDIO" then
+        session.callType = "VIDEO"
+      end
+    end
+    if patch.isScreenSharing ~= nil then p.isScreenSharing = patch.isScreenSharing end
+    if patch.isHandRaised ~= nil then
+      p.isHandRaised = patch.isHandRaised
+      p.raisedHandAt = patch.raisedHandAt
+    end
+
+    session.participants[userId] = p
+    local updatedRaw = cjson.encode(session)
+    redis.call("SET", KEYS[1], updatedRaw, "EX", ttl)
+    return updatedRaw
+  `;
 
   constructor(
     @InjectRedis() private readonly redis: Redis,
     @InjectRepository(CallSessionEntity)
     private readonly callSessionRepo: Repository<CallSessionEntity>,
+    @InjectRepository(CallParticipantEntity)
+    private readonly callParticipantRepo: Repository<CallParticipantEntity>,
   ) {}
+
+  private async safeDeleteUserCallKeys(userIds: string[], callId: string): Promise<void> {
+    if (!userIds.length) return;
+    const keys = [...new Set(userIds)].map((uid) => `${this.USER_CALL_PREFIX}${uid}`);
+    await this.redis.eval(this.SAFE_DEL_USER_CALL_LUA, keys.length, ...keys, callId);
+  }
 
   private isStaleRingingSession(session: ActiveCallSession): boolean {
     if (session.status !== CallStatusEnum.RINGING) return false;
@@ -148,15 +204,19 @@ export class CallSignalingService {
     const now = new Date().toISOString();
     const isGroupCall = params.isGroupCall ?? targetIds.length > 1;
 
+    const topology: 'MESH' | 'SFU' = targetIds.length + 1 > 6 ? 'SFU' : 'MESH';
+
     const session: ActiveCallSession = {
       callId,
       conversationId: params.conversationId,
       callType: params.callType,
       isGroupCall,
+      topology,
       initiatorId: params.initiatorId,
       invitedUserIds: targetIds,
       status: ringingUserIds.length > 0 ? CallStatusEnum.RINGING : CallStatusEnum.BUSY,
       createdAt: now,
+      maxConcurrentParticipants: 1,
       participants: {
         [params.initiatorId]: {
           userId: params.initiatorId,
@@ -164,6 +224,8 @@ export class CallSignalingService {
           isAudioMuted: false,
           isVideoOff: params.callType === CallTypeEnum.AUDIO,
           isScreenSharing: false,
+          isHandRaised: false,
+          raisedHandAt: null,
         },
       },
     };
@@ -196,10 +258,34 @@ export class CallSignalingService {
             callType: params.callType,
             status: CallStatusEnum.RINGING,
             isGroupCall,
+            topology,
+            maxConcurrentParticipants: 1,
             invitedUserIds: targetIds,
             participants: session.participants,
           }),
         )
+        .then(async () => {
+          const partEntities = [
+            this.callParticipantRepo.create({
+              callId,
+              conversationId: params.conversationId,
+              userId: params.initiatorId,
+              status: CallParticipantStatusEnum.JOINED,
+              joinedAt: new Date(now),
+            }),
+            ...targetIds.map((uid) =>
+              this.callParticipantRepo.create({
+                callId,
+                conversationId: params.conversationId,
+                userId: uid,
+                status: ringingUserIds.includes(uid)
+                  ? CallParticipantStatusEnum.INVITED
+                  : CallParticipantStatusEnum.BUSY,
+              }),
+            ),
+          ];
+          await this.callParticipantRepo.save(partEntities);
+        })
         .catch((err) => this.logger.warn(`DB save call session warning: ${err.message}`));
     }
 
@@ -263,6 +349,15 @@ export class CallSignalingService {
       isScreenSharing: false,
     };
 
+    const activeCount = Object.keys(session.participants).length;
+    session.maxConcurrentParticipants = Math.max(
+      session.maxConcurrentParticipants || 1,
+      activeCount,
+    );
+    if (activeCount > 6) {
+      session.topology = 'SFU';
+    }
+
     await this.redis
       .multi()
       .set(`${this.CALL_KEY_PREFIX}${callId}`, JSON.stringify(session), 'EX', this.CALL_TTL_SECONDS)
@@ -278,6 +373,20 @@ export class CallSignalingService {
       })
       .catch(() => undefined);
 
+    await this.callParticipantRepo
+      .upsert(
+        {
+          callId,
+          conversationId: session.conversationId,
+          userId,
+          status: CallParticipantStatusEnum.JOINED,
+          joinedAt: new Date(now),
+          leftAt: null,
+        },
+        ['callId', 'userId'],
+      )
+      .catch(() => undefined);
+
     return session;
   }
 
@@ -287,37 +396,63 @@ export class CallSignalingService {
     isAudioMuted?: boolean;
     isVideoOff?: boolean;
     isScreenSharing?: boolean;
+    isHandRaised?: boolean;
   }): Promise<ActiveCallSession> {
-    const session = await this.getCallSession(params.callId);
-    if (!session || !session.participants[params.userId]) {
+    const patchPayload = JSON.stringify({
+      ...(params.isAudioMuted !== undefined ? { isAudioMuted: params.isAudioMuted } : {}),
+      ...(params.isVideoOff !== undefined ? { isVideoOff: params.isVideoOff } : {}),
+      ...(params.isScreenSharing !== undefined ? { isScreenSharing: params.isScreenSharing } : {}),
+      ...(params.isHandRaised !== undefined
+        ? {
+            isHandRaised: params.isHandRaised,
+            raisedHandAt: params.isHandRaised ? new Date().toISOString() : null,
+          }
+        : {}),
+    });
+
+    const updatedRaw = (await this.redis.eval(
+      this.ATOMIC_UPDATE_PARTICIPANT_LUA,
+      1,
+      `${this.CALL_KEY_PREFIX}${params.callId}`,
+      params.userId,
+      patchPayload,
+      String(this.CALL_TTL_SECONDS),
+    )) as string | null;
+
+    if (!updatedRaw) {
       throw new BadRequestException('Không tìm thấy thành viên trong cuộc gọi');
     }
 
-    const current = session.participants[params.userId];
-    if (params.isAudioMuted !== undefined) current.isAudioMuted = params.isAudioMuted;
-    if (params.isVideoOff !== undefined) {
-      current.isVideoOff = params.isVideoOff;
-      // Nếu bật camera trong cuộc gọi thoại, tự động nâng cấp phiên lên VIDEO
-      if (!params.isVideoOff && session.callType === CallTypeEnum.AUDIO) {
-        session.callType = CallTypeEnum.VIDEO;
-      }
+    return JSON.parse(updatedRaw) as ActiveCallSession;
+  }
+
+  async hostMuteParticipant(params: {
+    callId: string;
+    requesterId: string;
+    targetUserId: string;
+    isRequesterGroupAdmin?: boolean;
+  }): Promise<ActiveCallSession> {
+    const session = await this.getCallSession(params.callId);
+    if (!session) {
+      throw new BadRequestException('Phiên cuộc gọi không tồn tại');
     }
-    if (params.isScreenSharing !== undefined) current.isScreenSharing = params.isScreenSharing;
-
-    await this.redis.set(
-      `${this.CALL_KEY_PREFIX}${params.callId}`,
-      JSON.stringify(session),
-      'EX',
-      this.CALL_TTL_SECONDS,
-    );
-
-    return session;
+    if (session.initiatorId !== params.requesterId && !params.isRequesterGroupAdmin) {
+      throw new ForbiddenException(
+        'Chỉ người chủ trì hoặc Quản trị viên mới có thể tắt mic thành viên',
+      );
+    }
+    return this.updateMediaState({
+      callId: params.callId,
+      userId: params.targetUserId,
+      isAudioMuted: true,
+    });
   }
 
   async rejectOrLeaveCall(params: {
     callId: string;
     userId: string;
     reason?: 'rejected' | 'busy' | 'hangup' | 'timeout';
+    endForAll?: boolean;
   }): Promise<{
     session: ActiveCallSession | null;
     isCallTerminated: boolean;
@@ -325,7 +460,7 @@ export class CallSignalingService {
     durationSeconds: number;
   }> {
     const session = await this.getCallSession(params.callId);
-    await this.redis.del(`${this.USER_CALL_PREFIX}${params.userId}`);
+    await this.safeDeleteUserCallKeys([params.userId], params.callId);
 
     if (!session) {
       this.clearRingingTimeout(params.callId);
@@ -337,11 +472,45 @@ export class CallSignalingService {
       };
     }
 
+    const leavingParticipant = session.participants[params.userId];
     delete session.participants[params.userId];
+
+    const now = new Date();
+    if (leavingParticipant?.joinedAt) {
+      const userDuration = Math.max(
+        0,
+        Math.round((now.getTime() - new Date(leavingParticipant.joinedAt).getTime()) / 1000),
+      );
+      await this.callParticipantRepo
+        .update(
+          { callId: params.callId, userId: params.userId },
+          {
+            status: CallParticipantStatusEnum.LEFT,
+            leftAt: now,
+            durationSeconds: userDuration,
+          },
+        )
+        .catch(() => undefined);
+    } else if (params.reason === 'rejected' || params.reason === 'busy') {
+      await this.callParticipantRepo
+        .update(
+          { callId: params.callId, userId: params.userId },
+          {
+            status:
+              params.reason === 'busy'
+                ? CallParticipantStatusEnum.BUSY
+                : CallParticipantStatusEnum.REJECTED,
+          },
+        )
+        .catch(() => undefined);
+    }
+
     const remainingUserIds = Object.keys(session.participants);
     const isDirectCall = !session.isGroupCall && session.invitedUserIds.length === 1;
+    const isHostEndingForAll = Boolean(params.endForAll) && params.userId === session.initiatorId;
 
     const shouldTerminate =
+      isHostEndingForAll ||
       params.reason === 'timeout' ||
       remainingUserIds.length === 0 ||
       (isDirectCall && (params.reason === 'rejected' || params.reason === 'busy')) ||
@@ -350,7 +519,6 @@ export class CallSignalingService {
 
     if (shouldTerminate) {
       this.clearRingingTimeout(params.callId);
-      const now = new Date();
       session.endedAt = now.toISOString();
 
       let finalStatus = CallStatusEnum.COMPLETED;
@@ -376,20 +544,21 @@ export class CallSignalingService {
 
       session.status = finalStatus;
 
-      const cleanupKeys = [
+      await this.redis.del(
         `${this.CALL_KEY_PREFIX}${params.callId}`,
         `${this.CONV_CALL_PREFIX}${session.conversationId}`,
-        `${this.USER_CALL_PREFIX}${session.initiatorId}`,
-        ...session.invitedUserIds.map((id) => `${this.USER_CALL_PREFIX}${id}`),
-        ...remainingUserIds.map((id) => `${this.USER_CALL_PREFIX}${id}`),
-      ];
-      await this.redis.del(...cleanupKeys);
+      );
+      await this.safeDeleteUserCallKeys(
+        [session.initiatorId, ...session.invitedUserIds, ...remainingUserIds],
+        params.callId,
+      );
 
       await this.callSessionRepo
         .update(params.callId, {
           status: finalStatus,
           endedAt: now,
           durationSeconds,
+          maxConcurrentParticipants: session.maxConcurrentParticipants || 1,
           endReason: params.reason || 'hangup',
         })
         .catch(() => undefined);
