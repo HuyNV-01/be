@@ -31,6 +31,7 @@ export interface ICreateUser {
   name: string;
   status?: StatusEnum;
   role?: ValidRolesEnum;
+  lastActiveShopId?: string | null;
   provider?: string;
   uid?: string | null;
   emailVerifiedAt?: Date | null;
@@ -45,6 +46,7 @@ export interface IUpdateUser {
   privacySettings?: IUserPrivacySettings | null;
   status?: StatusEnum;
   role?: ValidRolesEnum;
+  lastActiveShopId?: string | null;
   provider?: string;
   uid?: string | null;
   currentSignInAt?: Date | null;

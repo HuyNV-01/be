@@ -9,6 +9,7 @@ import { envs } from 'src/config/envs';
 import googleOauthConfig from 'src/config/oauth/google-oauth.config';
 import { parseExpiresIn } from 'src/utils';
 
+import { IamModule } from '../iam/iam.module';
 import { MailModule } from '../mail/mail.module';
 import { UserModule } from '../user/user.module';
 import { AuthController } from './auth.controller';
@@ -31,6 +32,7 @@ import { LocalStrategy } from './strategies/local.strategy';
     }),
     ConfigModule.forFeature(googleOauthConfig),
     UserModule,
+    IamModule,
   ],
   controllers: [AuthController],
   providers: [

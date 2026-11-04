@@ -17,6 +17,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
 import { FilesModule } from './modules/files/files.module';
+import { IamModule } from './modules/iam/iam.module';
 import { MailModule } from './modules/mail/mail.module';
 import { MediaModule } from './modules/media/media.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -53,6 +54,7 @@ import { parseExpiresIn } from './utils';
     StorageModule,
     FilesModule,
     MediaModule,
+    IamModule,
     AuthModule,
     UserModule,
     MailModule,

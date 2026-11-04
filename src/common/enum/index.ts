@@ -102,3 +102,5 @@ export enum NotificationResourceTypeEnum {
   USER = 'USER',
   SYSTEM = 'SYSTEM',
 }
+
+export * from './permission.enum';
