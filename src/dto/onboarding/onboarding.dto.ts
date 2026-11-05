@@ -155,6 +155,14 @@ export class ApprovePendingMemberDto {
   allowedWarehouseIds?: string[];
 }
 
+export class RejectPendingMemberDto {
+  @ApiPropertyOptional({ example: 'Không khớp thông tin nhân sự ứng tuyển' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  reason?: string;
+}
+
 export class UpdateMemberRoleAndPermissionsDto {
   @ApiProperty({ enum: ShopRoleEnum })
   @IsEnum(ShopRoleEnum)
@@ -206,4 +214,11 @@ export class UpdateMemberStatusDto {
   })
   @IsEnum(MembershipStatusEnum)
   membershipStatus: MembershipStatusEnum;
+}
+
+export class TransferShopOwnershipDto {
+  @ApiProperty({ example: 'uuid-of-target-active-member' })
+  @IsString()
+  @IsNotEmpty()
+  targetMemberId: string;
 }

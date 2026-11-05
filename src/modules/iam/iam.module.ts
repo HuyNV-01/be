@@ -9,6 +9,7 @@ import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { UserEntity } from 'src/entity/user.entity';
 import { WarehouseEntity } from 'src/entity/warehouse.entity';
+import { NotificationsModule } from 'src/modules/notifications/notifications.module';
 
 import { ShopPermissionGuard } from './guards/shop-permission.guard';
 import { GranularIamService } from './iam.service';
@@ -29,6 +30,7 @@ import { WorkspaceOnboardingController } from './workspace-onboarding.controller
       NotificationEntity,
     ]),
     WebSocketModule,
+    NotificationsModule,
   ],
   controllers: [WorkspaceOnboardingController],
   providers: [

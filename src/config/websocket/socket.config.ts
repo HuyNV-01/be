@@ -67,5 +67,16 @@ export const SOCKET_CONFIG = {
       READ_ALL: 'read_all_notifications',
       REMOVED: 'notification_removed',
     },
+    IAM: {
+      PERMISSIONS_UPDATED: 'iam:permissions_updated',
+      INVITATION_RECEIVED: 'iam:invitation_received',
+      INVITATION_ACCEPTED: 'iam:invitation_accepted',
+      INVITATION_REVOKED: 'iam:invitation_revoked',
+      JOIN_REQUEST_RECEIVED: 'iam:join_request_received',
+      JOIN_REQUEST_APPROVED: 'iam:join_request_approved',
+      JOIN_REQUEST_REJECTED: 'iam:join_request_rejected',
+      MEMBER_STATUS_CHANGED: 'iam:member_status_changed',
+      SHOP_MEMBERS_CHANGED: 'iam:shop_members_changed',
+    },
   },
 } as const;

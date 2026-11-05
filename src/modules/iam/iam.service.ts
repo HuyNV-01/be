@@ -144,7 +144,7 @@ export class GranularIamService {
     this.realtimeEmitter.emitToUser(
       SOCKET_CONFIG.namespaces.CHAT,
       userId,
-      'iam:permissions_updated',
+      SOCKET_CONFIG.events.IAM.PERMISSIONS_UPDATED,
       updatedContext,
     );
 

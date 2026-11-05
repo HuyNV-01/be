@@ -21,6 +21,8 @@ import {
   CreateRoleInvitationDto,
   CreateShopWorkspaceDto,
   JoinShopByCodeDto,
+  RejectPendingMemberDto,
+  TransferShopOwnershipDto,
   UpdateMemberRoleAndPermissionsDto,
   UpdateMemberStatusDto,
 } from 'src/dto/onboarding/onboarding.dto';
@@ -187,7 +189,7 @@ export class WorkspaceOnboardingController {
   @ApiOperation({
     summary: 'Lấy ngữ cảnh quyền 4 chiều hiệu lực của user hiện tại tại cửa hàng shopId',
   })
-  async getMyShopContext(
+  async getMyShopEffectiveContext(
     @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
   ): Promise<DBaseRes> {
@@ -207,9 +209,9 @@ export class WorkspaceOnboardingController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Lấy danh sách thành viên (ACTIVE, PENDING_APPROVAL, SUSPENDED) và lời mời của cửa hàng',
+      'Lấy danh sách nhân sự (ACTIVE, PENDING_APPROVAL, SUSPENDED) và danh sách lời mời của cửa hàng',
   })
-  async getShopMembers(@Param('shopId') shopId: string): Promise<DBaseRes> {
+  async getShopMembersAndInvitations(@Param('shopId') shopId: string): Promise<DBaseRes> {
     const data = await this.onboardingService.getShopMembersAndInvitations(shopId);
     return {
       status: HttpStatus.OK,
@@ -226,7 +228,7 @@ export class WorkspaceOnboardingController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary:
-      'Chủ quán / Quản lý gửi lời mời nhân viên mới gán sẵn vai trò (Sale, Kế toán, Kho, Marketing...)',
+      'Luồng 2 (F00.2 & F00.3): Chủ quán / Quản lý gửi lời mời nhân viên gán sẵn vai trò (Sale, Kế toán, Kho...)',
   })
   async createRoleInvitation(
     @Request() req: { user: { id: string } },
@@ -242,6 +244,32 @@ export class WorkspaceOnboardingController {
     };
   }
 
+  @Patch('iam/shops/:shopId/invitations/:invitationId/revoke')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Luồng 2 (F00.2): Thu hồi lời mời nhân sự đang ở trạng thái PENDING',
+  })
+  async revokeRoleInvitation(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('invitationId') invitationId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.onboardingService.revokeRoleInvitation(
+      shopId,
+      invitationId,
+      req.user.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Revoked role invitation successfully',
+      data,
+    };
+  }
+
   @Post('iam/shops/:shopId/members/:memberId/approve')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
@@ -249,9 +277,10 @@ export class WorkspaceOnboardingController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Chủ quán / Quản lý phê duyệt yêu cầu xin vào quán (PENDING_APPROVAL) & Gán vai trò chính thức',
+      'Luồng 3 (F00.4): Chủ quán phê duyệt yêu cầu xin vào quán (PENDING_APPROVAL -> ACTIVE) & gán vai trò',
   })
   async approvePendingMember(
+    @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Param('memberId') memberId: string,
     @Body() dto: ApprovePendingMemberDto,
@@ -259,12 +288,64 @@ export class WorkspaceOnboardingController {
     const data = await this.onboardingService.approvePendingMemberAndAssignRole(
       shopId,
       memberId,
+      req.user.id,
       dto,
     );
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
-      message: 'Approved member and assigned role successfully',
+      message: 'Approved pending member and provisioned role successfully',
+      data,
+    };
+  }
+
+  @Post('iam/shops/:shopId/members/:memberId/reject')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Luồng 3 (F00.4): Chủ quán từ chối yêu cầu xin vào quán đang ở trạng thái PENDING_APPROVAL',
+  })
+  async rejectPendingMember(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('memberId') memberId: string,
+    @Body() dto: RejectPendingMemberDto,
+  ): Promise<DBaseRes> {
+    const data = await this.onboardingService.rejectPendingMemberRequest(
+      shopId,
+      memberId,
+      req.user.id,
+      dto?.reason,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Rejected pending member join request successfully',
+      data,
+    };
+  }
+
+  @Post('iam/shops/:shopId/regenerate-join-code')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Luồng 3 (F00.4): Làm mới (Regenerate) Mã gia nhập cửa hàng joinCode khi nghi ngờ lộ mã',
+  })
+  async regenerateShopJoinCode(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.onboardingService.regenerateShopJoinCode(shopId, req.user.id);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Regenerated shop join code successfully',
       data,
     };
   }
@@ -272,18 +353,24 @@ export class WorkspaceOnboardingController {
   @Patch('iam/shops/:shopId/members/:memberId/permissions')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE)
+  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Cập nhật vai trò, phạm vi dữ liệu (DataScope), trần giảm giá và tinh chỉnh 92 mã quyền của nhân viên',
+      'Luồng 4 (F00.5): Đổi vai trò / tinh chỉnh 92 mã quyền chi tiết -> Đồng bộ Real-Time qua WebSocket < 50ms',
   })
-  async updateMemberPermissions(
+  async updateMemberRoleAndPermissions(
+    @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Param('memberId') memberId: string,
     @Body() dto: UpdateMemberRoleAndPermissionsDto,
   ): Promise<DBaseRes> {
-    const data = await this.onboardingService.updateMemberRoleAndPermissions(shopId, memberId, dto);
+    const data = await this.onboardingService.updateMemberRoleAndPermissions(
+      shopId,
+      memberId,
+      req.user.id,
+      dto,
+    );
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
@@ -299,9 +386,10 @@ export class WorkspaceOnboardingController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Đình chỉ / Khóa quyền nhân viên nghỉ việc (SUSPENDED / TERMINATED) hoặc khôi phục (ACTIVE)',
+      'Luồng 4 (F00.6): Tạm đình chỉ (SUSPENDED) / Cho nghỉ việc (TERMINATED) / Mở lại (ACTIVE) nhân sự',
   })
   async updateMemberStatus(
+    @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Param('memberId') memberId: string,
     @Body() dto: UpdateMemberStatusDto,
@@ -309,12 +397,39 @@ export class WorkspaceOnboardingController {
     const data = await this.onboardingService.updateMemberStatus(
       shopId,
       memberId,
+      req.user.id,
       dto.membershipStatus,
     );
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Updated member status successfully',
+      data,
+    };
+  }
+
+  @Post('iam/shops/:shopId/transfer-ownership')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Luồng 4 (F00.6): Chuyển nhượng quyền Chủ cửa hàng (SHOP_OWNER) sang một thành viên đang hoạt động khác',
+  })
+  async transferShopOwnership(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Body() dto: TransferShopOwnershipDto,
+  ): Promise<DBaseRes> {
+    const data = await this.onboardingService.transferShopOwnership(
+      shopId,
+      req.user.id,
+      dto.targetMemberId,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Transferred shop ownership successfully',
       data,
     };
   }
