@@ -1,9 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsEmail,
   IsEnum,
+  IsIn,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -12,11 +15,14 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
 import {
   DataScopeEnum,
   MembershipStatusEnum,
   PermissionCodeEnum,
+  RoutingStrategyEnum,
+  ShiftStatusEnum,
   ShopRoleEnum,
 } from 'src/common/enum/permission.enum';
 
@@ -221,4 +227,140 @@ export class TransferShopOwnershipDto {
   @IsString()
   @IsNotEmpty()
   targetMemberId: string;
+}
+
+export class UpdateShiftStatusDto {
+  @ApiProperty({ enum: ShiftStatusEnum, example: ShiftStatusEnum.ONLINE })
+  @IsEnum(ShiftStatusEnum)
+  targetStatus: ShiftStatusEnum;
+
+  @ApiPropertyOptional({
+    enum: ['AUTO_REDISTRIBUTE', 'TRANSFER_TO_AGENT', 'KEEP_ASSIGNED'],
+  })
+  @IsOptional()
+  @IsIn(['AUTO_REDISTRIBUTE', 'TRANSFER_TO_AGENT', 'KEEP_ASSIGNED'])
+  handoverMode?: 'AUTO_REDISTRIBUTE' | 'TRANSFER_TO_AGENT' | 'KEEP_ASSIGNED';
+
+  @ApiPropertyOptional({ example: 'uuid-of-colleague-agent' })
+  @IsOptional()
+  @IsString()
+  targetHandoverAgentId?: string;
+}
+
+export class ForceOfflineShiftDto {
+  @ApiPropertyOptional({
+    enum: ['AUTO_REDISTRIBUTE', 'TRANSFER_TO_AGENT', 'KEEP_ASSIGNED'],
+    default: 'AUTO_REDISTRIBUTE',
+  })
+  @IsOptional()
+  @IsIn(['AUTO_REDISTRIBUTE', 'TRANSFER_TO_AGENT', 'KEEP_ASSIGNED'])
+  handoverMode?: 'AUTO_REDISTRIBUTE' | 'TRANSFER_TO_AGENT' | 'KEEP_ASSIGNED';
+
+  @ApiPropertyOptional({ example: 'uuid-of-colleague-agent' })
+  @IsOptional()
+  @IsString()
+  targetHandoverAgentId?: string;
+}
+
+export class SavedPageGroupPresetItemDto {
+  @ApiProperty({ example: 'preset-fashion-01' })
+  @IsString()
+  @IsNotEmpty()
+  presetId: string;
+
+  @ApiProperty({ example: 'Tổ hợp 5 Fanpage Thời Trang Nữ + TikTok' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  name: string;
+
+  @ApiProperty({ isArray: true, type: String })
+  @IsArray()
+  channelIntegrationIds: string[];
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+}
+
+export class SavePageGroupPresetsDto {
+  @ApiProperty({ type: [SavedPageGroupPresetItemDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SavedPageGroupPresetItemDto)
+  presets: SavedPageGroupPresetItemDto[];
+}
+
+export class UpdateShopWorkspaceSettingsDto {
+  @ApiPropertyOptional({ example: 180 })
+  @IsOptional()
+  @IsNumber()
+  @Min(15)
+  @Max(86400)
+  slaResponseSeconds?: number;
+
+  @ApiPropertyOptional({ example: 180 })
+  @IsOptional()
+  @IsNumber()
+  @Min(15)
+  @Max(86400)
+  ghostedAlertSeconds?: number;
+
+  @ApiPropertyOptional({ example: 5 })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(1440)
+  autoReclaimMinutes?: number;
+
+  @ApiPropertyOptional({ enum: RoutingStrategyEnum })
+  @IsOptional()
+  @IsEnum(RoutingStrategyEnum)
+  routingStrategy?: RoutingStrategyEnum;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  lockOrderAfterPrint?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  requireDepositOnHighRisk?: boolean;
+
+  @ApiPropertyOptional({ example: 0.4 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  leadCollectorWeight?: number;
+
+  @ApiPropertyOptional({ example: 0.6 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  orderCloserWeight?: number;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  deductOnReturnedOrder?: boolean;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  autoReserveStockOnMarketplaceOrder?: boolean;
+
+  @ApiPropertyOptional({ example: 2 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  safetyBufferStockQty?: number;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  pushAvailableStockToShopeeTikTok?: boolean;
 }

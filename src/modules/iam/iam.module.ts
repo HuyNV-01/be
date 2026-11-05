@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
+import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomTagEntity } from 'src/entity/custom-tag.entity';
 import { NotificationEntity } from 'src/entity/notification.entity';
 import { ShopInvitationEntity } from 'src/entity/shop-invitation.entity';
@@ -28,6 +29,7 @@ import { WorkspaceOnboardingController } from './workspace-onboarding.controller
       CustomTagEntity,
       UserEntity,
       NotificationEntity,
+      ConversationEntity,
     ]),
     WebSocketModule,
     NotificationsModule,
