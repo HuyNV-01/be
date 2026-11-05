@@ -40,6 +40,7 @@ import {
 import { parseExpiresIn } from 'src/utils';
 import { generateNumericOtp } from 'src/utils/otp.util';
 
+import { WorkspaceOnboardingService } from '../iam/services/workspace-onboarding.service';
 import { MailService } from '../mail/mail.service';
 import { UserService } from '../user/user.service';
 
@@ -49,6 +50,7 @@ export class AuthService {
     private readonly userService: UserService,
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
+    private readonly workspaceOnboardingService: WorkspaceOnboardingService,
     @InjectRedis() private readonly redis: Redis,
   ) {}
 
@@ -403,15 +405,42 @@ export class AuthService {
       });
     }
 
+    const inviteToken = payload.data.inviteToken?.trim();
+    let verifiedInvitation: Awaited<
+      ReturnType<WorkspaceOnboardingService['verifyInvitationTokenPublic']>
+    > | null = null;
+
+    if (inviteToken) {
+      verifiedInvitation =
+        await this.workspaceOnboardingService.verifyInvitationTokenPublic(inviteToken);
+      if (verifiedInvitation.invitedEmail.toLowerCase() !== email) {
+        throw new BadRequestException({
+          status: HttpStatus.BAD_REQUEST,
+          message: 'Email does not match the invitation recipient email',
+          code: HttpStatus.BAD_REQUEST,
+        });
+      }
+    }
+
     const user = await this.userService.createUser({
       data: {
         email,
         name,
         password,
         provider: 'local',
-        status: StatusEnum.NOT_ACTIVE,
+        status: verifiedInvitation ? StatusEnum.ACTIVE : StatusEnum.NOT_ACTIVE,
+        emailVerifiedAt: verifiedInvitation ? new Date() : null,
       },
     });
+
+    if (verifiedInvitation && inviteToken) {
+      await this.workspaceOnboardingService.acceptRoleInvitation({
+        userId: user.id,
+        userEmail: user.email,
+        invitationIdOrRawToken: inviteToken,
+      });
+      return user;
+    }
 
     const activationToken = this.getJwtToken({
       userId: user.id,

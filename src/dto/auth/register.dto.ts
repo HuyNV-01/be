@@ -1,7 +1,15 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { Transform } from 'class-transformer';
-import { IsEmail, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class RegisterDto {
   @ApiProperty({ example: 'Test User' })
@@ -34,4 +42,11 @@ export class RegisterDto {
       'Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 number, and 1 special character',
   })
   password: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional shop role invitation token when registering via owner invite link',
+  })
+  @IsOptional()
+  @IsString()
+  inviteToken?: string;
 }

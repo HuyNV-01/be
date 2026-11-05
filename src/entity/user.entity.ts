@@ -75,6 +75,15 @@ export class UserEntity extends BaseModel {
   })
   role: ValidRolesEnum;
 
+  @Column({
+    name: 'last_active_shop_id',
+    type: 'varchar',
+    length: 36,
+    default: null,
+    nullable: true,
+  })
+  lastActiveShopId?: string | null;
+
   @Column({ name: 'status', type: 'smallint', default: StatusEnum.NOT_ACTIVE })
   status: StatusEnum;
 
