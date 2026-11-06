@@ -14,7 +14,7 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     timestamp: true,
   });
 
-  private readonly PARTITIONED_TABLES = ['messages', 'call_participants'];
+  private readonly PARTITIONED_TABLES = ['messages', 'call_participants', 'channel_webhook_logs'];
   private readonly MONTHS_AHEAD = 3;
 
   constructor(private readonly dataSource: DataSource) {}

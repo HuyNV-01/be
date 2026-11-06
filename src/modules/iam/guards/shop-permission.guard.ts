@@ -18,10 +18,15 @@ import {
 import { GranularIamService } from '../iam.service';
 
 export const SHOP_PERMISSIONS_KEY = 'shop_permissions_required';
+export const SHOP_ANY_PERMISSIONS_KEY = 'shop_any_permissions_required';
 
 export const RequireShopPermissions = (
   ...permissions: PermissionCodeEnum[]
 ): CustomDecorator<string> => SetMetadata(SHOP_PERMISSIONS_KEY, permissions);
+
+export const RequireAnyShopPermissions = (
+  ...permissions: PermissionCodeEnum[]
+): CustomDecorator<string> => SetMetadata(SHOP_ANY_PERMISSIONS_KEY, permissions);
 
 @Injectable()
 export class ShopPermissionGuard implements CanActivate {
@@ -63,23 +68,40 @@ export class ShopPermissionGuard implements CanActivate {
 
     req.shopMemberContext = memberCtx;
 
-    const requiredPermissions =
+    if (memberCtx.role === ShopRoleEnum.SHOP_OWNER) {
+      return true;
+    }
+
+    const requiredAllPermissions =
       this.reflector.getAllAndOverride<PermissionCodeEnum[]>(SHOP_PERMISSIONS_KEY, [
         context.getHandler(),
         context.getClass(),
       ]) || [];
 
-    if (requiredPermissions.length === 0 || memberCtx.role === ShopRoleEnum.SHOP_OWNER) {
-      return true;
+    const requiredAnyPermissions =
+      this.reflector.getAllAndOverride<PermissionCodeEnum[]>(SHOP_ANY_PERMISSIONS_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) || [];
+
+    if (requiredAllPermissions.length > 0) {
+      const hasAll = requiredAllPermissions.every((perm) => memberCtx.permissions.includes(perm));
+      if (!hasAll) {
+        throw new ForbiddenException({
+          code: 'INSUFFICIENT_SHOP_PERMISSIONS',
+          requiredPermissions: requiredAllPermissions,
+        });
+      }
     }
 
-    const hasAll = requiredPermissions.every((perm) => memberCtx.permissions.includes(perm));
-
-    if (!hasAll) {
-      throw new ForbiddenException({
-        code: 'INSUFFICIENT_SHOP_PERMISSIONS',
-        requiredPermissions,
-      });
+    if (requiredAnyPermissions.length > 0) {
+      const hasAny = requiredAnyPermissions.some((perm) => memberCtx.permissions.includes(perm));
+      if (!hasAny) {
+        throw new ForbiddenException({
+          code: 'INSUFFICIENT_SHOP_PERMISSIONS',
+          requiredPermissions: requiredAnyPermissions,
+        });
+      }
     }
 
     return true;

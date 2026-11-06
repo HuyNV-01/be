@@ -6,11 +6,28 @@ import { BaseModel } from './base-model';
 import { ConversationEntity } from './conversation.entity';
 import { UserEntity } from './user.entity';
 
+export enum MessageDirectionEnum {
+  INBOUND = 'INBOUND',
+  OUTBOUND = 'OUTBOUND',
+  INTERNAL_NOTE = 'INTERNAL_NOTE',
+  SYSTEM = 'SYSTEM',
+}
+
+export interface ExtractedCommerceEntitiesPayload {
+  phones?: string[];
+  provinceCode?: string | null;
+  districtCode?: string | null;
+  wardCode?: string | null;
+  addressLine?: string | null;
+  skuCodes?: string[];
+}
+
 @Entity('messages')
 @Index('idx_msg_id_lookup', ['id'])
 @Index(['conversationId', 'createdAt'])
 @Index(['conversationId', 'isPinned'])
 @Index(['conversationId', 'senderId', 'clientTempId'])
+@Index('idx_msg_shop_conv_created', ['shopId', 'conversationId', 'createdAt'])
 export class MessageEntity extends BaseModel {
   @Column({ type: 'text', nullable: true })
   content: string;
@@ -80,4 +97,50 @@ export class MessageEntity extends BaseModel {
   @Column({ name: 'expires_at', type: 'datetime', nullable: true, default: null })
   @Index()
   expiresAt: Date | null;
+
+  // ============================================================================
+  // OMNICHANNEL SELLER OS EXTENSIONS (Zero-Config DatabaseEvolutionService Safe)
+  // ============================================================================
+
+  @Column({ name: 'shop_id', type: 'varchar', length: 36, nullable: true, default: null })
+  shopId: string | null;
+
+  @Column({
+    name: 'direction',
+    type: 'enum',
+    enum: MessageDirectionEnum,
+    default: MessageDirectionEnum.INBOUND,
+  })
+  direction: MessageDirectionEnum;
+
+  @Column({
+    name: 'external_message_id',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+    default: null,
+  })
+  externalMessageId: string | null;
+
+  @Column({ name: 'is_internal_note', type: 'boolean', default: false })
+  isInternalNote: boolean;
+
+  @Column({ name: 'message_tag_ids_json', type: 'json', nullable: true })
+  messageTagIdsJson: string[] | null;
+
+  @Column({ name: 'extracted_entities_json', type: 'json', nullable: true, default: null })
+  extractedEntitiesJson: ExtractedCommerceEntitiesPayload | null;
+
+  @Column({
+    name: 'ai_draft_confidence',
+    type: 'decimal',
+    precision: 5,
+    scale: 4,
+    nullable: true,
+    default: null,
+  })
+  aiDraftConfidence: number | null;
+
+  @Column({ name: 'order_id_ref', type: 'varchar', length: 36, nullable: true, default: null })
+  orderIdRef: string | null;
 }

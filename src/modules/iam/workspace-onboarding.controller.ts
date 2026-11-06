@@ -13,26 +13,34 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
-import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
+import { PermissionCodeEnum, ShiftStatusEnum } from 'src/common/enum/permission.enum';
 import { ROLE_PRESET_TEMPLATES } from 'src/constants/role-default-permissions.constant';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import {
   ApprovePendingMemberDto,
   CreateRoleInvitationDto,
   CreateShopWorkspaceDto,
+  ForceOfflineShiftDto,
   JoinShopByCodeDto,
   RejectPendingMemberDto,
+  SavePageGroupPresetsDto,
   TransferShopOwnershipDto,
   UpdateMemberRoleAndPermissionsDto,
   UpdateMemberStatusDto,
+  UpdateShiftStatusDto,
+  UpdateShopWorkspaceSettingsDto,
 } from 'src/dto/onboarding/onboarding.dto';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
 
-import { RequireShopPermissions, ShopPermissionGuard } from './guards/shop-permission.guard';
+import {
+  RequireAnyShopPermissions,
+  RequireShopPermissions,
+  ShopPermissionGuard,
+} from './guards/shop-permission.guard';
 import { GranularIamService } from './iam.service';
 import { WorkspaceOnboardingService } from './services/workspace-onboarding.service';
 
-@ApiTags('Sprint 0 — Onboarding, Shop Provisioning & Role Assignment')
+@ApiTags('Sprint 0 & Sprint 1 — IAM 4D, Shift Lifecycle & Workspace Settings')
 @Controller()
 export class WorkspaceOnboardingController {
   constructor(
@@ -202,10 +210,144 @@ export class WorkspaceOnboardingController {
     };
   }
 
+  @Patch('iam/shops/:shopId/shift-status')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.5: Chuyển trạng thái ca trực (ONLINE / BUSY / OFFLINE) & kiểm tra bàn giao hội thoại chờ phản hồi',
+  })
+  async updateMyShiftStatus(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Body() dto: UpdateShiftStatusDto,
+  ): Promise<DBaseRes> {
+    const data = await this.granularIamService.updateShiftStatus({
+      shopId,
+      userId: req.user.id,
+      targetStatus: dto.targetStatus,
+      handoverMode: dto.handoverMode,
+      targetHandoverAgentId: dto.targetHandoverAgentId,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated shift status successfully',
+      data,
+    };
+  }
+
+  @Post('iam/shops/:shopId/members/:userId/force-offline')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.IAM_SHIFT_FORCE_HANDOVER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.6: Quản lý cưỡng chế chuyển nhân sự sang OFFLINE và thu hồi toàn bộ hội thoại chờ phản hồi',
+  })
+  async forceMemberOffline(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('userId') targetUserId: string,
+    @Body() dto: ForceOfflineShiftDto,
+  ): Promise<DBaseRes> {
+    const data = await this.granularIamService.updateShiftStatus({
+      shopId,
+      userId: targetUserId,
+      targetStatus: ShiftStatusEnum.OFFLINE,
+      handoverMode: dto?.handoverMode || 'AUTO_REDISTRIBUTE',
+      targetHandoverAgentId: dto?.targetHandoverAgentId,
+      forcedByManagerId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Forced member shift offline and redistributed pending conversations',
+      data,
+    };
+  }
+
+  @Patch('iam/shops/:shopId/page-group-presets')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_MULTI_PAGE_MERGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'F01.7: Lưu bộ Preset Gộp Trang Đa Kênh cá nhân của nhân viên (SavedPageGroupPreset)',
+  })
+  async saveMyPageGroupPresets(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Body() dto: SavePageGroupPresetsDto,
+  ): Promise<DBaseRes> {
+    const data = await this.granularIamService.saveMemberPageGroupPresets(
+      shopId,
+      req.user.id,
+      dto.presets || [],
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Saved multi-page merge presets successfully',
+      data,
+    };
+  }
+
+  @Get('iam/shops/:shopId/workspace-settings')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.1: Lấy cấu hình vận hành cửa hàng (SLA, Auto-Reclaim, RoutingStrategy, CommissionSplit)',
+  })
+  async getWorkspaceSettings(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.granularIamService.getWorkspaceSettings(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched shop workspace settings successfully',
+      data,
+    };
+  }
+
+  @Patch('iam/shops/:shopId/workspace-settings')
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard, ShopPermissionGuard)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.WORKSPACE_SETTINGS_MANAGE,
+    PermissionCodeEnum.INBOX_ROUTING_RULES_CONFIGURE,
+    PermissionCodeEnum.INBOX_SLA_CONFIG_MANAGE,
+  )
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.1 & F01.4: Cập nhật cấu hình SLA, Thu hồi tự động, Chiến lược chia khách & Đồng bộ sàn',
+  })
+  async updateWorkspaceSettings(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Body() dto: UpdateShopWorkspaceSettingsDto,
+  ): Promise<DBaseRes> {
+    const data = await this.granularIamService.updateWorkspaceSettings(shopId, dto, req.user.id);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated shop workspace settings successfully',
+      data,
+    };
+  }
+
   @Get('iam/shops/:shopId/members')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE,
+    PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE,
+    PermissionCodeEnum.IAM_SHIFT_FORCE_HANDOVER,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -353,11 +495,14 @@ export class WorkspaceOnboardingController {
   @Patch('iam/shops/:shopId/members/:memberId/permissions')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE,
+    PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Luồng 4 (F00.5): Đổi vai trò / tinh chỉnh 92 mã quyền chi tiết -> Đồng bộ Real-Time qua WebSocket < 50ms',
+      'Luồng 4 (F00.5 & F01.3): Đổi vai trò / tinh chỉnh 92 mã quyền chi tiết -> Đồng bộ Real-Time qua WebSocket < 50ms',
   })
   async updateMemberRoleAndPermissions(
     @Request() req: { user: { id: string } },

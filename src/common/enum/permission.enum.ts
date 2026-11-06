@@ -61,6 +61,20 @@ export enum WebhookIntegrationStatusEnum {
   RATE_LIMITED = 'RATE_LIMITED',
 }
 
+export enum ConversationSupportStatusEnum {
+  NEW = 'NEW',
+  WAITING_AGENT_REPLY = 'WAITING_AGENT_REPLY',
+  WAITING_CUSTOMER_REPLY = 'WAITING_CUSTOMER_REPLY',
+  SNOOZED = 'SNOOZED',
+  RESOLVED = 'RESOLVED',
+}
+
+export enum AiHandlingModeEnum {
+  AUTOPILOT = 'AUTOPILOT',
+  COPILOT = 'COPILOT',
+  HUMAN_ONLY = 'HUMAN_ONLY',
+}
+
 export enum PermissionCodeEnum {
   // 1. IAM, Workspace & Channels (12 permissions)
   WORKSPACE_SETTINGS_MANAGE = 'WORKSPACE_SETTINGS_MANAGE',

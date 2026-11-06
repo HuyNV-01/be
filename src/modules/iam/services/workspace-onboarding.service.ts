@@ -19,7 +19,10 @@ import {
 } from 'src/common/enum/permission.enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
-import { ROLE_PRESET_TEMPLATES } from 'src/constants/role-default-permissions.constant';
+import {
+  ROLE_DEFAULT_PERMISSIONS_MAP,
+  ROLE_PRESET_TEMPLATES,
+} from 'src/constants/role-default-permissions.constant';
 import {
   ApprovePendingMemberDto,
   CreateRoleInvitationDto,
@@ -79,10 +82,6 @@ export class WorkspaceOnboardingService {
     private readonly realtimeEmitter: RealtimeEmitterService,
   ) {}
 
-  /**
-   * Tìm toàn bộ UserId của Chủ quán (SHOP_OWNER) và Quản lý (SHOP_MANAGER / người có quyền IAM_MEMBER_INVITE_MANAGE)
-   * đang hoạt động trong cửa hàng để đẩy thông báo NotificationBell & đồng bộ Socket Real-Time.
-   */
   private async getShopManagerUserIds(shopId: string, excludeUserId?: string): Promise<string[]> {
     const activeMembers = await this.memberRepo.find({
       where: {
@@ -96,7 +95,8 @@ export class WorkspaceOnboardingService {
       const isManagerOrOwner =
         m.role === ShopRoleEnum.SHOP_OWNER ||
         m.role === ShopRoleEnum.SHOP_MANAGER ||
-        (m.grantedPermissionsJson || []).includes(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE);
+        (m.grantedPermissionsJson || []).includes(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE) ||
+        (m.grantedPermissionsJson || []).includes(PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE);
 
       if (isManagerOrOwner && m.userId !== excludeUserId) {
         managerIds.add(m.userId);
@@ -106,18 +106,21 @@ export class WorkspaceOnboardingService {
     return Array.from(managerIds);
   }
 
-  /**
-   * Phát sự kiện Socket `iam:shop_members_changed` tới toàn bộ Chủ quán & Quản lý của cửa hàng
-   * để màn hình `/settings/members` tự động cập nhật danh sách mà không cần F5.
-   */
   private async broadcastShopMembersChanged(
     shopId: string,
     action: string,
     actorUserId?: string,
     extra?: Record<string, unknown>,
   ): Promise<void> {
-    const managerIds = await this.getShopManagerUserIds(shopId);
-    const recipients = new Set<string>(managerIds);
+    const activeMembers = await this.memberRepo.find({
+      where: {
+        shopId,
+        membershipStatus: MembershipStatusEnum.ACTIVE,
+      },
+      select: ['userId'],
+    });
+
+    const recipients = new Set<string>(activeMembers.map((m) => m.userId));
     if (actorUserId) {
       recipients.add(actorUserId);
     }
@@ -137,10 +140,6 @@ export class WorkspaceOnboardingService {
     }
   }
 
-  /**
-   * 1. Lấy tổng quan trạng thái Onboarding & danh sách Cửa hàng / Lời mời của User hiện tại:
-   * - Nếu tài khoản mới đăng ký chưa thuộc quán nào -> onboardingState = 'UNBOUND_USER', activeShopContext = null (Quyền trống 100%).
-   */
   async getUserOnboardingOverview(
     userId: string,
     userEmail: string,
@@ -223,9 +222,6 @@ export class WorkspaceOnboardingService {
     };
   }
 
-  /**
-   * 2. Kiểm tra thông tin Lời mời công khai qua inviteToken (Dành cho màn hình /register?inviteToken=...)
-   */
   async verifyInvitationTokenPublic(rawInviteToken: string): Promise<{
     invitationId: string;
     shopId: string;
@@ -257,9 +253,6 @@ export class WorkspaceOnboardingService {
     };
   }
 
-  /**
-   * 3. LUỒNG 1 (F00.1): Tạo Cửa Hàng Mới -> Tự động cấp quyền Chủ Quán (SHOP_OWNER) + Seed Kho & Bộ Tag chuẩn Pancake
-   */
   async createShopAndProvisionOwner(
     userId: string,
     dto: CreateShopWorkspaceDto,
@@ -436,11 +429,6 @@ export class WorkspaceOnboardingService {
     return { shop, ownerMember, effectiveContext };
   }
 
-  /**
-   * 4. LUỒNG 2 (F00.2 & F00.3): Chủ quán / Quản lý gửi Lời mời Nhân viên (Sale, Kế toán, Kho, Marketing...)
-   * - Tự động tạo thông báo trong NotificationBell & bắn Socket `iam:invitation_received` cho người được mời (nếu đã có tài khoản).
-   * - Tự động bắn Socket `iam:shop_members_changed` cho toàn bộ Quản lý / Chủ quán để đồng bộ danh sách lời mời tức thì.
-   */
   async createRoleInvitation(
     shopId: string,
     invitedByUserId: string,
@@ -460,7 +448,6 @@ export class WorkspaceOnboardingService {
     const rawInviteToken = crypto.randomBytes(24).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(rawInviteToken).digest('hex');
 
-    // Nếu đã có lời mời PENDING trước đó cho cùng email tại cửa hàng này thì cập nhật lại lời mời đó
     let invitation = await this.invitationRepo.findOne({
       where: {
         shopId,
@@ -554,9 +541,6 @@ export class WorkspaceOnboardingService {
     };
   }
 
-  /**
-   * 5. Thu hồi Lời mời đang ở trạng thái PENDING (F00.2)
-   */
   async revokeRoleInvitation(
     shopId: string,
     invitationId: string,
@@ -600,10 +584,6 @@ export class WorkspaceOnboardingService {
     return { id: invitation.id, status: invitation.status };
   }
 
-  /**
-   * 6. Chấp nhận Lời mời (Dành cho cả Tài khoản đã có sẵn bấm "Chấp nhận" hoặc Tài khoản mới vừa đăng ký qua inviteToken)
-   * - Tự động tạo NotificationBell cho Chủ quán & Người mời + phát Socket `iam:invitation_accepted` và `iam:shop_members_changed`.
-   */
   async acceptRoleInvitation(params: {
     userId: string;
     userEmail: string;
@@ -742,11 +722,6 @@ export class WorkspaceOnboardingService {
     return { member: savedMember, effectiveContext };
   }
 
-  /**
-   * 7. LUỒNG 3 (F00.4): Nhân viên tự nhập Mã Cửa Hàng (joinCode) để xin vào quán
-   * -> Tạo bản ghi ở trạng thái PENDING_APPROVAL (Quyền hoàn toàn trống [] cho tới khi Chủ quán duyệt!).
-   * -> Đẩy thông báo NotificationBell & phát sự kiện Socket `iam:join_request_received` + `iam:shop_members_changed` tới toàn bộ Chủ quán & Quản lý!
-   */
   async requestJoinShopByCode(userId: string, dto: JoinShopByCodeDto): Promise<ShopMemberEntity> {
     const shop = await this.shopRepo.findOne({
       where: { joinCode: dto.joinCode.trim().toUpperCase() },
@@ -841,10 +816,6 @@ export class WorkspaceOnboardingService {
     return savedPending;
   }
 
-  /**
-   * 8. Chủ quán / Quản lý Phê duyệt yêu cầu xin vào quán & Gán Vai trò chính thức (Sale / Kế toán / Kho...)
-   * -> Kích hoạt quyền Real-Time cho nhân viên + bắn NotificationBell & `iam:join_request_approved` để mở khóa màn hình `/onboarding` ngay lập tức!
-   */
   async approvePendingMemberAndAssignRole(
     shopId: string,
     memberId: string,
@@ -933,9 +904,6 @@ export class WorkspaceOnboardingService {
     return effectiveContext;
   }
 
-  /**
-   * 9. Chủ quán / Quản lý Từ chối yêu cầu xin vào quán (F00.4)
-   */
   async rejectPendingMemberRequest(
     shopId: string,
     memberId: string,
@@ -1001,9 +969,6 @@ export class WorkspaceOnboardingService {
     return { id: memberId, rejected: true };
   }
 
-  /**
-   * 10. Làm mới (Regenerate) Mã gia nhập cửa hàng `joinCode` khi nghi ngờ lộ mã (F00.4)
-   */
   async regenerateShopJoinCode(
     shopId: string,
     actorUserId: string,
@@ -1024,10 +989,6 @@ export class WorkspaceOnboardingService {
     return { shopId, joinCode: nextJoinCode };
   }
 
-  /**
-   * 11. LUỒNG 4 (F00.5): Đổi vai trò / Tinh chỉnh 92 mã quyền / Hạn mức chiết khấu & giải mã SĐT
-   * -> Xóa cache Redis, bắn `iam:permissions_updated` + NotificationBell tới nhân viên mục tiêu + đồng bộ `iam:shop_members_changed`.
-   */
   async updateMemberRoleAndPermissions(
     shopId: string,
     memberId: string,
@@ -1045,18 +1006,39 @@ export class WorkspaceOnboardingService {
       throw new ForbiddenException('CANNOT_MODIFY_SHOP_OWNER_ROLE');
     }
 
-    const preset = ROLE_PRESET_TEMPLATES[dto.role];
+    const baseRolePerms = ROLE_DEFAULT_PERMISSIONS_MAP[dto.role] || [];
 
     member.role = dto.role;
     member.dataScope = dto.dataScope;
     member.maxDiscountPercent = dto.maxDiscountPercent;
     member.unmaskPhoneHourlyLimit = dto.unmaskPhoneHourlyLimit;
-    member.grantedPermissionsJson = dto.grantedPermissionsJson ?? preset.defaultPermissions;
-    member.revokedPermissionsJson = dto.revokedPermissionsJson ?? [];
-    if (dto.allowedChannelIdsJson) {
+    if (dto.maxConcurrentChats !== undefined) {
+      member.maxConcurrentChats = dto.maxConcurrentChats;
+    }
+
+    if (Array.isArray(dto.grantedPermissionsJson)) {
+      const desiredSet = new Set<PermissionCodeEnum>(dto.grantedPermissionsJson);
+      const explicitRevoked = new Set<PermissionCodeEnum>(dto.revokedPermissionsJson || []);
+
+      for (const basePerm of baseRolePerms) {
+        if (!desiredSet.has(basePerm)) {
+          explicitRevoked.add(basePerm);
+        } else {
+          explicitRevoked.delete(basePerm);
+        }
+      }
+
+      member.grantedPermissionsJson = Array.from(desiredSet).filter((p) => !explicitRevoked.has(p));
+      member.revokedPermissionsJson = Array.from(explicitRevoked);
+    } else {
+      member.grantedPermissionsJson = baseRolePerms;
+      member.revokedPermissionsJson = dto.revokedPermissionsJson ?? [];
+    }
+
+    if (dto.allowedChannelIdsJson !== undefined) {
       member.allowedChannelIdsJson = dto.allowedChannelIdsJson;
     }
-    if (dto.allowedWarehouseIdsJson) {
+    if (dto.allowedWarehouseIdsJson !== undefined) {
       member.allowedWarehouseIdsJson = dto.allowedWarehouseIdsJson;
     }
 
@@ -1075,7 +1057,7 @@ export class WorkspaceOnboardingService {
         actorId: actorUserId,
         type: NotificationTypeEnum.SHOP_ROLE_UPDATED,
         title: `Cập nhật phân quyền tại ${shop.name}`,
-        content: `Vai trò và quyền hạn của bạn tại ${shop.name} đã được cập nhật thành ${dto.role}.`,
+        content: `Vai trò và ${effectiveContext.permissions.length} quyền hạn của bạn tại ${shop.name} đã được cập nhật.`,
         resourceType: NotificationResourceTypeEnum.SHOP_WORKSPACE,
         resourceId: shop.id,
         dedupeKey: `shop_role_upd:${shop.id}:${member.userId}`,
@@ -1086,6 +1068,8 @@ export class WorkspaceOnboardingService {
           i18nParams: {
             shopName: shop.name,
             roleKey: dto.role,
+            permissionCount: effectiveContext.permissions.length,
+            maxDiscountPercent: dto.maxDiscountPercent,
           },
         },
       });
@@ -1094,14 +1078,13 @@ export class WorkspaceOnboardingService {
     await this.broadcastShopMembersChanged(shopId, 'MEMBER_PERMISSIONS_UPDATED', actorUserId, {
       memberId: member.id,
       userId: member.userId,
+      role: member.role,
+      permissionCount: effectiveContext.permissions.length,
     });
 
     return effectiveContext;
   }
 
-  /**
-   * 12. LUỒNG 4 (F00.6): Tạm đình chỉ (SUSPENDED) / Cho nghỉ việc (TERMINATED) / Khôi phục (ACTIVE) nhân sự
-   */
   async updateMemberStatus(
     shopId: string,
     memberId: string,
@@ -1175,10 +1158,6 @@ export class WorkspaceOnboardingService {
     return effectiveContext;
   }
 
-  /**
-   * 13. LUỒNG 4 (F00.6): Chuyển nhượng quyền Chủ cửa hàng (SHOP_OWNER) sang thành viên đang hoạt động khác
-   * -> Đảm bảo bất biến có đúng 1 SHOP_OWNER duy nhất tại mọi thời điểm. Chủ cũ chuyển thành SHOP_MANAGER.
-   */
   async transferShopOwnership(
     shopId: string,
     currentOwnerUserId: string,
@@ -1273,9 +1252,6 @@ export class WorkspaceOnboardingService {
     return { newOwnerContext, previousOwnerContext };
   }
 
-  /**
-   * 14. LUỒNG 4 (F00.7): Chuyển đổi cửa hàng đang làm việc (Multi-Shop Context Switcher)
-   */
   async switchActiveShop(userId: string, shopId: string): Promise<EffectiveMemberContext> {
     const context = await this.granularIamService.getEffectiveMemberContext(shopId, userId);
     if (context.membershipStatus !== MembershipStatusEnum.ACTIVE) {

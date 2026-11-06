@@ -1,9 +1,11 @@
+// File: src/app.module.ts
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { JwtModule } from '@nestjs/jwt';
+import { ScheduleModule } from '@nestjs/schedule';
 
 import { RedisModule } from '@nestjs-modules/ioredis';
 
@@ -14,6 +16,7 @@ import { envs } from './config/envs';
 import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
 import { AuthModule } from './modules/auth/auth.module';
+import { ChannelsModule } from './modules/channels/channels.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
 import { FilesModule } from './modules/files/files.module';
@@ -32,6 +35,7 @@ import { parseExpiresIn } from './utils';
       isGlobal: true,
       load: [googleOauthConfig],
     }),
+    ScheduleModule.forRoot(),
     RedisModule.forRoot(redisOption),
     BullModule.forRoot({
       redis: {
@@ -55,6 +59,7 @@ import { parseExpiresIn } from './utils';
     FilesModule,
     MediaModule,
     IamModule,
+    ChannelsModule,
     AuthModule,
     UserModule,
     MailModule,
