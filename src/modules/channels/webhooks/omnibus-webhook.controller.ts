@@ -97,6 +97,14 @@ export class OmnibusWebhookController {
         },
       );
 
+      await this.channelsService.notifyWebhookLogUpdated(result.shopId, {
+        id: savedLog.id,
+        channelType,
+        eventType: savedLog.eventType,
+        processingStatus: 'PROCESSED',
+        replayedCount: 0,
+      });
+
       return {
         received: true,
         idempotencyKey,
@@ -146,17 +154,28 @@ export class OmnibusWebhookController {
       payload: log.rawPayloadJson,
     });
 
+    const nextReplayCount = (log.replayedCount || 0) + 1;
+    const resolvedShopId = result.shopId || log.shopId;
+
     await this.webhookLogRepo.update(
       { id: log.id, createdAt: log.createdAt },
       {
-        shopId: result.shopId || log.shopId,
+        shopId: resolvedShopId,
         channelIntegrationId: result.channelIntegrationId || log.channelIntegrationId,
         processingStatus: 'REPLAYED_SUCCESS',
-        replayedCount: (log.replayedCount || 0) + 1,
+        replayedCount: nextReplayCount,
         processingDurationMs: Date.now() - startTime,
         errorStack: null,
       },
     );
+
+    await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
+      id: log.id,
+      channelType: log.channelType,
+      eventType: log.eventType,
+      processingStatus: 'REPLAYED_SUCCESS',
+      replayedCount: nextReplayCount,
+    });
 
     return {
       status: HttpStatus.OK,
@@ -165,7 +184,7 @@ export class OmnibusWebhookController {
       data: {
         logId: log.id,
         status: 'REPLAYED_SUCCESS',
-        replayedCount: (log.replayedCount || 0) + 1,
+        replayedCount: nextReplayCount,
       },
     };
   }

@@ -72,10 +72,11 @@ export class ChannelsController {
       'F01.2: Kết nối mới hoặc làm mới OAuth2 Token cho Fanpage, Instagram, Zalo OA, TikTok Shop, Shopee, Lazada',
   })
   async connectChannelOAuth(
+    @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Body() dto: ConnectChannelOAuthDto,
   ): Promise<DBaseRes> {
-    const data = await this.channelsService.connectOrUpdateChannelOAuth(shopId, dto);
+    const data = await this.channelsService.connectOrUpdateChannelOAuth(shopId, dto, req.user?.id);
     return {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
@@ -130,8 +131,11 @@ export class ChannelsController {
     summary:
       'Công cụ T02 (ChannelTokenDoctor): Chẩn đoán sức khỏe Token & tự động gia hạn OAuth2 cho toàn bộ kênh của shop',
   })
-  async runTokenDoctorHealthCheck(@Param('shopId') shopId: string): Promise<DBaseRes> {
-    const data = await this.tokenDoctorService.runShopChannelsHealthCheck(shopId);
+  async runTokenDoctorHealthCheck(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.tokenDoctorService.runShopChannelsHealthCheck(shopId, req.user?.id);
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,

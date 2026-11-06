@@ -5,6 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import type { Queue } from 'bull';
 import Redis from 'ioredis';
+import { NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
 import {
   AiHandlingModeEnum,
   ConversationSupportStatusEnum,
@@ -14,9 +15,11 @@ import {
 } from 'src/common/enum/permission.enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
+import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
+import { NotificationsService } from 'src/modules/notifications/notifications.service';
 import { Repository } from 'typeorm';
 
 @Injectable()
@@ -30,25 +33,29 @@ export class ConversationRoutingEngine {
     private readonly shopMemberRepo: Repository<ShopMemberEntity>,
     @InjectRepository(ShopWorkspaceEntity)
     private readonly shopWorkspaceRepo: Repository<ShopWorkspaceEntity>,
+    @InjectRepository(ChannelIntegrationEntity)
+    private readonly channelRepo: Repository<ChannelIntegrationEntity>,
     @InjectRedis() private readonly redis: Redis,
     @InjectQueue('conversation_sla_queue')
     private readonly slaQueue: Queue,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
-  /**
-   * F01.4: Định tuyến hội thoại khi có tin nhắn khách hàng mới đổ vào từ bất kỳ kênh nào (FB, Zalo, TikTok, Shopee...)
-   * Hỗ trợ 4 chế độ: STICKY_AGENT, LEAST_BUSY, ROUND_ROBIN, AI_FIRST.
-   */
   async routeInboundConversation(params: {
     shopId: string;
     conversation: ConversationEntity;
     channelIntegrationId: string;
     excludeUserIds?: string[];
   }): Promise<string | null> {
-    const workspace = await this.shopWorkspaceRepo.findOne({
-      where: { id: params.shopId },
-    });
+    const [workspace, channel] = await Promise.all([
+      this.shopWorkspaceRepo.findOne({
+        where: { id: params.shopId },
+      }),
+      params.channelIntegrationId
+        ? this.channelRepo.findOne({ where: { id: params.channelIntegrationId } })
+        : Promise.resolve(null),
+    ]);
     if (!workspace) return null;
 
     if (
@@ -145,17 +152,50 @@ export class ConversationRoutingEngine {
 
       await this.redis.zincrby(`routing:active_load:${params.shopId}`, 1, selectedUserId);
 
+      const pageShortCode = channel?.pageShortCode || params.conversation.channelType;
+      const customerName = params.conversation.name || 'Khách hàng mới';
+      const previewText = params.conversation.lastMessage || 'Khách hàng đang chờ phản hồi';
+
       this.realtimeEmitter.emitToUser(
         SOCKET_CONFIG.namespaces.CHAT,
         selectedUserId,
         SOCKET_CONFIG.events.OMNICHANNEL_INBOX.CONVERSATION_ASSIGNED,
         {
           conversationId: params.conversation.id,
+          conversationName: customerName,
+          lastMessage: previewText,
           shopId: params.shopId,
           channelIntegrationId: params.channelIntegrationId,
+          channelType: channel?.channelType || params.conversation.channelType,
+          pageShortCode,
           slaDeadlineAt: slaDeadlineAt.toISOString(),
+          slaResponseSeconds: workspace.slaResponseSeconds,
         },
       );
+
+      await this.notificationsService.createAndDispatch({
+        recipientIds: [selectedUserId],
+        actorId: null,
+        type: NotificationTypeEnum.INBOX_CONVERSATION_ASSIGNED,
+        title: `Khách hàng mới từ ${pageShortCode}: ${customerName}`,
+        content: `${previewText} (Hạn phản hồi SLA: ${workspace.slaResponseSeconds} giây).`,
+        resourceType: NotificationResourceTypeEnum.CONVERSATION,
+        resourceId: params.conversation.id,
+        dedupeKey: `conv_assign:${params.conversation.id}:${selectedUserId}`,
+        metadata: {
+          conversationId: params.conversation.id,
+          conversationName: customerName,
+          actionUrl: `/chat/${params.conversation.id}`,
+          titleKey: 'i18n.inboxConversationAssigned.title',
+          contentKey: 'i18n.inboxConversationAssigned.content',
+          i18nParams: {
+            customerName,
+            pageShortCode,
+            preview: previewText,
+            slaSeconds: workspace.slaResponseSeconds,
+          },
+        },
+      });
 
       await this.scheduleAutoReclaimWatchdog(
         workspace,

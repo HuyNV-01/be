@@ -32,7 +32,11 @@ import {
 } from 'src/dto/onboarding/onboarding.dto';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
 
-import { RequireShopPermissions, ShopPermissionGuard } from './guards/shop-permission.guard';
+import {
+  RequireAnyShopPermissions,
+  RequireShopPermissions,
+  ShopPermissionGuard,
+} from './guards/shop-permission.guard';
 import { GranularIamService } from './iam.service';
 import { WorkspaceOnboardingService } from './services/workspace-onboarding.service';
 
@@ -312,17 +316,22 @@ export class WorkspaceOnboardingController {
   @Patch('iam/shops/:shopId/workspace-settings')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.WORKSPACE_SETTINGS_MANAGE)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.WORKSPACE_SETTINGS_MANAGE,
+    PermissionCodeEnum.INBOX_ROUTING_RULES_CONFIGURE,
+    PermissionCodeEnum.INBOX_SLA_CONFIG_MANAGE,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
       'F01.1 & F01.4: Cập nhật cấu hình SLA, Thu hồi tự động, Chiến lược chia khách & Đồng bộ sàn',
   })
   async updateWorkspaceSettings(
+    @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Body() dto: UpdateShopWorkspaceSettingsDto,
   ): Promise<DBaseRes> {
-    const data = await this.granularIamService.updateWorkspaceSettings(shopId, dto);
+    const data = await this.granularIamService.updateWorkspaceSettings(shopId, dto, req.user.id);
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
@@ -334,7 +343,11 @@ export class WorkspaceOnboardingController {
   @Get('iam/shops/:shopId/members')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE,
+    PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE,
+    PermissionCodeEnum.IAM_SHIFT_FORCE_HANDOVER,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -482,11 +495,14 @@ export class WorkspaceOnboardingController {
   @Patch('iam/shops/:shopId/members/:memberId/permissions')
   @ApiBearerAuth('access-token')
   @UseGuards(JwtAuthGuard, ShopPermissionGuard)
-  @RequireShopPermissions(PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE)
+  @RequireAnyShopPermissions(
+    PermissionCodeEnum.IAM_ROLE_MATRIX_CONFIGURE,
+    PermissionCodeEnum.IAM_MEMBER_INVITE_MANAGE,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Luồng 4 (F00.5): Đổi vai trò / tinh chỉnh 92 mã quyền chi tiết -> Đồng bộ Real-Time qua WebSocket < 50ms',
+      'Luồng 4 (F00.5 & F01.3): Đổi vai trò / tinh chỉnh 92 mã quyền chi tiết -> Đồng bộ Real-Time qua WebSocket < 50ms',
   })
   async updateMemberRoleAndPermissions(
     @Request() req: { user: { id: string } },

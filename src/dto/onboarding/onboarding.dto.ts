@@ -189,6 +189,13 @@ export class UpdateMemberRoleAndPermissionsDto {
   @Min(0)
   unmaskPhoneHourlyLimit: number;
 
+  @ApiPropertyOptional({ example: 25 })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(500)
+  maxConcurrentChats?: number;
+
   @ApiPropertyOptional({ isArray: true, enum: PermissionCodeEnum })
   @IsOptional()
   @IsArray()

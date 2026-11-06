@@ -70,7 +70,9 @@ export const SOCKET_CONFIG = {
     IAM: {
       PERMISSIONS_UPDATED: 'iam:permissions_updated',
       SHIFT_STATUS_CHANGED: 'iam:shift_status_changed',
+      SHIFT_HANDOVER_COMPLETED: 'iam:shift_handover_completed',
       FORCE_SHIFT_HANDOVER: 'iam:force_shift_handover',
+      WORKSPACE_SETTINGS_UPDATED: 'iam:workspace_settings_updated',
       INVITATION_RECEIVED: 'iam:invitation_received',
       INVITATION_ACCEPTED: 'iam:invitation_accepted',
       INVITATION_REVOKED: 'iam:invitation_revoked',
@@ -79,6 +81,13 @@ export const SOCKET_CONFIG = {
       JOIN_REQUEST_REJECTED: 'iam:join_request_rejected',
       MEMBER_STATUS_CHANGED: 'iam:member_status_changed',
       SHOP_MEMBERS_CHANGED: 'iam:shop_members_changed',
+    },
+    CHANNELS: {
+      INTEGRATION_UPDATED: 'channels:integration_updated',
+      INTEGRATION_REMOVED: 'channels:integration_removed',
+      TOKEN_HEALTH_CHECKED: 'channels:token_health_checked',
+      WEBHOOK_LOG_UPDATED: 'channels:webhook_log_updated',
+      MARKETPLACE_ORDER_SYNCED: 'channels:marketplace_order_synced',
     },
     OMNICHANNEL_INBOX: {
       AGENT_COLLISION_LOCK: 'inbox:agent_collision_lock',

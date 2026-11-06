@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
+import { NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
 import {
   ConversationSupportStatusEnum,
   DataScopeEnum,
@@ -18,6 +19,8 @@ import { UpdateShopWorkspaceSettingsDto } from 'src/dto/onboarding/onboarding.dt
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { SavedPageGroupPreset, ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
+import { UserEntity } from 'src/entity/user.entity';
+import { NotificationsService } from 'src/modules/notifications/notifications.service';
 import { In, Repository } from 'typeorm';
 
 export interface EffectiveMemberContext {
@@ -29,6 +32,7 @@ export interface EffectiveMemberContext {
   dataScope: DataScopeEnum;
   shiftStatus: ShiftStatusEnum;
   teamCode: string | null;
+  maxConcurrentChats: number;
   maxDiscountPercent: number;
   unmaskPhoneHourlyLimit: number;
   permissions: PermissionCodeEnum[];
@@ -50,12 +54,26 @@ export class GranularIamService {
     private readonly shopWorkspaceRepo: Repository<ShopWorkspaceEntity>,
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
+    @InjectRepository(UserEntity)
+    private readonly userRepo: Repository<UserEntity>,
     @InjectRedis() private readonly redis: Redis,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private buildCacheKey(shopId: string, userId: string): string {
     return `${this.IAM_CACHE_PREFIX}${shopId}:${userId}`;
+  }
+
+  private async getActiveShopMemberUserIds(shopId: string): Promise<string[]> {
+    const members = await this.shopMemberRepo.find({
+      where: {
+        shopId,
+        membershipStatus: MembershipStatusEnum.ACTIVE,
+      },
+      select: ['userId'],
+    });
+    return Array.from(new Set(members.map((m) => m.userId)));
   }
 
   async getEffectiveMemberContext(shopId: string, userId: string): Promise<EffectiveMemberContext> {
@@ -86,6 +104,7 @@ export class GranularIamService {
         dataScope: DataScopeEnum.ASSIGNED_ONLY,
         shiftStatus: ShiftStatusEnum.OFFLINE,
         teamCode: member.teamCode,
+        maxConcurrentChats: 0,
         maxDiscountPercent: 0,
         unmaskPhoneHourlyLimit: 0,
         permissions: [],
@@ -123,6 +142,7 @@ export class GranularIamService {
         member.role === ShopRoleEnum.SHOP_OWNER ? DataScopeEnum.ALL_SHOP : member.dataScope,
       shiftStatus: member.shiftStatus,
       teamCode: member.teamCode,
+      maxConcurrentChats: Number(member.maxConcurrentChats || 25),
       maxDiscountPercent: Number(member.maxDiscountPercent),
       unmaskPhoneHourlyLimit: member.unmaskPhoneHourlyLimit,
       permissions: Array.from(grantedSet),
@@ -153,10 +173,6 @@ export class GranularIamService {
     return updatedContext;
   }
 
-  /**
-   * F01.5 & F01.6: Quản lý chuyển trạng thái ca trực (ONLINE / BUSY / OFFLINE) & Cưỡng chế thu hồi ca.
-   * Nếu chuyển sang OFFLINE khi còn hội thoại WAITING_AGENT_REPLY mà chưa chọn phương thức bàn giao -> ném 403 SHIFT_HANDOVER_REQUIRED.
-   */
   async updateShiftStatus(params: {
     shopId: string;
     userId: string;
@@ -168,14 +184,22 @@ export class GranularIamService {
     shiftStatus: ShiftStatusEnum;
     reassignedConversationCount: number;
   }> {
-    const member = await this.shopMemberRepo.findOne({
-      where: { shopId: params.shopId, userId: params.userId },
-    });
+    const [member, shop, actorUser] = await Promise.all([
+      this.shopMemberRepo.findOne({
+        where: { shopId: params.shopId, userId: params.userId },
+      }),
+      this.shopWorkspaceRepo.findOne({ where: { id: params.shopId } }),
+      this.userRepo.findOne({
+        where: { id: params.forcedByManagerId || params.userId },
+      }),
+    ]);
+
     if (!member) {
       throw new NotFoundException('SHOP_MEMBER_NOT_FOUND');
     }
 
     let reassignedCount = 0;
+    const recipientAssignments = new Map<string, string[]>();
 
     if (params.targetStatus === ShiftStatusEnum.OFFLINE) {
       const pendingConversations = await this.conversationRepo.find({
@@ -184,7 +208,7 @@ export class GranularIamService {
           assignedAgentId: params.userId,
           supportStatus: ConversationSupportStatusEnum.WAITING_AGENT_REPLY,
         },
-        select: ['id'],
+        select: ['id', 'channelIntegrationId', 'name'],
       });
 
       if (pendingConversations.length > 0 && !params.handoverMode && !params.forcedByManagerId) {
@@ -203,6 +227,12 @@ export class GranularIamService {
             { id: In(convIds) },
             { assignedAgentId: params.targetHandoverAgentId },
           );
+          await this.redis.zincrby(
+            `routing:active_load:${params.shopId}`,
+            convIds.length,
+            params.targetHandoverAgentId,
+          );
+          recipientAssignments.set(params.targetHandoverAgentId, convIds);
           reassignedCount = convIds.length;
         } else {
           const onlineColleagues = await this.shopMemberRepo.find({
@@ -221,6 +251,14 @@ export class GranularIamService {
                 { id: convIds[i] },
                 { assignedAgentId: targetColleague.userId },
               );
+              await this.redis.zincrby(
+                `routing:active_load:${params.shopId}`,
+                1,
+                targetColleague.userId,
+              );
+              const existingList = recipientAssignments.get(targetColleague.userId) || [];
+              existingList.push(convIds[i]);
+              recipientAssignments.set(targetColleague.userId, existingList);
             }
           } else {
             await this.conversationRepo.update({ id: In(convIds) }, { assignedAgentId: null });
@@ -249,17 +287,73 @@ export class GranularIamService {
 
     await this.invalidateAndBroadcastMemberPermissions(params.shopId, params.userId);
 
-    this.realtimeEmitter.emitToUser(
-      SOCKET_CONFIG.namespaces.CHAT,
-      params.userId,
-      SOCKET_CONFIG.events.IAM.SHIFT_STATUS_CHANGED,
-      {
-        shopId: params.shopId,
-        userId: params.userId,
-        shiftStatus: member.shiftStatus,
-        reassignedConversationCount: reassignedCount,
-      },
-    );
+    const activeUserIds = await this.getActiveShopMemberUserIds(params.shopId);
+    for (const uid of activeUserIds) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.IAM.SHIFT_STATUS_CHANGED,
+        {
+          shopId: params.shopId,
+          userId: params.userId,
+          shiftStatus: member.shiftStatus,
+          reassignedConversationCount: reassignedCount,
+          forcedByManagerId: params.forcedByManagerId || null,
+        },
+      );
+
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.IAM.SHOP_MEMBERS_CHANGED,
+        {
+          shopId: params.shopId,
+          action: 'SHIFT_STATUS_CHANGED',
+          userId: params.userId,
+          shiftStatus: member.shiftStatus,
+        },
+      );
+    }
+
+    const shopName = shop?.name || 'Cửa hàng';
+    const actorName = actorUser?.name || actorUser?.email || 'Đồng nghiệp';
+
+    for (const [colleagueUserId, assignedConvIds] of recipientAssignments.entries()) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        colleagueUserId,
+        SOCKET_CONFIG.events.IAM.SHIFT_HANDOVER_COMPLETED,
+        {
+          shopId: params.shopId,
+          fromUserId: params.userId,
+          toUserId: colleagueUserId,
+          conversationIds: assignedConvIds,
+          count: assignedConvIds.length,
+        },
+      );
+
+      await this.notificationsService.createAndDispatch({
+        recipientIds: [colleagueUserId],
+        actorId: params.forcedByManagerId || params.userId,
+        type: NotificationTypeEnum.SHOP_SHIFT_HANDOVER,
+        title: `Nhận bàn giao ${assignedConvIds.length} cuộc hội thoại`,
+        content: `${actorName} đã bàn giao ${assignedConvIds.length} cuộc hội thoại chờ phản hồi tại ${shopName} cho bạn.`,
+        resourceType: NotificationResourceTypeEnum.CONVERSATION,
+        resourceId: assignedConvIds[0] || params.shopId,
+        dedupeKey: `shift_handover:${params.shopId}:${colleagueUserId}:${Date.now()}`,
+        metadata: {
+          conversationId: assignedConvIds[0],
+          actionUrl: '/chat',
+          titleKey: 'i18n.shopShiftHandover.title',
+          contentKey: 'i18n.shopShiftHandover.content',
+          i18nParams: {
+            actorName,
+            shopName,
+            count: assignedConvIds.length,
+          },
+        },
+      });
+    }
 
     if (params.forcedByManagerId) {
       this.realtimeEmitter.emitToUser(
@@ -269,9 +363,33 @@ export class GranularIamService {
         {
           shopId: params.shopId,
           forcedByManagerId: params.forcedByManagerId,
+          forcedByManagerName: actorName,
           reassignedConversationCount: reassignedCount,
         },
       );
+
+      if (params.userId !== params.forcedByManagerId) {
+        await this.notificationsService.createAndDispatch({
+          recipientIds: [params.userId],
+          actorId: params.forcedByManagerId,
+          type: NotificationTypeEnum.SHOP_FORCE_OFFLINE,
+          title: `Ca trực tại ${shopName} đã được chuyển sang Nghỉ ca`,
+          content: `${actorName} đã chuyển trạng thái ca trực của bạn sang Nghỉ ca và điều phối lại ${reassignedCount} hội thoại đang chờ.`,
+          resourceType: NotificationResourceTypeEnum.SHOP_WORKSPACE,
+          resourceId: params.shopId,
+          dedupeKey: `force_offline:${params.shopId}:${params.userId}:${Date.now()}`,
+          metadata: {
+            actionUrl: '/settings/permissions',
+            titleKey: 'i18n.shopForceOffline.title',
+            contentKey: 'i18n.shopForceOffline.content',
+            i18nParams: {
+              actorName,
+              shopName,
+              count: reassignedCount,
+            },
+          },
+        });
+      }
     }
 
     return {
@@ -280,9 +398,6 @@ export class GranularIamService {
     };
   }
 
-  /**
-   * F01.7: Lưu danh sách Preset Gộp Trang Đa Kênh cá nhân của nhân viên (SavedPageGroupPreset[])
-   */
   async saveMemberPageGroupPresets(
     shopId: string,
     userId: string,
@@ -301,20 +416,28 @@ export class GranularIamService {
     return this.invalidateAndBroadcastMemberPermissions(shopId, userId);
   }
 
-  /**
-   * F01.1: Lấy và cập nhật cấu hình vận hành cửa hàng (SLA, Auto-Reclaim, RoutingStrategy, CommissionSplit, MarketplaceSync)
-   */
   async getWorkspaceSettings(shopId: string): Promise<ShopWorkspaceEntity> {
+    const cacheKey = `shop:cfg:${shopId}`;
+    const cached = await this.redis.get(cacheKey);
+    if (cached) {
+      try {
+        return JSON.parse(cached) as ShopWorkspaceEntity;
+      } catch {}
+    }
+
     const shop = await this.shopWorkspaceRepo.findOne({ where: { id: shopId } });
     if (!shop) {
       throw new NotFoundException('SHOP_WORKSPACE_NOT_FOUND');
     }
+
+    await this.redis.set(cacheKey, JSON.stringify(shop), 'EX', 3600);
     return shop;
   }
 
   async updateWorkspaceSettings(
     shopId: string,
     dto: UpdateShopWorkspaceSettingsDto,
+    actorUserId?: string,
   ): Promise<ShopWorkspaceEntity> {
     const shop = await this.shopWorkspaceRepo.findOne({ where: { id: shopId } });
     if (!shop) {
@@ -378,6 +501,55 @@ export class GranularIamService {
 
     const saved = await this.shopWorkspaceRepo.save(shop);
     await this.redis.set(`shop:cfg:${shopId}`, JSON.stringify(saved), 'EX', 3600);
+
+    const activeUserIds = await this.getActiveShopMemberUserIds(shopId);
+    for (const uid of activeUserIds) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.IAM.WORKSPACE_SETTINGS_UPDATED,
+        {
+          shopId,
+          settings: saved,
+          updatedBy: actorUserId || null,
+        },
+      );
+    }
+
+    if (actorUserId) {
+      const managers = await this.shopMemberRepo.find({
+        where: {
+          shopId,
+          membershipStatus: MembershipStatusEnum.ACTIVE,
+          role: In([ShopRoleEnum.SHOP_OWNER, ShopRoleEnum.SHOP_MANAGER]),
+        },
+        select: ['userId'],
+      });
+      const recipientIds = managers.map((m) => m.userId).filter((uid) => uid !== actorUserId);
+
+      if (recipientIds.length > 0) {
+        await this.notificationsService.createAndDispatch({
+          recipientIds,
+          actorId: actorUserId,
+          type: NotificationTypeEnum.SHOP_WORKSPACE_UPDATED,
+          title: `Cập nhật cấu hình vận hành tại ${saved.name}`,
+          content: `Cấu hình định tuyến khách hàng và cam kết SLA (${saved.slaResponseSeconds}s) tại ${saved.name} vừa được cập nhật.`,
+          resourceType: NotificationResourceTypeEnum.SHOP_WORKSPACE,
+          resourceId: saved.id,
+          dedupeKey: `shop_cfg_upd:${saved.id}`,
+          metadata: {
+            actionUrl: '/settings/channels',
+            titleKey: 'i18n.shopWorkspaceUpdated.title',
+            contentKey: 'i18n.shopWorkspaceUpdated.content',
+            i18nParams: {
+              shopName: saved.name,
+              slaSeconds: saved.slaResponseSeconds,
+              reclaimMinutes: saved.autoReclaimMinutes,
+            },
+          },
+        });
+      }
+    }
 
     return saved;
   }
