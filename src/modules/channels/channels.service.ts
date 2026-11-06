@@ -1,11 +1,15 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import * as crypto from 'crypto';
 import {
   ChannelTypeEnum,
   ConversationSupportStatusEnum,
   ConversationTypeEnum,
+  GroupRoleEnum,
   MembershipStatusEnum,
+  MessageStatusEnum,
+  MessageTypeEnum,
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
   ShopRoleEnum,
@@ -21,7 +25,9 @@ import {
 } from 'src/dto/channels/channels.dto';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ChannelWebhookLogEntity } from 'src/entity/channel-webhook-log.entity';
+import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
@@ -44,6 +50,10 @@ export class ChannelsService {
     private readonly webhookLogRepo: Repository<ChannelWebhookLogEntity>,
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
+    @InjectRepository(ConversationParticipantEntity)
+    private readonly participantRepo: Repository<ConversationParticipantEntity>,
+    @InjectRepository(MessageEntity)
+    private readonly messageRepo: Repository<MessageEntity>,
     @InjectRepository(ShopMemberEntity)
     private readonly memberRepo: Repository<ShopMemberEntity>,
     @InjectRepository(ShopWorkspaceEntity)
@@ -78,26 +88,73 @@ export class ChannelsService {
       .map((m) => m.userId);
   }
 
+  private async ensureConversationParticipants(
+    conversationId: string,
+    userIds: string[],
+  ): Promise<void> {
+    const uniqueIds = Array.from(new Set(userIds.filter(Boolean)));
+    const now = new Date();
+    for (const userId of uniqueIds) {
+      const existing = await this.participantRepo.findOne({
+        where: { conversationId, userId },
+      });
+      if (!existing) {
+        const part = this.participantRepo.create({
+          conversationId,
+          userId,
+          role: GroupRoleEnum.MEMBER,
+          isAdmin: false,
+          isHidden: false,
+          joinedAt: now,
+        });
+        await this.participantRepo.save(part).catch(() => undefined);
+      } else if (existing.isHidden) {
+        await this.participantRepo.update(existing.id, { isHidden: false }).catch(() => undefined);
+      }
+    }
+  }
+
   async connectOrUpdateChannelOAuth(
     shopId: string,
     dto: ConnectChannelOAuthDto,
     actorUserId?: string,
   ): Promise<ChannelIntegrationEntity> {
+    const resolvedShortCode = dto.pageShortCode.trim().toUpperCase();
+    const resolvedExternalPageId = (
+      dto.externalPageId ||
+      (dto.oauthCode
+        ? `${dto.channelType.toLowerCase()}_${crypto
+            .createHash('sha256')
+            .update(dto.oauthCode)
+            .digest('hex')
+            .slice(0, 12)}`
+        : `${dto.channelType.toLowerCase()}_${Date.now()}`)
+    ).trim();
+
+    const resolvedPageName = (dto.pageName || `${dto.channelType} — ${resolvedShortCode}`).trim();
+
+    const rawAccessToken = (
+      dto.accessToken || `oauth2_tok_${dto.oauthCode || crypto.randomBytes(16).toString('hex')}`
+    ).trim();
+
+    const rawRefreshToken =
+      dto.refreshToken?.trim() || (dto.oauthCode ? `oauth2_rft_${dto.oauthCode.trim()}` : null);
+
     let channel = await this.channelRepo.findOne({
       where: {
         shopId,
         channelType: dto.channelType,
-        externalPageId: dto.externalPageId.trim(),
+        externalPageId: resolvedExternalPageId,
       },
     });
 
     const accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
-      dto.accessToken.trim(),
+      rawAccessToken,
       shopId,
     ).ciphertext;
 
-    const refreshTokenEncrypted = dto.refreshToken
-      ? this.messageCryptoService.encryptForConversation(dto.refreshToken.trim(), shopId).ciphertext
+    const refreshTokenEncrypted = rawRefreshToken
+      ? this.messageCryptoService.encryptForConversation(rawRefreshToken, shopId).ciphertext
       : null;
 
     const webhookVerifySecretEncrypted = dto.webhookVerifySecret
@@ -115,8 +172,8 @@ export class ChannelsService {
       : new Date(Date.now() + 60 * 86400 * 1000);
 
     if (channel) {
-      channel.pageName = dto.pageName.trim();
-      channel.pageShortCode = dto.pageShortCode.trim().toUpperCase();
+      channel.pageName = resolvedPageName;
+      channel.pageShortCode = resolvedShortCode;
       channel.externalShopId = dto.externalShopId || channel.externalShopId;
       channel.avatarUrl = dto.avatarUrl || channel.avatarUrl;
       channel.accessTokenEncrypted = accessTokenEncrypted;
@@ -140,10 +197,10 @@ export class ChannelsService {
       channel = this.channelRepo.create({
         shopId,
         channelType: dto.channelType,
-        externalPageId: dto.externalPageId.trim(),
+        externalPageId: resolvedExternalPageId,
         externalShopId: dto.externalShopId || null,
-        pageName: dto.pageName.trim(),
-        pageShortCode: dto.pageShortCode.trim().toUpperCase(),
+        pageName: resolvedPageName,
+        pageShortCode: resolvedShortCode,
         avatarUrl: dto.avatarUrl || null,
         accessTokenEncrypted,
         refreshTokenEncrypted,
@@ -221,6 +278,9 @@ export class ChannelsService {
     if (dto.pageShortCode !== undefined) {
       channel.pageShortCode = dto.pageShortCode.trim().toUpperCase();
     }
+    if (dto.avatarUrl !== undefined) {
+      channel.avatarUrl = dto.avatarUrl.trim() || null;
+    }
     if (dto.accessToken) {
       channel.accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
         dto.accessToken.trim(),
@@ -228,6 +288,7 @@ export class ChannelsService {
       ).ciphertext;
       channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
       channel.tokenExpiresAt = new Date(Date.now() + 60 * 86400 * 1000);
+      channel.lastErrorMessage = null;
     }
     if (dto.refreshToken) {
       channel.refreshTokenEncrypted = this.messageCryptoService.encryptForConversation(
@@ -235,8 +296,14 @@ export class ChannelsService {
         shopId,
       ).ciphertext;
     }
+    if (dto.webhookVerifySecret) {
+      channel.webhookVerifySecretEncrypted = this.messageCryptoService.encryptForConversation(
+        dto.webhookVerifySecret.trim(),
+        shopId,
+      ).ciphertext;
+    }
     if (dto.metaDatasetId !== undefined) {
-      channel.metaDatasetId = dto.metaDatasetId;
+      channel.metaDatasetId = dto.metaDatasetId.trim() || null;
     }
     if (dto.capiAccessToken) {
       channel.capiAccessTokenEncrypted = this.messageCryptoService.encryptForConversation(
@@ -343,7 +410,13 @@ export class ChannelsService {
     memberCtx: EffectiveMemberContext,
     query: MergedInboxQueryDto,
   ): Promise<{
-    items: ConversationEntity[];
+    items: Array<
+      ConversationEntity & {
+        pageShortCode?: string;
+        pageName?: string;
+        channelAvatarUrl?: string | null;
+      }
+    >;
     total: number;
     page: number;
     limit: number;
@@ -376,7 +449,7 @@ export class ChannelsService {
     }
 
     if (query.search && query.search.trim().length > 0) {
-      qb.andWhere('(c.name LIKE :kw OR c.lastMessage LIKE :kw)', {
+      qb.andWhere('(c.name LIKE :kw OR c.external_thread_id LIKE :kw)', {
         kw: `%${query.search.trim()}%`,
       });
     }
@@ -385,7 +458,31 @@ export class ChannelsService {
       .skip((page - 1) * limit)
       .take(limit);
 
-    const [items, total] = await qb.getManyAndCount();
+    const [rawItems, total] = await qb.getManyAndCount();
+
+    const channelIds = Array.from(
+      new Set(rawItems.map((c) => c.channelIntegrationId).filter(Boolean) as string[]),
+    );
+    const channels =
+      channelIds.length > 0 ? await this.channelRepo.find({ where: { id: In(channelIds) } }) : [];
+    const channelMap = new Map<string, ChannelIntegrationEntity>();
+    for (const ch of channels) {
+      channelMap.set(ch.id, ch);
+    }
+
+    const items = rawItems.map((conv) => {
+      const decryptedLastMessage = conv.lastMessage
+        ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
+        : null;
+      const ch = conv.channelIntegrationId ? channelMap.get(conv.channelIntegrationId) : undefined;
+      return Object.assign(conv, {
+        lastMessage: decryptedLastMessage || conv.lastMessage,
+        pageShortCode: ch?.pageShortCode || conv.channelType,
+        pageName: ch?.pageName || conv.channelType,
+        channelAvatarUrl: ch?.avatarUrl || null,
+      });
+    });
+
     return { items, total, page, limit };
   }
 
@@ -444,6 +541,28 @@ export class ChannelsService {
     );
   }
 
+  async resolveChannelByWebhookPayload(
+    channelType: ChannelTypeEnum,
+    payload: Record<string, unknown>,
+  ): Promise<ChannelIntegrationEntity | null> {
+    const externalPageId = String(
+      payload?.pageId ||
+        payload?.externalPageId ||
+        payload?.recipientId ||
+        payload?.shop_id ||
+        (Array.isArray(payload?.entry) && (payload.entry[0] as any)?.id) ||
+        '',
+    ).trim();
+
+    if (!externalPageId) {
+      return null;
+    }
+
+    return this.channelRepo.findOne({
+      where: { channelType, externalPageId },
+    });
+  }
+
   async dispatchInboundWebhookPayload(params: {
     logId: string;
     channelType: ChannelTypeEnum;
@@ -457,27 +576,7 @@ export class ChannelsService {
   }> {
     const { channelType, payload } = params;
 
-    const externalPageId = String(
-      payload.pageId ||
-        payload.externalPageId ||
-        payload.recipientId ||
-        payload.shop_id ||
-        (Array.isArray(payload.entry) && (payload.entry[0] as any)?.id) ||
-        '',
-    ).trim();
-
-    if (!externalPageId) {
-      return {
-        shopId: null,
-        channelIntegrationId: null,
-        conversationId: null,
-        assignedAgentId: null,
-      };
-    }
-
-    const channel = await this.channelRepo.findOne({
-      where: { channelType, externalPageId },
-    });
+    const channel = await this.resolveChannelByWebhookPayload(channelType, payload);
 
     if (!channel) {
       return {
@@ -560,7 +659,7 @@ export class ChannelsService {
         payload.senderId ||
         payload.conversation_id ||
         payload.order_sn ||
-        `thread_${externalPageId}_default`,
+        `thread_${channel.externalPageId}_default`,
     );
 
     const customerName = String(
@@ -619,11 +718,96 @@ export class ChannelsService {
 
     const savedConversation = await this.conversationRepo.save(conversation);
 
+    // Mã hóa lastMessage bằng MessageCryptoService để đồng bộ với ChatService.getUserInbox
+    const encryptedMsg = this.messageCryptoService.encryptForConversation(
+      messageText,
+      savedConversation.id,
+    );
+
+    await this.conversationRepo.update(savedConversation.id, {
+      lastMessage: encryptedMsg.ciphertext,
+      lastMessageType: MessageTypeEnum.TEXT,
+      lastMessageAt: now,
+    });
+
     const assignedAgentId = await this.routingEngine.routeInboundConversation({
       shopId: channel.shopId,
       conversation: savedConversation,
       channelIntegrationId: channel.id,
     });
+
+    const [shop, activeMembers] = await Promise.all([
+      this.shopRepo.findOne({ where: { id: channel.shopId } }),
+      this.memberRepo.find({
+        where: {
+          shopId: channel.shopId,
+          membershipStatus: MembershipStatusEnum.ACTIVE,
+        },
+        select: ['userId', 'role'],
+      }),
+    ]);
+
+    const participantUserIds = activeMembers
+      .filter(
+        (m) =>
+          m.role === ShopRoleEnum.SHOP_OWNER ||
+          m.role === ShopRoleEnum.SHOP_MANAGER ||
+          m.userId === assignedAgentId,
+      )
+      .map((m) => m.userId);
+    if (shop?.ownerId) {
+      participantUserIds.push(shop.ownerId);
+    }
+    if (assignedAgentId) {
+      participantUserIds.push(assignedAgentId);
+    }
+
+    await this.ensureConversationParticipants(savedConversation.id, participantUserIds);
+
+    const inboundSenderId = `ext:${channel.channelType.toLowerCase()}:${externalThreadId.slice(0, 18)}`;
+    const inboundMessage = this.messageRepo.create({
+      conversationId: savedConversation.id,
+      senderId: inboundSenderId,
+      shopId: channel.shopId,
+      direction: MessageDirectionEnum.INBOUND,
+      externalMessageId: payload.messageId ? String(payload.messageId) : `wh_${params.logId}`,
+      content: encryptedMsg.ciphertext,
+      type: MessageTypeEnum.TEXT,
+      status: MessageStatusEnum.SENT,
+      readBy: [],
+      deliveredTo: participantUserIds,
+      isPinned: false,
+      metadata: {
+        isEncrypted: encryptedMsg.isEncrypted,
+        encryptionAlg: encryptedMsg.algorithm,
+        channelType: channel.channelType,
+        pageShortCode: channel.pageShortCode,
+        pageName: channel.pageName,
+        externalCustomerName: customerName,
+      } as any,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const savedMsg = await this.messageRepo.save(inboundMessage);
+
+    for (const uid of new Set(participantUserIds)) {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+        {
+          ...savedMsg,
+          content: messageText,
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          sender: {
+            id: inboundSenderId,
+            name: customerName,
+            avatar: channel.avatarUrl || null,
+          },
+        },
+      );
+    }
 
     await this.broadcastChannelEventToShop(
       channel.shopId,

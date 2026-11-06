@@ -9,6 +9,7 @@ import { ConversationParticipantEntity } from 'src/entity/conversation-participa
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { FileEntity } from 'src/entity/file.entity';
 import { MessageEntity } from 'src/entity/message.entity';
+import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 
 import { MediaModule } from '../media/media.module';
 import { UserModule } from '../user/user.module';
@@ -29,6 +30,7 @@ import { MessageCryptoService } from './services/message-crypto.service';
       CallSessionEntity,
       CallParticipantEntity,
       ContactEntity,
+      ShopMemberEntity,
     ]),
     UserModule,
     MediaModule,

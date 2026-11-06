@@ -10,6 +10,7 @@ import {
   IsString,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import { ChannelTypeEnum } from 'src/common/enum/permission.enum';
 import { DBaseQuery } from 'src/dto/base-query.dto';
@@ -19,11 +20,12 @@ export class ConnectChannelOAuthDto {
   @IsEnum(ChannelTypeEnum)
   channelType: ChannelTypeEnum;
 
-  @ApiProperty({ example: '108294819201948' })
+  @ApiPropertyOptional({ example: '108294819201948' })
+  @ValidateIf((o: ConnectChannelOAuthDto) => !o.oauthCode)
   @IsString()
   @IsNotEmpty()
   @MaxLength(128)
-  externalPageId: string;
+  externalPageId?: string;
 
   @ApiPropertyOptional({ example: 'shop-shopee-vn-01' })
   @IsOptional()
@@ -31,12 +33,13 @@ export class ConnectChannelOAuthDto {
   @MaxLength(128)
   externalShopId?: string;
 
-  @ApiProperty({ example: 'Thời Trang Milano — Official Fanpage' })
+  @ApiPropertyOptional({ example: 'Thời Trang Milano — Official Fanpage' })
+  @ValidateIf((o: ConnectChannelOAuthDto) => !o.oauthCode)
   @IsString()
   @IsNotEmpty()
   @MinLength(2)
   @MaxLength(200)
-  pageName: string;
+  pageName?: string;
 
   @ApiProperty({ example: 'FB-MILANO-01' })
   @IsString()
@@ -51,10 +54,19 @@ export class ConnectChannelOAuthDto {
   @MaxLength(500)
   avatarUrl?: string;
 
-  @ApiProperty({ example: 'EAAGm0PX4ZCpsBA...' })
+  @ApiPropertyOptional({
+    description: 'Mã ủy quyền OAuth2 trả về từ Callback của Facebook/Zalo/TikTok/Shopee',
+    example: 'AQBx9918273645_oauth_code',
+  })
+  @IsOptional()
+  @IsString()
+  oauthCode?: string;
+
+  @ApiPropertyOptional({ example: 'EAAGm0PX4ZCpsBA...' })
+  @ValidateIf((o: ConnectChannelOAuthDto) => !o.oauthCode)
   @IsString()
   @IsNotEmpty()
-  accessToken: string;
+  accessToken?: string;
 
   @ApiPropertyOptional({ example: 'rft_8829103948...' })
   @IsOptional()
@@ -96,6 +108,12 @@ export class UpdateChannelIntegrationDto {
   @MaxLength(24)
   pageShortCode?: string;
 
+  @ApiPropertyOptional({ example: 'https://cdn.shop.vn/avatar.png' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  avatarUrl?: string;
+
   @ApiPropertyOptional({ example: 'EAAGm0PX4ZCpsBA_NEW...' })
   @IsOptional()
   @IsString()
@@ -105,6 +123,11 @@ export class UpdateChannelIntegrationDto {
   @IsOptional()
   @IsString()
   refreshToken?: string;
+
+  @ApiPropertyOptional({ example: 'whsec_192837465' })
+  @IsOptional()
+  @IsString()
+  webhookVerifySecret?: string;
 
   @ApiPropertyOptional({ example: '9981726354123' })
   @IsOptional()

@@ -33,6 +33,7 @@ import { FieldLevelSecurityInterceptor } from 'src/modules/iam/interceptors/fiel
 
 import { ChannelsService } from './channels.service';
 import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
+import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
 
 @ApiTags('Sprint 1 — Omnichannel Integrations, Multi-Page Merge & Token Doctor')
 @ApiBearerAuth('access-token')
@@ -43,6 +44,7 @@ export class ChannelsController {
   constructor(
     private readonly channelsService: ChannelsService,
     private readonly tokenDoctorService: ChannelTokenDoctorService,
+    private readonly marketplaceBridgeService: MarketplaceBridgeService,
   ) {}
 
   @Get()
@@ -185,6 +187,23 @@ export class ChannelsController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Fetched merged omnichannel conversations successfully',
+      data,
+    };
+  }
+
+  @Get('marketplace-reservations')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_MARKETPLACE_SYNC_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.8: Lấy danh sách đơn hàng sàn TMĐT (Shopee / TikTok Shop / Lazada) đã đồng bộ và giữ chỗ tồn kho',
+  })
+  async getMarketplaceReservations(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.marketplaceBridgeService.getMarketplaceStockReservations(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched marketplace stock reservations successfully',
       data,
     };
   }

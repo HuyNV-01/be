@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
-import { NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
+import { GroupRoleEnum, NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
 import {
   ConversationSupportStatusEnum,
   DataScopeEnum,
@@ -16,6 +16,7 @@ import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.se
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { ROLE_DEFAULT_PERMISSIONS_MAP } from 'src/constants/role-default-permissions.constant';
 import { UpdateShopWorkspaceSettingsDto } from 'src/dto/onboarding/onboarding.dto';
+import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { SavedPageGroupPreset, ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -54,6 +55,8 @@ export class GranularIamService {
     private readonly shopWorkspaceRepo: Repository<ShopWorkspaceEntity>,
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
+    @InjectRepository(ConversationParticipantEntity)
+    private readonly participantRepo: Repository<ConversationParticipantEntity>,
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
     @InjectRedis() private readonly redis: Redis,
@@ -74,6 +77,32 @@ export class GranularIamService {
       select: ['userId'],
     });
     return Array.from(new Set(members.map((m) => m.userId)));
+  }
+
+  private async ensureConversationParticipants(
+    conversationIds: string[],
+    userId: string,
+  ): Promise<void> {
+    if (!userId || conversationIds.length === 0) return;
+    const now = new Date();
+    for (const conversationId of conversationIds) {
+      const existing = await this.participantRepo.findOne({
+        where: { conversationId, userId },
+      });
+      if (!existing) {
+        const part = this.participantRepo.create({
+          conversationId,
+          userId,
+          role: GroupRoleEnum.MEMBER,
+          isAdmin: false,
+          isHidden: false,
+          joinedAt: now,
+        });
+        await this.participantRepo.save(part).catch(() => undefined);
+      } else if (existing.isHidden) {
+        await this.participantRepo.update(existing.id, { isHidden: false }).catch(() => undefined);
+      }
+    }
   }
 
   async getEffectiveMemberContext(shopId: string, userId: string): Promise<EffectiveMemberContext> {
@@ -227,6 +256,7 @@ export class GranularIamService {
             { id: In(convIds) },
             { assignedAgentId: params.targetHandoverAgentId },
           );
+          await this.ensureConversationParticipants(convIds, params.targetHandoverAgentId);
           await this.redis.zincrby(
             `routing:active_load:${params.shopId}`,
             convIds.length,
@@ -251,6 +281,7 @@ export class GranularIamService {
                 { id: convIds[i] },
                 { assignedAgentId: targetColleague.userId },
               );
+              await this.ensureConversationParticipants([convIds[i]], targetColleague.userId);
               await this.redis.zincrby(
                 `routing:active_load:${params.shopId}`,
                 1,

@@ -12,16 +12,22 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
+import Redis from 'ioredis';
 import {
   CallStatusEnum,
   CallTypeEnum,
+  ConversationSupportStatusEnum,
   ConversationTypeEnum,
+  DataScopeEnum,
   GroupRoleEnum,
   MediaTypeEnum,
+  MembershipStatusEnum,
   MessageStatusEnum,
   MessageTypeEnum,
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
+  ShopRoleEnum,
 } from 'src/common/enum';
 import { ContactStatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
@@ -61,7 +67,8 @@ import { ConversationParticipantEntity } from 'src/entity/conversation-participa
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { FileEntity } from 'src/entity/file.entity';
 import { MediaEntity } from 'src/entity/media.entity';
-import { MessageEntity } from 'src/entity/message.entity';
+import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
+import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { UserEntity } from 'src/entity/user.entity';
 import { IBaseQuery } from 'src/interface';
 import {
@@ -98,6 +105,9 @@ export class ChatService {
     private partRepository: Repository<ConversationParticipantEntity>,
     @InjectRepository(ContactEntity)
     private contactRepository: Repository<ContactEntity>,
+    @InjectRepository(ShopMemberEntity)
+    private shopMemberRepository: Repository<ShopMemberEntity>,
+    @InjectRedis() private readonly redis: Redis,
     private dataSource: DataSource,
     private readonly userService: UserService,
     private readonly mediaService: MediaService,
@@ -143,13 +153,60 @@ export class ChatService {
     conversationId: string,
     userId: string,
   ): Promise<ConversationParticipantEntity> {
-    const participant = await this.partRepository.findOne({
+    let participant = await this.partRepository.findOne({
       where: { conversationId, userId },
     });
-    if (!participant) {
-      throw new ForbiddenException('You are not a member of this conversation');
+    if (participant) {
+      return participant;
     }
-    return participant;
+
+    const conv = await this.convRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'shopId', 'assignedAgentId', 'channelIntegrationId'],
+    });
+
+    if (conv?.shopId) {
+      const member = await this.shopMemberRepository.findOne({
+        where: {
+          shopId: conv.shopId,
+          userId,
+          membershipStatus: MembershipStatusEnum.ACTIVE,
+        },
+      });
+
+      const isAllowedChannel =
+        !conv.channelIntegrationId ||
+        !member?.allowedChannelIdsJson ||
+        member.allowedChannelIdsJson.length === 0 ||
+        member.allowedChannelIdsJson.includes(conv.channelIntegrationId);
+
+      const isAuthorizedScope =
+        member &&
+        isAllowedChannel &&
+        (member.role === ShopRoleEnum.SHOP_OWNER ||
+          member.role === ShopRoleEnum.SHOP_MANAGER ||
+          member.dataScope === DataScopeEnum.ALL_SHOP ||
+          member.dataScope === DataScopeEnum.TEAM_SHIFT ||
+          conv.assignedAgentId === userId ||
+          (member.dataScope === DataScopeEnum.ASSIGNED_PLUS_POOL && !conv.assignedAgentId));
+
+      if (isAuthorizedScope) {
+        participant = this.partRepository.create({
+          conversationId,
+          userId,
+          role: GroupRoleEnum.MEMBER,
+          isAdmin:
+            member.role === ShopRoleEnum.SHOP_OWNER || member.role === ShopRoleEnum.SHOP_MANAGER,
+          isHidden: false,
+          joinedAt: new Date(),
+        });
+        participant = await this.partRepository.save(participant);
+        this.invalidateMembershipCache(conversationId, userId);
+        return participant;
+      }
+    }
+
+    throw new ForbiddenException('You are not a member of this conversation');
   }
 
   async getConversationMemberIds(conversationId: string): Promise<string[]> {
@@ -204,7 +261,15 @@ export class ChatService {
 
       const conversation = await queryRunner.manager.findOne(ConversationEntity, {
         where: { id: dto.conversationId },
-        select: ['id', 'name', 'type', 'disappearingTtl'],
+        select: [
+          'id',
+          'name',
+          'type',
+          'disappearingTtl',
+          'shopId',
+          'supportStatus',
+          'assignedAgentId',
+        ],
       });
 
       const now = new Date();
@@ -281,6 +346,8 @@ export class ChatService {
       const message = this.msgRepository.create({
         conversationId: dto.conversationId,
         senderId,
+        shopId: conversation?.shopId || null,
+        direction: MessageDirectionEnum.OUTBOUND,
         content: encrypted.ciphertext,
         type: dto.type || MessageTypeEnum.TEXT,
         replyToMessageId: dto.replyToMessageId || null,
@@ -315,12 +382,27 @@ export class ChatService {
         dto.conversationId,
       );
 
-      await queryRunner.manager.update(ConversationEntity, dto.conversationId, {
-        lastMessage: encryptedLastMsg.ciphertext,
-        lastMessageSenderId: senderId,
-        lastMessageAt: savedMessage.createdAt,
-        lastMessageType: dto.type || MessageTypeEnum.TEXT,
-      });
+      await queryRunner.manager.update(
+        ConversationEntity,
+        dto.conversationId,
+        conversation?.shopId
+          ? {
+              lastMessage: encryptedLastMsg.ciphertext,
+              lastMessageSenderId: senderId,
+              lastMessageAt: savedMessage.createdAt,
+              lastMessageType: dto.type || MessageTypeEnum.TEXT,
+              lastAgentReplyAt: savedMessage.createdAt,
+              slaDeadlineAt: null,
+              supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
+              assignedAgentId: conversation.assignedAgentId || senderId,
+            }
+          : {
+              lastMessage: encryptedLastMsg.ciphertext,
+              lastMessageSenderId: senderId,
+              lastMessageAt: savedMessage.createdAt,
+              lastMessageType: dto.type || MessageTypeEnum.TEXT,
+            },
+      );
 
       await queryRunner.manager.update(
         ConversationParticipantEntity,
@@ -338,6 +420,20 @@ export class ChatService {
       });
 
       await queryRunner.commitTransaction();
+
+      if (
+        conversation?.shopId &&
+        conversation.supportStatus === ConversationSupportStatusEnum.WAITING_AGENT_REPLY
+      ) {
+        const targetAgent = conversation.assignedAgentId || senderId;
+        const currentLoad = await this.redis.zscore(
+          `routing:active_load:${conversation.shopId}`,
+          targetAgent,
+        );
+        if (currentLoad && Number(currentLoad) > 0) {
+          await this.redis.zincrby(`routing:active_load:${conversation.shopId}`, -1, targetAgent);
+        }
+      }
 
       const finalMessage = await this.buildEnrichedMessageResponse(savedMessage.id);
       this.logger.debug(`${label} messageId -> ${JSON.stringify(message.id)}`);
@@ -1422,13 +1518,25 @@ export class ChatService {
       const avatarUrl = sender?.avatarMedia?.file?.url || null;
       if (sender) delete sender.avatarMedia;
       const senderNickname = sender?.id ? nicknameMap.get(sender.id) : null;
-      const cleanSender = {
-        ...sender,
-        name: senderNickname || sender?.name,
-        originalName: sender?.name,
-        nickname: senderNickname || null,
-        avatar: avatarUrl,
-      };
+      const fallbackExtName =
+        (msg.metadata as any)?.externalCustomerName ||
+        (msg.metadata as any)?.marketplaceOrder?.buyerUsername ||
+        'Khách hàng';
+      const cleanSender = sender?.id
+        ? {
+            ...sender,
+            name: senderNickname || sender?.name,
+            originalName: sender?.name,
+            nickname: senderNickname || null,
+            avatar: avatarUrl,
+          }
+        : {
+            id: msg.senderId,
+            name: fallbackExtName,
+            originalName: fallbackExtName,
+            nickname: null,
+            avatar: null,
+          };
 
       const computedStatus = this.computeStatus(
         msg as MessageEntity,
@@ -2051,6 +2159,18 @@ export class ChatService {
     const now = new Date();
 
     await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
+
+    await this.convRepository
+      .createQueryBuilder()
+      .update(ConversationEntity)
+      .set({
+        firstSeenAt: now,
+        firstSeenByAgentId: userId,
+      })
+      .where('id = :conversationId', { conversationId })
+      .andWhere('shop_id IS NOT NULL')
+      .andWhere('first_seen_at IS NULL')
+      .execute();
 
     this.eventEmitter.emit(
       NotificationEventEnum.MARK_CONVERSATION_READ,

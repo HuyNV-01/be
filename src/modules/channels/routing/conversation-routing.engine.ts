@@ -5,7 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import type { Queue } from 'bull';
 import Redis from 'ioredis';
-import { NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
+import { GroupRoleEnum, NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
 import {
   AiHandlingModeEnum,
   ConversationSupportStatusEnum,
@@ -16,6 +16,7 @@ import {
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
+import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -29,6 +30,8 @@ export class ConversationRoutingEngine {
   constructor(
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
+    @InjectRepository(ConversationParticipantEntity)
+    private readonly participantRepo: Repository<ConversationParticipantEntity>,
     @InjectRepository(ShopMemberEntity)
     private readonly shopMemberRepo: Repository<ShopMemberEntity>,
     @InjectRepository(ShopWorkspaceEntity)
@@ -41,6 +44,29 @@ export class ConversationRoutingEngine {
     private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly notificationsService: NotificationsService,
   ) {}
+
+  private async ensureParticipantForConversation(
+    conversationId: string,
+    userId: string,
+  ): Promise<void> {
+    if (!conversationId || !userId) return;
+    const existing = await this.participantRepo.findOne({
+      where: { conversationId, userId },
+    });
+    if (!existing) {
+      const part = this.participantRepo.create({
+        conversationId,
+        userId,
+        role: GroupRoleEnum.MEMBER,
+        isAdmin: false,
+        isHidden: false,
+        joinedAt: new Date(),
+      });
+      await this.participantRepo.save(part).catch(() => undefined);
+    } else if (existing.isHidden) {
+      await this.participantRepo.update(existing.id, { isHidden: false }).catch(() => undefined);
+    }
+  }
 
   async routeInboundConversation(params: {
     shopId: string;
@@ -96,6 +122,12 @@ export class ConversationRoutingEngine {
         (a) => a.userId === params.conversation.assignedAgentId,
       );
       if (existingOnline) {
+        const slaDeadlineAt = new Date(Date.now() + workspace.slaResponseSeconds * 1000);
+        await this.conversationRepo.update(params.conversation.id, {
+          supportStatus: ConversationSupportStatusEnum.WAITING_AGENT_REPLY,
+          slaDeadlineAt,
+        });
+        await this.ensureParticipantForConversation(params.conversation.id, existingOnline.userId);
         await this.scheduleAutoReclaimWatchdog(
           workspace,
           params.conversation.id,
@@ -150,6 +182,7 @@ export class ConversationRoutingEngine {
         slaDeadlineAt,
       });
 
+      await this.ensureParticipantForConversation(params.conversation.id, selectedUserId);
       await this.redis.zincrby(`routing:active_load:${params.shopId}`, 1, selectedUserId);
 
       const pageShortCode = channel?.pageShortCode || params.conversation.channelType;

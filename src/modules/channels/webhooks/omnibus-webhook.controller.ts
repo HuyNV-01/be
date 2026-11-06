@@ -1,11 +1,13 @@
 import {
   Body,
   Controller,
+  Get,
   Headers,
   HttpCode,
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -36,6 +38,30 @@ export class OmnibusWebhookController {
     private readonly channelsService: ChannelsService,
   ) {}
 
+  @Get(':channelType')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Xác thực Webhook Challenge (hub.challenge / challenge) cho Facebook, Instagram, Zalo OA, TikTok Shop',
+  })
+  verifyWebhookSubscription(
+    @Param('channelType') _channelTypeParam: string,
+    @Query('hub.mode') hubMode?: string,
+    @Query('hub.challenge') hubChallenge?: string,
+    @Query('challenge') challenge?: string,
+  ): string | { verified: true; mode: string } {
+    if (hubChallenge) {
+      return hubChallenge;
+    }
+    if (challenge) {
+      return challenge;
+    }
+    return {
+      verified: true,
+      mode: hubMode || 'ACTIVE',
+    };
+  }
+
   @Post(':channelType')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -60,7 +86,13 @@ export class OmnibusWebhookController {
     const dedupeRedisKey = `webhook:dedupe:${idempotencyKey}`;
     const isFirstSeen = await this.redis.set(dedupeRedisKey, '1', 'EX', 86400, 'NX');
 
+    const preResolvedChannel = await this.channelsService
+      .resolveChannelByWebhookPayload(channelType, payload || {})
+      .catch(() => null);
+
     const logEntry = this.webhookLogRepo.create({
+      shopId: preResolvedChannel?.shopId || null,
+      channelIntegrationId: preResolvedChannel?.id || null,
       channelType,
       idempotencyKey,
       eventType: String(payload?.object || payload?.event || payload?.type || 'MESSAGE_INBOUND'),
@@ -72,6 +104,14 @@ export class OmnibusWebhookController {
     const savedLog = await this.webhookLogRepo.save(logEntry);
 
     if (!isFirstSeen) {
+      await this.channelsService.notifyWebhookLogUpdated(preResolvedChannel?.shopId || null, {
+        id: savedLog.id,
+        channelType,
+        eventType: savedLog.eventType,
+        processingStatus: 'DUPLICATE_SKIPPED',
+        replayedCount: 0,
+      });
+
       return {
         received: true,
         idempotencyKey,
@@ -87,17 +127,20 @@ export class OmnibusWebhookController {
         payload: payload || {},
       });
 
+      const resolvedShopId = result.shopId || preResolvedChannel?.shopId || null;
+      const resolvedChannelId = result.channelIntegrationId || preResolvedChannel?.id || null;
+
       await this.webhookLogRepo.update(
         { id: savedLog.id, createdAt: savedLog.createdAt },
         {
-          shopId: result.shopId,
-          channelIntegrationId: result.channelIntegrationId,
+          shopId: resolvedShopId,
+          channelIntegrationId: resolvedChannelId,
           processingStatus: 'PROCESSED',
           processingDurationMs: Date.now() - startTime,
         },
       );
 
-      await this.channelsService.notifyWebhookLogUpdated(result.shopId, {
+      await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
         id: savedLog.id,
         channelType,
         eventType: savedLog.eventType,
@@ -120,6 +163,15 @@ export class OmnibusWebhookController {
           errorStack,
         },
       );
+
+      await this.channelsService.notifyWebhookLogUpdated(preResolvedChannel?.shopId || null, {
+        id: savedLog.id,
+        channelType,
+        eventType: savedLog.eventType,
+        processingStatus: 'FAILED_DLQ',
+        replayedCount: 0,
+      });
+
       return {
         received: true,
         idempotencyKey,
@@ -147,45 +199,68 @@ export class OmnibusWebhookController {
     }
 
     const startTime = Date.now();
-    const result = await this.channelsService.dispatchInboundWebhookPayload({
-      logId: log.id,
-      channelType: log.channelType,
-      headers: log.headersJson,
-      payload: log.rawPayloadJson,
-    });
+    try {
+      const result = await this.channelsService.dispatchInboundWebhookPayload({
+        logId: log.id,
+        channelType: log.channelType,
+        headers: log.headersJson,
+        payload: log.rawPayloadJson,
+      });
 
-    const nextReplayCount = (log.replayedCount || 0) + 1;
-    const resolvedShopId = result.shopId || log.shopId;
+      const nextReplayCount = (log.replayedCount || 0) + 1;
+      const resolvedShopId = result.shopId || log.shopId;
 
-    await this.webhookLogRepo.update(
-      { id: log.id, createdAt: log.createdAt },
-      {
-        shopId: resolvedShopId,
-        channelIntegrationId: result.channelIntegrationId || log.channelIntegrationId,
+      await this.webhookLogRepo.update(
+        { id: log.id, createdAt: log.createdAt },
+        {
+          shopId: resolvedShopId,
+          channelIntegrationId: result.channelIntegrationId || log.channelIntegrationId,
+          processingStatus: 'REPLAYED_SUCCESS',
+          replayedCount: nextReplayCount,
+          processingDurationMs: Date.now() - startTime,
+          errorStack: null,
+        },
+      );
+
+      await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
+        id: log.id,
+        channelType: log.channelType,
+        eventType: log.eventType,
         processingStatus: 'REPLAYED_SUCCESS',
         replayedCount: nextReplayCount,
-        processingDurationMs: Date.now() - startTime,
-        errorStack: null,
-      },
-    );
+      });
 
-    await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
-      id: log.id,
-      channelType: log.channelType,
-      eventType: log.eventType,
-      processingStatus: 'REPLAYED_SUCCESS',
-      replayedCount: nextReplayCount,
-    });
+      return {
+        status: HttpStatus.OK,
+        code: HttpStatus.OK,
+        message: 'Replayed webhook successfully',
+        data: {
+          logId: log.id,
+          status: 'REPLAYED_SUCCESS',
+          replayedCount: nextReplayCount,
+        },
+      };
+    } catch (err: unknown) {
+      const errorStack = err instanceof Error ? err.stack || err.message : String(err);
+      await this.webhookLogRepo.update(
+        { id: log.id, createdAt: log.createdAt },
+        {
+          processingStatus: 'FAILED_DLQ',
+          processingDurationMs: Date.now() - startTime,
+          errorStack,
+        },
+      );
 
-    return {
-      status: HttpStatus.OK,
-      code: HttpStatus.OK,
-      message: 'Replayed webhook successfully',
-      data: {
-        logId: log.id,
-        status: 'REPLAYED_SUCCESS',
-        replayedCount: nextReplayCount,
-      },
-    };
+      return {
+        status: HttpStatus.INTERNAL_SERVER_ERROR,
+        code: HttpStatus.INTERNAL_SERVER_ERROR,
+        message: 'Webhook replay failed',
+        data: {
+          logId: log.id,
+          status: 'FAILED_DLQ',
+          error: errorStack,
+        },
+      };
+    }
   }
 }
