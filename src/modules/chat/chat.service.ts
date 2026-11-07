@@ -269,6 +269,9 @@ export class ChatService {
           'shopId',
           'supportStatus',
           'assignedAgentId',
+          'lastAgentReplyAt',
+          'lastCustomerMessageAt',
+          'accountabilityTimelineJson',
         ],
       });
 
@@ -343,11 +346,15 @@ export class ChatService {
           : {}),
       };
 
+      const isInternalNoteMsg = Boolean(dto.metadata?.isInternalNote);
       const message = this.msgRepository.create({
         conversationId: dto.conversationId,
         senderId,
         shopId: conversation?.shopId || null,
-        direction: MessageDirectionEnum.OUTBOUND,
+        direction: isInternalNoteMsg
+          ? MessageDirectionEnum.INTERNAL_NOTE
+          : MessageDirectionEnum.OUTBOUND,
+        isInternalNote: isInternalNoteMsg,
         content: encrypted.ciphertext,
         type: dto.type || MessageTypeEnum.TEXT,
         replyToMessageId: dto.replyToMessageId || null,
@@ -382,27 +389,32 @@ export class ChatService {
         dto.conversationId,
       );
 
-      await queryRunner.manager.update(
-        ConversationEntity,
-        dto.conversationId,
-        conversation?.shopId
-          ? {
-              lastMessage: encryptedLastMsg.ciphertext,
-              lastMessageSenderId: senderId,
-              lastMessageAt: savedMessage.createdAt,
-              lastMessageType: dto.type || MessageTypeEnum.TEXT,
-              lastAgentReplyAt: savedMessage.createdAt,
-              slaDeadlineAt: null,
-              supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
-              assignedAgentId: conversation.assignedAgentId || senderId,
-            }
-          : {
-              lastMessage: encryptedLastMsg.ciphertext,
-              lastMessageSenderId: senderId,
-              lastMessageAt: savedMessage.createdAt,
-              lastMessageType: dto.type || MessageTypeEnum.TEXT,
-            },
-      );
+      if (!isInternalNoteMsg) {
+        await queryRunner.manager.update(
+          ConversationEntity,
+          dto.conversationId,
+          conversation?.shopId
+            ? {
+                lastMessage: encryptedLastMsg.ciphertext,
+                lastMessageSenderId: senderId,
+                lastMessageAt: savedMessage.createdAt,
+                lastMessageType: dto.type || MessageTypeEnum.TEXT,
+                lastAgentReplyAt: savedMessage.createdAt,
+                slaDeadlineAt: null,
+                isSlaBreached: false,
+                isGhostedByAgent: false,
+                snoozedUntilAt: null,
+                supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
+                assignedAgentId: conversation.assignedAgentId || senderId,
+              }
+            : {
+                lastMessage: encryptedLastMsg.ciphertext,
+                lastMessageSenderId: senderId,
+                lastMessageAt: savedMessage.createdAt,
+                lastMessageType: dto.type || MessageTypeEnum.TEXT,
+              },
+        );
+      }
 
       await queryRunner.manager.update(
         ConversationParticipantEntity,
@@ -551,7 +563,7 @@ export class ChatService {
 
       const isGroup = conversation?.type === ConversationTypeEnum.GROUP;
       if (
-        isGroup &&
+        (isGroup || Boolean(conversation?.shopId) || isInternalNoteMsg) &&
         finalMessage &&
         (dto.mentionAll || (dto.mentionedUserIds && dto.mentionedUserIds.length > 0))
       ) {
@@ -2718,11 +2730,52 @@ export class ChatService {
         ? partnerMember?.nickname || partnerMember?.name || conv.name
         : conv.name;
 
+    if (conv.shopId) {
+      const shopMembers = await this.shopMemberRepository.find({
+        where: { shopId: conv.shopId, membershipStatus: MembershipStatusEnum.ACTIVE },
+        select: ['userId', 'role'],
+      });
+      const missingColleagueIds = shopMembers
+        .map((sm) => sm.userId)
+        .filter((uid) => !memberIds.includes(uid));
+      if (missingColleagueIds.length > 0) {
+        const extraUsers = await this.userService.getBasicUsersInfo(missingColleagueIds);
+        for (const eu of extraUsers as any[]) {
+          members.push({
+            userId: eu.id,
+            name: eu.name || 'Nhân sự',
+            email: eu.email || '',
+            avatar: eu.avatarMedia?.file?.url || null,
+            nickname: null,
+            isAdmin: false,
+            role: GroupRoleEnum.MEMBER,
+            joinedAt: conv.createdAt,
+          });
+        }
+      }
+    }
+
     return {
       conversationId,
       type: conv.type,
       name: resolvedName,
       disappearingTtl: conv.disappearingTtl,
+      shopId: conv.shopId,
+      channelType: conv.channelType,
+      channelIntegrationId: conv.channelIntegrationId,
+      interactionType: conv.interactionType,
+      supportStatus: conv.supportStatus,
+      assignedAgentId: conv.assignedAgentId,
+      isGhostedByAgent: conv.isGhostedByAgent,
+      isSlaBreached: conv.isSlaBreached,
+      slaDeadlineAt: conv.slaDeadlineAt ? conv.slaDeadlineAt.toISOString() : null,
+      snoozedUntilAt: conv.snoozedUntilAt ? conv.snoozedUntilAt.toISOString() : null,
+      snoozeNote: conv.snoozeNote,
+      activeTagIdsJson: conv.activeTagIdsJson || [],
+      sourceAdId: conv.sourceAdId,
+      sourcePostId: conv.sourcePostId,
+      ctwaClickId: conv.ctwaClickId,
+      accountabilityTimelineJson: conv.accountabilityTimelineJson || [],
       mySettings: {
         isMuted: myPart.isMuted,
         soundEnabled: myPart.soundEnabled ?? true,
@@ -2915,5 +2968,46 @@ export class ChatService {
     }
 
     return forwardedResults;
+  }
+
+  /**
+   * F03.5: Tạo Ghi chú nội bộ (Alt+N) — Chỉ lưu nội bộ và gửi thông báo cho đồng nghiệp được @mention,
+   * tuyệt đối không gửi ra Graph API Facebook/Zalo bên ngoài.
+   */
+  async createInternalNote(params: {
+    senderId: string;
+    conversationId: string;
+    content: string;
+    mentionedUserIds?: string[];
+    replyToMessageId?: string;
+  }) {
+    const conv = await this.convRepository.findOne({
+      where: { id: params.conversationId },
+      select: ['id', 'shopId', 'name'],
+    });
+    if (!conv) {
+      throw new NotFoundException('CONVERSATION_NOT_FOUND');
+    }
+
+    if (conv.shopId && params.mentionedUserIds && params.mentionedUserIds.length > 0) {
+      for (const mentionedUid of params.mentionedUserIds) {
+        await this.ensureParticipant(params.conversationId, mentionedUid).catch(() => undefined);
+      }
+    }
+
+    return this.sendMessage({
+      senderId: params.senderId,
+      dto: {
+        conversationId: params.conversationId,
+        content: params.content,
+        type: MessageTypeEnum.TEXT,
+        replyToMessageId: params.replyToMessageId,
+        mentionedUserIds: params.mentionedUserIds,
+        metadata: {
+          isInternalNote: true,
+          mentionedUserIds: params.mentionedUserIds || [],
+        },
+      },
+    });
   }
 }

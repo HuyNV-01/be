@@ -9,6 +9,7 @@ export interface MessageAttachmentMeta {
   size: number;
   width?: number;
   height?: number;
+  e2ee?: AttachmentE2EEMeta;
 }
 
 export interface MessageReplyPreview {
@@ -28,6 +29,28 @@ export interface MessageCallInfoMeta {
   participantIds: string[];
   startedAt?: string;
   endedAt?: string;
+  callDirection?: 'INTERNAL_WEBRTC' | 'OUTBOUND_SIP_PSTN' | 'INBOUND_SIP_PSTN';
+  maskedPhoneDisplay?: string | null;
+  recordingFileId?: string | null;
+  recordingFileUrl?: string | null;
+  callDispositionTag?: string | null;
+  callNotes?: string | null;
+  waveformPeaks?: number[];
+}
+
+export interface MessageProductCardMeta {
+  skuCode: string;
+  name: string;
+  retailPrice: number;
+  imageUrl?: string | null;
+  availableQty?: number;
+}
+
+export interface MessageTranslationMeta {
+  translatedText: string;
+  sourceLang: string;
+  targetLang: string;
+  translatedAt: string;
 }
 
 export interface MessageMetadata {
@@ -56,6 +79,13 @@ export interface MessageMetadata {
   mentionAll?: boolean;
   expiresAt?: string;
   disappearingTtl?: number;
+  // Sprint 2 Omnichannel Seller OS metadata extensions
+  isInternalNote?: boolean;
+  quickReplyShortcutUsed?: string;
+  productCards?: MessageProductCardMeta[];
+  translation?: MessageTranslationMeta;
+  externalCustomerName?: string;
+  marketplaceOrder?: Record<string, any>;
 }
 
 export interface MessagePollOptionMeta {
@@ -96,16 +126,4 @@ export interface AttachmentE2EEMeta {
   senderPublicKeyB64: string;
   senderKeyId: string;
   wrappedKeys: Record<string, AttachmentE2EEWrappedKey>;
-}
-
-export interface MessageAttachmentMeta {
-  fileId: string;
-  url: string;
-  thumbnailUrl?: string;
-  fileName: string;
-  mimeType: string;
-  size: number;
-  width?: number;
-  height?: number;
-  e2ee?: AttachmentE2EEMeta;
 }

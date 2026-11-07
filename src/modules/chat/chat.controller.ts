@@ -58,12 +58,31 @@ import {
   VotePollDto,
 } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
+import {
+  CreateInternalNoteDto,
+  CreateQuickReplyTemplateDto,
+  FinalizeMaskedVoipCallDto,
+  InitiateMaskedVoipCallDto,
+  OmnichannelInboxFilterDto,
+  SnoozeConversationDto,
+  TransferConversationDto,
+  TranslateChatMessageDto,
+  UpdateQuickReplyTemplateDto,
+} from 'src/dto/chat/omnichannel-inbox.dto';
 import * as queryTypes from 'src/types/query.types';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { GranularIamService } from '../iam/iam.service';
 import { ChatService } from './chat.service';
+import { AccountabilityTimelineService } from './services/accountability-timeline.service';
+import { AgentCollisionLockService } from './services/agent-collision-lock.service';
 import { CallSignalingService } from './services/call-signaling.service';
+import { ConversationSnoozeService } from './services/conversation-snooze.service';
 import { LinkPreviewService } from './services/link-preview.service';
+import { MaskedVoipCallService } from './services/masked-voip-call.service';
+import { OmnichannelInboxQueryService } from './services/omnichannel-inbox-query.service';
+import { QuickReplyService } from './services/quick-reply.service';
+import { RealtimeChatTranslationService } from './services/realtime-chat-translation.service';
 
 @ApiTags('Chat & Real-Time Communication')
 @Controller('chat')
@@ -79,6 +98,14 @@ export class ChatController {
     private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly linkPreviewService: LinkPreviewService,
     private readonly callSignalingService: CallSignalingService,
+    private readonly granularIamService: GranularIamService,
+    private readonly omnichannelInboxQueryService: OmnichannelInboxQueryService,
+    private readonly agentCollisionLockService: AgentCollisionLockService,
+    private readonly conversationSnoozeService: ConversationSnoozeService,
+    private readonly quickReplyService: QuickReplyService,
+    private readonly accountabilityTimelineService: AccountabilityTimelineService,
+    private readonly maskedVoipCallService: MaskedVoipCallService,
+    private readonly realtimeChatTranslationService: RealtimeChatTranslationService,
   ) {}
 
   @ApiOperation({
@@ -874,6 +901,379 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
       data: results.map((r) => r.message),
+    };
+  }
+
+  // ============================================================================
+  // SPRINT 2 — OMNICHANNEL INBOX 18-CRITERIA FILTER, INTERNAL NOTE, SNOOZE,
+  // COLLISION LOCK, QUICK REPLIES, MASKED VOIP & REAL-TIME TRANSLATION
+  // ============================================================================
+
+  @ApiOperation({
+    summary:
+      'F03.1 & F03.2: Truy vấn Hộp thư bán hàng đa kênh 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT',
+  })
+  @Post('omnichannel/query')
+  @HttpCode(HttpStatus.OK)
+  async queryOmnichannelInbox(@Req() req, @Body() dto: OmnichannelInboxFilterDto) {
+    const memberCtx = await this.granularIamService.getEffectiveMemberContext(
+      dto.shopId,
+      req.user.id,
+    );
+    const data = await this.omnichannelInboxQueryService.queryMergedConversations(dto, memberCtx);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.5: Tạo Ghi chú nội bộ (Alt+N) & @mention đồng nghiệp (Không gửi ra Facebook/Zalo bên ngoài)',
+  })
+  @Post('conversations/:id/internal-note')
+  @HttpCode(HttpStatus.CREATED)
+  async createInternalNote(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: CreateInternalNoteDto,
+  ) {
+    const { message, recipientIds } = await this.chatService.createInternalNote({
+      senderId: req.user.id,
+      conversationId,
+      content: dto.content,
+      mentionedUserIds: dto.mentionedUserIds,
+      replyToMessageId: dto.replyToMessageId,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+      message,
+    );
+
+    recipientIds.forEach((uid) => {
+      if (uid !== req.user.id) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+          message,
+        );
+      }
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: message,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.6: Đặt lịch hẹn nhắc chăm sóc lại (Snooze Conversation)',
+  })
+  @Post('conversations/:id/snooze')
+  @HttpCode(HttpStatus.OK)
+  async snoozeConversation(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: SnoozeConversationDto,
+  ) {
+    const data = await this.conversationSnoozeService.snoozeConversation({
+      conversationId,
+      actorUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.6: Hủy hẹn giờ Snooze để đưa hội thoại về danh sách chờ trả lời ngay',
+  })
+  @Delete('conversations/:id/snooze')
+  @HttpCode(HttpStatus.OK)
+  async cancelSnooze(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.conversationSnoozeService.cancelSnooze({
+      conversationId,
+      actorUserId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.8 & F03.9: Chuyển giao hội thoại cho đồng nghiệp & ghi nhận Dòng thời gian Trách nhiệm',
+  })
+  @Post('conversations/:id/transfer')
+  @HttpCode(HttpStatus.OK)
+  async transferConversation(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: TransferConversationDto,
+  ) {
+    const data = await this.accountabilityTimelineService.transferConversation({
+      conversationId,
+      actorUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Kiểm tra trạng thái Khóa chống đụng độ nhân viên (Collision Lock)',
+  })
+  @Get('conversations/:id/collision-lock')
+  @HttpCode(HttpStatus.OK)
+  async getCollisionLock(@Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.getLockStatus(conversationId);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Giữ hoặc gia hạn Khóa chống đụng độ nhân viên (Heartbeat 30s)',
+  })
+  @Post('conversations/:id/collision-lock')
+  @HttpCode(HttpStatus.OK)
+  async acquireCollisionLock(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.acquireOrHeartbeatLock({
+      conversationId,
+      userId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Giải phóng Khóa chống đụng độ khi nhân viên rời hội thoại',
+  })
+  @Delete('conversations/:id/collision-lock')
+  @HttpCode(HttpStatus.OK)
+  async releaseCollisionLock(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.releaseLock({
+      conversationId,
+      userId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.7: Quản lý / Trưởng ca chiếm quyền xử lý cuộc hội thoại đang bị khóa (Force Takeover)',
+  })
+  @Post('conversations/:id/collision-lock/takeover')
+  @HttpCode(HttpStatus.OK)
+  async forceTakeoverCollisionLock(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body('shopId') shopId: string,
+  ) {
+    const data = await this.agentCollisionLockService.forceTakeOverLock({
+      shopId,
+      conversationId,
+      requesterUserId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Khởi tạo cuộc gọi chốt đơn ẩn SĐT (Masked WebRTC-to-SIP VoIP — Sale chỉ thấy 098***678)',
+  })
+  @Post('conversations/:id/masked-call')
+  @HttpCode(HttpStatus.CREATED)
+  async initiateMaskedVoipCall(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: InitiateMaskedVoipCallDto,
+  ) {
+    const data = await this.maskedVoipCallService.initiateMaskedPstnCall({
+      conversationId,
+      agentUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Kết thúc cuộc gọi VoIP ẩn SĐT & đính kèm bong bóng ghi âm cuộc gọi (AudioWaveformPlayer)',
+  })
+  @Post('conversations/:id/masked-call/finalize')
+  @HttpCode(HttpStatus.OK)
+  async finalizeMaskedVoipCall(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: FinalizeMaskedVoipCallDto,
+  ) {
+    const data = await this.maskedVoipCallService.finalizeCallAndAttachRecordingBubble({
+      conversationId,
+      agentUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.11: Dịch tự động đa ngôn ngữ hai chiều trong khung chat',
+  })
+  @Post('translate')
+  @HttpCode(HttpStatus.OK)
+  async translateChatMessage(@Body() dto: TranslateChatMessageDto) {
+    const data = await this.realtimeChatTranslationService.translateMessageOrDraft(dto);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Lấy danh sách thư viện mẫu câu trả lời nhanh (/shortcut) của cửa hàng',
+  })
+  @Get('quick-replies/:shopId')
+  @HttpCode(HttpStatus.OK)
+  async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
+    const data = await this.quickReplyService.listTemplates(shopId, search);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Tạo mẫu câu trả lời nhanh (/shortcut) kèm biến động & thẻ sản phẩm',
+  })
+  @Post('quick-replies/:shopId')
+  @HttpCode(HttpStatus.CREATED)
+  async createQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateQuickReplyTemplateDto,
+  ) {
+    const data = await this.quickReplyService.createTemplate(shopId, dto);
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Cập nhật mẫu câu trả lời nhanh (/shortcut)',
+  })
+  @Patch('quick-replies/:shopId/:templateId')
+  @HttpCode(HttpStatus.OK)
+  async updateQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+    @Body() dto: UpdateQuickReplyTemplateDto,
+  ) {
+    const data = await this.quickReplyService.updateTemplate(shopId, templateId, dto);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Xóa mẫu câu trả lời nhanh (/shortcut)',
+  })
+  @Delete('quick-replies/:shopId/:templateId')
+  @HttpCode(HttpStatus.OK)
+  async deleteQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+  ) {
+    const data = await this.quickReplyService.deleteTemplate(shopId, templateId);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Nội suy biến động ({{customer_name}}, {{salutation}}, {{agent_name}}, {{shop_name}})',
+  })
+  @Post('quick-replies/:shopId/:templateId/interpolate')
+  @HttpCode(HttpStatus.OK)
+  async interpolateQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+    @Body()
+    body: {
+      customerName?: string;
+      salutation?: string;
+      agentName?: string;
+      trackingLink?: string;
+    },
+  ) {
+    const data = await this.quickReplyService.interpolateTemplate({
+      shopId,
+      templateId,
+      ...body,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
     };
   }
 }

@@ -37,6 +37,7 @@ import { ClosePollDto, SendMessageDto, VotePollDto } from 'src/dto/chat/chat.dto
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
 import { ChatService } from './chat.service';
+import { AgentCollisionLockService } from './services/agent-collision-lock.service';
 import { CallSignalingService } from './services/call-signaling.service';
 
 @AppGateway(SOCKET_CONFIG.namespaces.CHAT)
@@ -48,6 +49,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     jwtService: JwtService,
     private readonly chatService: ChatService,
     private readonly callSignalingService: CallSignalingService,
+    private readonly agentCollisionLockService: AgentCollisionLockService,
   ) {
     super(
       socketStateService,
@@ -190,10 +192,18 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     }
 
     await client.join(`conversation:${conversationId}`);
+    const collisionLock = await this.agentCollisionLockService
+      .acquireOrHeartbeatLock({
+        conversationId,
+        userId,
+      })
+      .catch(() => null);
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data: { collisionLock },
     };
   }
 
@@ -202,6 +212,12 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     @MessageBody('conversationId') conversationId: string,
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    const userId = client.data?.user?.id;
+    if (userId && conversationId) {
+      await this.agentCollisionLockService
+        .releaseLock({ conversationId, userId })
+        .catch(() => undefined);
+    }
     await client.leave(`conversation:${conversationId}`);
     return {
       status: HttpStatus.OK,

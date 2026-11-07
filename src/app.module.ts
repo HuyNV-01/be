@@ -1,4 +1,3 @@
-// File: src/app.module.ts
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
@@ -25,6 +24,7 @@ import { MailModule } from './modules/mail/mail.module';
 import { MediaModule } from './modules/media/media.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { StorageModule } from './modules/storage/storage.module';
+import { TagsModule } from './modules/tags/tags.module';
 import { UserModule } from './modules/user/user.module';
 import { parseExpiresIn } from './utils';
 
@@ -60,6 +60,7 @@ import { parseExpiresIn } from './utils';
     MediaModule,
     IamModule,
     ChannelsModule,
+    TagsModule,
     AuthModule,
     UserModule,
     MailModule,

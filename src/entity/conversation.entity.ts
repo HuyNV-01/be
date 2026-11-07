@@ -10,10 +10,39 @@ import { BaseModel } from './base-model';
 import { ConversationParticipantEntity } from './conversation-participant.entity';
 import { MessageEntity } from './message.entity';
 
+export type ConversationInteractionType = 'INBOX' | 'COMMENT' | 'LIVESTREAM' | 'MARKETPLACE';
+
+export interface AccountabilityMilestoneItem {
+  eventCode:
+    | 'LEAD_INBOUND'
+    | 'ASSIGNED_AGENT'
+    | 'FIRST_SEEN'
+    | 'FIRST_AGENT_REPLY_FRT'
+    | 'INTERNAL_NOTE_ADDED'
+    | 'CONVERSATION_TRANSFERRED'
+    | 'CONVERSATION_SNOOZED'
+    | 'CONVERSATION_UNSNOOZED'
+    | 'MASKED_CALL_INITIATED'
+    | 'MASKED_CALL_COMPLETED'
+    | 'PHONE_COLLECTED'
+    | 'ORDER_CREATED';
+  actorUserId?: string | null;
+  actorName?: string | null;
+  targetUserId?: string | null;
+  targetUserName?: string | null;
+  note?: string | null;
+  elapsedSecondsFromInbound?: number | null;
+  timestamp: string;
+}
+
 @Entity('conversations')
 @Index(['lastMessageAt'])
 @Index('idx_conv_shop_support_sla', ['shopId', 'supportStatus', 'slaDeadlineAt'])
+@Index('idx_conv_shop_status_last_msg', ['shopId', 'supportStatus', 'lastMessageAt'])
 @Index('idx_conv_shop_channel_assigned', ['shopId', 'channelIntegrationId', 'assignedAgentId'])
+@Index('idx_conv_shop_channel_ext', ['shopId', 'channelIntegrationId', 'externalThreadId'])
+@Index('idx_conv_shop_ghosted', ['shopId', 'isGhostedByAgent', 'supportStatus'])
+@Index('idx_conv_shop_snoozed', ['shopId', 'supportStatus', 'snoozedUntilAt'])
 export class ConversationEntity extends BaseModel {
   @Column({
     type: 'enum',
@@ -79,6 +108,14 @@ export class ConversationEntity extends BaseModel {
   })
   externalThreadId: string | null;
 
+  @Column({
+    name: 'interaction_type',
+    type: 'enum',
+    enum: ['INBOX', 'COMMENT', 'LIVESTREAM', 'MARKETPLACE'],
+    default: 'INBOX',
+  })
+  interactionType: ConversationInteractionType;
+
   @Column({ name: 'customer_id', type: 'varchar', length: 36, nullable: true, default: null })
   customerId: string | null;
 
@@ -110,6 +147,9 @@ export class ConversationEntity extends BaseModel {
   @Column({ name: 'sla_deadline_at', type: 'datetime', nullable: true, default: null })
   slaDeadlineAt: Date | null;
 
+  @Column({ name: 'is_sla_breached', type: 'boolean', default: false })
+  isSlaBreached: boolean;
+
   @Column({ name: 'last_customer_message_at', type: 'datetime', nullable: true, default: null })
   lastCustomerMessageAt: Date | null;
 
@@ -127,6 +167,9 @@ export class ConversationEntity extends BaseModel {
 
   @Column({ name: 'first_seen_at', type: 'datetime', nullable: true, default: null })
   firstSeenAt: Date | null;
+
+  @Column({ name: 'is_ghosted_by_agent', type: 'boolean', default: false })
+  isGhostedByAgent: boolean;
 
   @Column({ name: 'has_phone_collected', type: 'boolean', default: false })
   hasPhoneCollected: boolean;
@@ -148,6 +191,33 @@ export class ConversationEntity extends BaseModel {
 
   @Column({ name: 'snoozed_until_at', type: 'datetime', nullable: true, default: null })
   snoozedUntilAt: Date | null;
+
+  @Column({ name: 'snooze_note', type: 'varchar', length: 500, nullable: true, default: null })
+  snoozeNote: string | null;
+
+  @Column({
+    name: 'snoozed_by_user_id',
+    type: 'varchar',
+    length: 36,
+    nullable: true,
+    default: null,
+  })
+  snoozedByUserId: string | null;
+
+  @Column({ name: 'accountability_timeline_json', type: 'json', nullable: true, default: null })
+  accountabilityTimelineJson: AccountabilityMilestoneItem[] | null;
+
+  @Column({
+    name: 'customer_preferred_lang',
+    type: 'varchar',
+    length: 16,
+    nullable: true,
+    default: null,
+  })
+  customerPreferredLang: string | null;
+
+  @Column({ name: 'auto_translate_enabled', type: 'boolean', default: false })
+  autoTranslateEnabled: boolean;
 
   @OneToMany(() => ConversationParticipantEntity, (p) => p.conversation)
   participants: ConversationParticipantEntity[];
