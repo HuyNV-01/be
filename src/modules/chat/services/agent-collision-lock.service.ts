@@ -36,6 +36,9 @@ export class AgentCollisionLockService {
     return `${this.LOCK_PREFIX}${conversationId}`;
   }
 
+  /**
+   * F03.7 & T03: Giữ hoặc gia hạn khóa chống đụng độ nhân viên trên cuộc hội thoại (TTL 35s)
+   */
   async acquireOrHeartbeatLock(params: { conversationId: string; userId: string }): Promise<{
     isLockedByOther: boolean;
     lock: ActiveCollisionLockPayload;
@@ -123,6 +126,9 @@ export class AgentCollisionLockService {
     return { released: true };
   }
 
+  /**
+   * F03.7: Cho phép Quản lý / Trưởng ca có quyền INBOX_COLLISION_FORCE_TAKEOVER chiếm quyền xử lý
+   */
   async forceTakeOverLock(params: {
     shopId: string;
     conversationId: string;

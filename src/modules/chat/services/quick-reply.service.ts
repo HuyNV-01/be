@@ -31,7 +31,10 @@ export class QuickReplyService {
   }
 
   async ensureDefaultTemplates(shopId: string): Promise<QuickReplyTemplateEntity[]> {
-    const count = await this.quickReplyRepo.count({ where: { shopId } });
+    const count = await this.quickReplyRepo.count({
+      where: { shopId },
+      withDeleted: true,
+    });
     if (count > 0) {
       return this.quickReplyRepo.find({
         where: { shopId, isActive: true },
@@ -120,9 +123,27 @@ export class QuickReplyService {
 
     const existing = await this.quickReplyRepo.findOne({
       where: { shopId, shortcut },
+      withDeleted: true,
     });
-    if (existing) {
+
+    if (existing && existing.isActive && !existing.deletedAt) {
       throw new BadRequestException('QUICK_REPLY_SHORTCUT_ALREADY_EXISTS');
+    }
+
+    // Nếu mẫu câu cùng shortcut từng bị xóa mềm trước đó, khôi phục và cập nhật lại để tránh lỗi duplicate key
+    if (existing) {
+      if (existing.deletedAt) {
+        await this.quickReplyRepo.restore(existing.id);
+      }
+      existing.deletedAt = null;
+      existing.deletedBy = null;
+      existing.isActive = true;
+      existing.title = dto.title.trim();
+      existing.category = dto.category || existing.category || 'GENERAL';
+      existing.contentTemplate = dto.contentTemplate.trim();
+      existing.attachmentsJson = dto.attachmentsJson || [];
+      existing.productCardsJson = dto.productCardsJson || [];
+      return this.quickReplyRepo.save(existing);
     }
 
     const template = this.quickReplyRepo.create({
@@ -152,7 +173,20 @@ export class QuickReplyService {
     }
 
     if (dto.shortcut !== undefined) {
-      template.shortcut = this.normalizeShortcut(dto.shortcut);
+      const nextShortcut = this.normalizeShortcut(dto.shortcut);
+      if (nextShortcut && nextShortcut !== template.shortcut) {
+        const collision = await this.quickReplyRepo.findOne({
+          where: { shopId, shortcut: nextShortcut },
+          withDeleted: true,
+        });
+        if (collision && collision.id !== template.id) {
+          if (collision.isActive && !collision.deletedAt) {
+            throw new BadRequestException('QUICK_REPLY_SHORTCUT_ALREADY_EXISTS');
+          }
+          await this.quickReplyRepo.delete(collision.id);
+        }
+        template.shortcut = nextShortcut;
+      }
     }
     if (dto.title !== undefined) template.title = dto.title.trim();
     if (dto.category !== undefined) template.category = dto.category;

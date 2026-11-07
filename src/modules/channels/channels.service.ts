@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import * as crypto from 'crypto';
@@ -63,6 +64,7 @@ export class ChannelsService {
     private readonly marketplaceBridge: MarketplaceBridgeService,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private async broadcastChannelEventToShop(
@@ -97,6 +99,7 @@ export class ChannelsService {
     for (const userId of uniqueIds) {
       const existing = await this.participantRepo.findOne({
         where: { conversationId, userId },
+        withDeleted: true,
       });
       if (!existing) {
         const part = this.participantRepo.create({
@@ -108,12 +111,22 @@ export class ChannelsService {
           joinedAt: now,
         });
         await this.participantRepo.save(part).catch(() => undefined);
-      } else if (existing.isHidden) {
-        await this.participantRepo.update(existing.id, { isHidden: false }).catch(() => undefined);
+      } else if (existing.deletedAt || existing.isHidden) {
+        if (existing.deletedAt) {
+          await this.participantRepo.restore(existing.id).catch(() => undefined);
+        }
+        existing.deletedAt = null;
+        existing.deletedBy = null;
+        existing.isHidden = false;
+        await this.participantRepo.save(existing).catch(() => undefined);
       }
     }
   }
 
+  /**
+   * Kết nối mới hoặc khôi phục/cập nhật kênh đã từng ngắt kết nối (withDeleted: true)
+   * Tránh triệt để lỗi ER_DUP_ENTRY trên unique index uq_channel_ext_page (shopId, channelType, externalPageId)
+   */
   async connectOrUpdateChannelOAuth(
     shopId: string,
     dto: ConnectChannelOAuthDto,
@@ -140,13 +153,30 @@ export class ChannelsService {
     const rawRefreshToken =
       dto.refreshToken?.trim() || (dto.oauthCode ? `oauth2_rft_${dto.oauthCode.trim()}` : null);
 
+    // Quan trọng: thêm withDeleted: true để tìm cả kênh đã từng bị softRemove khi ngắt kết nối trước đó
     let channel = await this.channelRepo.findOne({
       where: {
         shopId,
         channelType: dto.channelType,
         externalPageId: resolvedExternalPageId,
       },
+      withDeleted: true,
     });
+
+    if (!channel) {
+      const deletedByShortCode = await this.channelRepo.findOne({
+        where: {
+          shopId,
+          channelType: dto.channelType,
+          pageShortCode: resolvedShortCode,
+          isActive: false,
+        },
+        withDeleted: true,
+      });
+      if (deletedByShortCode && deletedByShortCode.deletedAt) {
+        channel = deletedByShortCode;
+      }
+    }
 
     const accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
       rawAccessToken,
@@ -172,6 +202,13 @@ export class ChannelsService {
       : new Date(Date.now() + 60 * 86400 * 1000);
 
     if (channel) {
+      // Khôi phục bản ghi ở tầng DB trước khi save() để TypeORM thực thi UPDATE thay vì INSERT
+      if (channel.deletedAt) {
+        await this.channelRepo.restore(channel.id);
+      }
+      channel.deletedAt = null;
+      channel.deletedBy = null;
+      channel.externalPageId = resolvedExternalPageId;
       channel.pageName = resolvedPageName;
       channel.pageShortCode = resolvedShortCode;
       channel.externalShopId = dto.externalShopId || channel.externalShopId;
@@ -241,7 +278,7 @@ export class ChannelsService {
           content: `Kênh ${saved.pageShortCode} (${saved.channelType}) vừa được tích hợp vào cửa hàng ${shop.name}.`,
           resourceType: NotificationResourceTypeEnum.CHANNEL_INTEGRATION,
           resourceId: saved.id,
-          dedupeKey: `channel_connected:${saved.id}`,
+          dedupeKey: `channel_connected:${saved.id}:${Date.now()}`,
           metadata: {
             actionUrl: '/settings/channels',
             titleKey: 'i18n.channelConnected.title',
@@ -344,6 +381,8 @@ export class ChannelsService {
     if (!channel) {
       throw new NotFoundException('CHANNEL_INTEGRATION_NOT_FOUND');
     }
+    channel.isActive = false;
+    await this.channelRepo.save(channel);
     await this.channelRepo.softRemove(channel);
 
     await this.broadcastChannelEventToShop(
@@ -676,12 +715,17 @@ export class ChannelsService {
           : 'Khách hàng vừa gửi tin nhắn mới'),
     );
 
+    const hasPhoneMatch = /(?:\+84|84|0)(?:3|5|7|8|9)\d{8}\b/.test(
+      messageText.replace(/[\s.-]/g, ''),
+    );
+
     let conversation = await this.conversationRepo.findOne({
       where: {
         shopId: channel.shopId,
         channelIntegrationId: channel.id,
         externalThreadId,
       },
+      withDeleted: true,
     });
 
     const now = new Date();
@@ -698,18 +742,36 @@ export class ChannelsService {
         lastMessageAt: now,
         lastCustomerMessageAt: now,
         supportStatus: ConversationSupportStatusEnum.WAITING_AGENT_REPLY,
+        firstSeenAt: null,
+        firstSeenByAgentId: null,
+        isGhostedByAgent: false,
+        hasPhoneCollected: hasPhoneMatch,
         sourceAdId: payload.adId ? String(payload.adId) : null,
         sourcePostId: payload.postId ? String(payload.postId) : null,
         ctwaClickId: payload.ctwaClid ? String(payload.ctwaClid) : null,
         activeTagIdsJson: [],
       });
     } else {
+      if (conversation.deletedAt) {
+        await this.conversationRepo.restore(conversation.id);
+      }
+      conversation.deletedAt = null;
+      conversation.deletedBy = null;
       conversation.lastMessage = messageText;
       conversation.lastMessageAt = now;
       conversation.lastCustomerMessageAt = now;
       conversation.supportStatus = ConversationSupportStatusEnum.WAITING_AGENT_REPLY;
+      conversation.firstSeenAt = null;
+      conversation.firstSeenByAgentId = null;
+      conversation.isGhostedByAgent = false;
+      if (hasPhoneMatch) {
+        conversation.hasPhoneCollected = true;
+      }
       if (payload.adId) {
         conversation.sourceAdId = String(payload.adId);
+      }
+      if (payload.postId) {
+        conversation.sourcePostId = String(payload.postId);
       }
       if (payload.ctwaClid) {
         conversation.ctwaClickId = String(payload.ctwaClid);
@@ -789,6 +851,20 @@ export class ChannelsService {
       updatedAt: now,
     });
     const savedMsg = await this.messageRepo.save(inboundMessage);
+
+    // Kích hoạt AutoTagRuleEngine (F02.5) tự động gắn Tag theo từ khóa hoặc khi trích xuất được SĐT
+    this.eventEmitter.emit('chat.message.inbound', {
+      shopId: channel.shopId,
+      conversationId: savedConversation.id,
+      messageContent: messageText,
+    });
+    if (hasPhoneMatch) {
+      this.eventEmitter.emit('ner.phone.extracted', {
+        shopId: channel.shopId,
+        conversationId: savedConversation.id,
+        messageContent: messageText,
+      });
+    }
 
     for (const uid of new Set(participantUserIds)) {
       this.realtimeEmitter.emitToUser(

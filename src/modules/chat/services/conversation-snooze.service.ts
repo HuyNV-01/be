@@ -22,6 +22,9 @@ export class ConversationSnoozeService {
     private readonly realtimeEmitter: RealtimeEmitterService,
   ) {}
 
+  /**
+   * F03.6: Đặt lịch hẹn nhắc chăm sóc lại (Snooze Conversation)
+   */
   async snoozeConversation(params: {
     conversationId: string;
     actorUserId: string;
@@ -95,6 +98,9 @@ export class ConversationSnoozeService {
     return saved;
   }
 
+  /**
+   * Cronjob chạy mỗi 30 giây để đánh thức các cuộc hội thoại đã đến giờ hẹn chăm sóc
+   */
   @Cron(CronExpression.EVERY_30_SECONDS)
   async wakeUpDueSnoozedConversations(): Promise<void> {
     try {

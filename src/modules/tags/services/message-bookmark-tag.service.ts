@@ -72,6 +72,7 @@ export class MessageBookmarkTagService {
         messageId: params.messageId,
         tagId: params.tagId,
       },
+      withDeleted: true,
     });
 
     const currentTagIds = new Set<string>(
@@ -81,8 +82,8 @@ export class MessageBookmarkTagService {
     let action: 'ADDED' | 'REMOVED' = 'ADDED';
     let savedAssignment: MessageTagAssignmentEntity | undefined;
 
-    if (existing) {
-      await this.assignmentRepo.remove(existing);
+    if (existing && !existing.deletedAt) {
+      await this.assignmentRepo.delete(existing.id);
       currentTagIds.delete(params.tagId);
       action = 'REMOVED';
     } else {
@@ -90,16 +91,26 @@ export class MessageBookmarkTagService {
         .decryptForConversation(message.content, params.conversationId)
         .slice(0, 480);
 
-      const newAssignment = this.assignmentRepo.create({
-        shopId: params.shopId,
-        conversationId: params.conversationId,
-        messageId: params.messageId,
-        tagId: params.tagId,
-        assignedByUserId: params.actorUserId,
-        messageSnippetPreview: decryptedSnippet || `[${message.type}]`,
-        noteText: params.noteText?.trim() || null,
-      });
-      savedAssignment = await this.assignmentRepo.save(newAssignment);
+      if (existing && existing.deletedAt) {
+        await this.assignmentRepo.restore(existing.id);
+        existing.deletedAt = null;
+        existing.deletedBy = null;
+        existing.assignedByUserId = params.actorUserId;
+        existing.messageSnippetPreview = decryptedSnippet || `[${message.type}]`;
+        existing.noteText = params.noteText?.trim() || null;
+        savedAssignment = await this.assignmentRepo.save(existing);
+      } else {
+        const newAssignment = this.assignmentRepo.create({
+          shopId: params.shopId,
+          conversationId: params.conversationId,
+          messageId: params.messageId,
+          tagId: params.tagId,
+          assignedByUserId: params.actorUserId,
+          messageSnippetPreview: decryptedSnippet || `[${message.type}]`,
+          noteText: params.noteText?.trim() || null,
+        });
+        savedAssignment = await this.assignmentRepo.save(newAssignment);
+      }
       currentTagIds.add(params.tagId);
       action = 'ADDED';
     }

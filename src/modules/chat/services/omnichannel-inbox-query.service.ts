@@ -21,6 +21,12 @@ export interface OmnichannelInboxFilterSummaryCounts {
   unconfirmedOrderCount: number;
 }
 
+export type OmnichannelMergedConversationItem = ConversationEntity & {
+  pageShortCode?: string;
+  pageName?: string;
+  channelAvatarUrl?: string | null;
+};
+
 @Injectable()
 export class OmnichannelInboxQueryService {
   constructor(
@@ -38,13 +44,7 @@ export class OmnichannelInboxQueryService {
     filter: OmnichannelInboxFilterDto,
     memberCtx: EffectiveMemberContext,
   ): Promise<{
-    items: Array<
-      ConversationEntity & {
-        pageShortCode?: string;
-        pageName?: string;
-        channelAvatarUrl?: string | null;
-      }
-    >;
+    items: OmnichannelMergedConversationItem[];
     nextCursor: string | null;
     summaryCounts: OmnichannelInboxFilterSummaryCounts;
   }> {
@@ -184,17 +184,16 @@ export class OmnichannelInboxQueryService {
       channelIds.length > 0 ? await this.channelRepo.find({ where: { id: In(channelIds) } }) : [];
     const channelMap = new Map(channels.map((ch) => [ch.id, ch]));
 
-    const items = rawItems.map((conv) => {
+    const items: OmnichannelMergedConversationItem[] = rawItems.map((conv) => {
       const ch = conv.channelIntegrationId ? channelMap.get(conv.channelIntegrationId) : undefined;
-      return {
-        ...conv,
+      return Object.assign(conv, {
         lastMessage: conv.lastMessage
           ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
           : '',
         pageShortCode: ch?.pageShortCode || conv.channelType,
         pageName: ch?.pageName || conv.channelType,
         channelAvatarUrl: ch?.avatarUrl || null,
-      };
+      });
     });
 
     const nextCursor =

@@ -24,7 +24,10 @@ export class CustomTagService {
   }
 
   async ensureDefaultShopTags(shopId: string): Promise<CustomTagEntity[]> {
-    const count = await this.customTagRepo.count({ where: { shopId } });
+    const count = await this.customTagRepo.count({
+      where: { shopId },
+      withDeleted: true,
+    });
     if (count > 0) {
       return this.customTagRepo.find({
         where: { shopId, isActive: true },
@@ -185,8 +188,10 @@ export class CustomTagService {
 
     const existing = await this.customTagRepo.findOne({
       where: { shopId, slug },
+      withDeleted: true,
     });
-    if (existing) {
+
+    if (existing && existing.isActive && !existing.deletedAt) {
       throw new BadRequestException('TAG_SLUG_ALREADY_EXISTS');
     }
 
@@ -195,6 +200,29 @@ export class CustomTagService {
         { shopId, shortcutKey: dto.shortcutKey },
         { shortcutKey: null },
       );
+    }
+
+    // Nếu Tag cùng slug đã từng bị xóa mềm (isActive = false hoặc deletedAt != null), khôi phục và cập nhật lại
+    if (existing) {
+      if (existing.deletedAt) {
+        await this.customTagRepo.restore(existing.id);
+      }
+      existing.deletedAt = null;
+      existing.deletedBy = null;
+      existing.isActive = true;
+      existing.name = dto.name.trim();
+      existing.colorHex = dto.colorHex || existing.colorHex || '#3B82F6';
+      existing.colorOklch = dto.colorOklch || existing.colorOklch || 'oklch(0.62 0.19 259)';
+      existing.category = dto.category || existing.category || TagCategoryEnum.CONSULTATION_STATUS;
+      existing.isMutuallyExclusiveGroup = Boolean(dto.isMutuallyExclusiveGroup);
+      existing.applicableScopesJson =
+        dto.applicableScopesJson && dto.applicableScopesJson.length > 0
+          ? dto.applicableScopesJson
+          : ['CONVERSATION'];
+      existing.shortcutKey = dto.shortcutKey || null;
+      existing.sortOrder = dto.sortOrder ?? existing.sortOrder ?? 10;
+      existing.autoRuleConfigJson = dto.autoRuleConfigJson || null;
+      return this.customTagRepo.save(existing);
     }
 
     const entity = this.customTagRepo.create({

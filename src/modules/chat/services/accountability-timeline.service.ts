@@ -8,7 +8,7 @@ import { TransferConversationDto } from 'src/dto/chat/omnichannel-inbox.dto';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { AccountabilityMilestoneItem, ConversationEntity } from 'src/entity/conversation.entity';
 import { UserEntity } from 'src/entity/user.entity';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 @Injectable()
 export class AccountabilityTimelineService {
@@ -40,7 +40,10 @@ export class AccountabilityTimelineService {
     const userIdsToFetch = [params.actorUserId, params.targetUserId].filter((id): id is string =>
       Boolean(id),
     );
-    const users = userIdsToFetch.length > 0 ? await this.userRepo.findByIds(userIdsToFetch) : [];
+    const users =
+      userIdsToFetch.length > 0
+        ? await this.userRepo.find({ where: { id: In(userIdsToFetch) } })
+        : [];
     const userMap = new Map(users.map((u) => [u.id, u.name || u.email]));
 
     const currentTimeline: AccountabilityMilestoneItem[] = Array.isArray(
@@ -104,6 +107,7 @@ export class AccountabilityTimelineService {
         conversationId: conv.id,
         userId: params.dto.targetAgentId,
       },
+      withDeleted: true,
     });
     if (!existingPart) {
       await this.participantRepo.save(
@@ -116,6 +120,14 @@ export class AccountabilityTimelineService {
           joinedAt: new Date(),
         }),
       );
+    } else if (existingPart.deletedAt || existingPart.isHidden) {
+      if (existingPart.deletedAt) {
+        await this.participantRepo.restore(existingPart.id);
+      }
+      existingPart.deletedAt = null;
+      existingPart.deletedBy = null;
+      existingPart.isHidden = false;
+      await this.participantRepo.save(existingPart);
     }
 
     const timeline = await this.appendMilestone({
