@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
-import { ConversationSupportStatusEnum, DataScopeEnum } from 'src/common/enum/permission.enum';
+import { ConversationSupportStatusEnum } from 'src/common/enum/permission.enum';
 import { OmnichannelInboxFilterDto } from 'src/dto/chat/omnichannel-inbox.dto';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { DataScopeQueryHelper } from 'src/modules/iam/helpers/data-scope-query.helper';
 import { EffectiveMemberContext } from 'src/modules/iam/iam.service';
 import { In, Repository } from 'typeorm';
 
@@ -25,6 +26,7 @@ export type OmnichannelMergedConversationItem = ConversationEntity & {
   pageShortCode?: string;
   pageName?: string;
   channelAvatarUrl?: string | null;
+  unreadCount?: number;
 };
 
 @Injectable()
@@ -48,18 +50,10 @@ export class OmnichannelInboxQueryService {
     nextCursor: string | null;
     summaryCounts: OmnichannelInboxFilterSummaryCounts;
   }> {
-    const qb = this.conversationRepo
-      .createQueryBuilder('conv')
-      .where('conv.shop_id = :shopId', { shopId: filter.shopId });
+    const qb = this.conversationRepo.createQueryBuilder('conv');
 
-    // Áp dụng Data Scope 4 chiều (4D IAM)
-    if (memberCtx.dataScope === DataScopeEnum.ASSIGNED_ONLY) {
-      qb.andWhere('conv.assigned_agent_id = :me', { me: memberCtx.userId });
-    } else if (memberCtx.dataScope === DataScopeEnum.ASSIGNED_PLUS_POOL) {
-      qb.andWhere('(conv.assigned_agent_id = :me OR conv.assigned_agent_id IS NULL)', {
-        me: memberCtx.userId,
-      });
-    }
+    // Áp dụng Data Scope 4 chiều (4D IAM: ALL_SHOP, TEAM_SHIFT, ASSIGNED_PLUS_POOL, ASSIGNED_ONLY)
+    DataScopeQueryHelper.applyAgentDataScope(qb, 'conv', memberCtx);
 
     const allowedChannels =
       memberCtx.allowedChannelIds.length > 0 ? memberCtx.allowedChannelIds : undefined;
@@ -68,10 +62,14 @@ export class OmnichannelInboxQueryService {
         ? filter.channelIds.filter((id) => !allowedChannels || allowedChannels.includes(id))
         : allowedChannels;
 
-    if (requestedChannels && requestedChannels.length > 0) {
-      qb.andWhere('conv.channel_integration_id IN (:...channelIds)', {
-        channelIds: requestedChannels,
-      });
+    if (filter.channelIds && filter.channelIds.length > 0) {
+      if (requestedChannels && requestedChannels.length > 0) {
+        qb.andWhere('conv.channel_integration_id IN (:...channelIds)', {
+          channelIds: requestedChannels,
+        });
+      } else {
+        qb.andWhere('1 = 0');
+      }
     }
 
     // 18 Tiêu chí lọc chuyên sâu
@@ -171,7 +169,7 @@ export class OmnichannelInboxQueryService {
     const takeLimit = Math.min(Math.max(filter.limit || 30, 5), 100);
     const [rawItems, summaryCounts] = await Promise.all([
       qb.orderBy('conv.lastMessageAt', 'DESC').take(takeLimit).getMany(),
-      this.computeSummaryCounts(filter.shopId, memberCtx, requestedChannels),
+      this.computeSummaryCounts(memberCtx, requestedChannels),
     ]);
 
     const channelIds = Array.from(
@@ -193,6 +191,11 @@ export class OmnichannelInboxQueryService {
         pageShortCode: ch?.pageShortCode || conv.channelType,
         pageName: ch?.pageName || conv.channelType,
         channelAvatarUrl: ch?.avatarUrl || null,
+        unreadCount:
+          conv.supportStatus === ConversationSupportStatusEnum.WAITING_AGENT_REPLY &&
+          !conv.firstSeenAt
+            ? 1
+            : 0,
       });
     });
 
@@ -205,21 +208,11 @@ export class OmnichannelInboxQueryService {
   }
 
   private async computeSummaryCounts(
-    shopId: string,
     memberCtx: EffectiveMemberContext,
     channelIds?: string[],
   ): Promise<OmnichannelInboxFilterSummaryCounts> {
-    const baseQb = this.conversationRepo
-      .createQueryBuilder('c')
-      .where('c.shop_id = :shopId', { shopId });
-
-    if (memberCtx.dataScope === DataScopeEnum.ASSIGNED_ONLY) {
-      baseQb.andWhere('c.assigned_agent_id = :me', { me: memberCtx.userId });
-    } else if (memberCtx.dataScope === DataScopeEnum.ASSIGNED_PLUS_POOL) {
-      baseQb.andWhere('(c.assigned_agent_id = :me OR c.assigned_agent_id IS NULL)', {
-        me: memberCtx.userId,
-      });
-    }
+    const baseQb = this.conversationRepo.createQueryBuilder('c');
+    DataScopeQueryHelper.applyAgentDataScope(baseQb, 'c', memberCtx);
 
     if (channelIds && channelIds.length > 0) {
       baseQb.andWhere('c.channel_integration_id IN (:...channelIds)', { channelIds });

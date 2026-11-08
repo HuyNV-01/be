@@ -499,11 +499,20 @@ export class GranularIamService {
       dto.orderCloserWeight !== undefined ||
       dto.deductOnReturnedOrder !== undefined
     ) {
+      const rawLeadWeight = Number(
+        dto.leadCollectorWeight ?? shop.commissionSplitConfigJson?.leadCollectorWeight ?? 0.4,
+      );
+      const rawCloserWeight = Number(
+        dto.orderCloserWeight ?? shop.commissionSplitConfigJson?.orderCloserWeight ?? 0.6,
+      );
+      const weightSum = rawLeadWeight + rawCloserWeight;
+      const normalizedLeadWeight =
+        weightSum > 0 ? Number((rawLeadWeight / weightSum).toFixed(2)) : 0.4;
+      const normalizedCloserWeight = Number((1 - normalizedLeadWeight).toFixed(2));
+
       shop.commissionSplitConfigJson = {
-        leadCollectorWeight:
-          dto.leadCollectorWeight ?? shop.commissionSplitConfigJson?.leadCollectorWeight ?? 0.4,
-        orderCloserWeight:
-          dto.orderCloserWeight ?? shop.commissionSplitConfigJson?.orderCloserWeight ?? 0.6,
+        leadCollectorWeight: normalizedLeadWeight,
+        orderCloserWeight: normalizedCloserWeight,
         deductOnReturnedOrder:
           dto.deductOnReturnedOrder ??
           shop.commissionSplitConfigJson?.deductOnReturnedOrder ??

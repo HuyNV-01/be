@@ -18,6 +18,8 @@ interface ParsedMigrationFile {
   className: string | null;
 }
 
+const PARTITIONED_TABLES = new Set(['messages', 'call_participants', 'channel_webhook_logs']);
+
 export class SmartMigrationEngine {
   private readonly migrationsDir: string;
   private readonly maxKeepMigrations: number;
@@ -54,16 +56,14 @@ export class SmartMigrationEngine {
       );
       const sqlInMemory = await this.ds.driver.createSchemaBuilder().log();
 
-      if (sqlInMemory.upQueries.length === 0) {
+      const safeUpQueries = this.transformDestructiveQueriesToSafeModify(sqlInMemory.upQueries);
+      const safeDownQueries = this.transformDestructiveQueriesToSafeModify(sqlInMemory.downQueries);
+
+      if (safeUpQueries.length === 0) {
         console.log(
           '   ✨ Database schema is 100% up-to-date with all Entities. No new migration needed.',
         );
       } else {
-        const safeUpQueries = this.transformDestructiveQueriesToSafeModify(sqlInMemory.upQueries);
-        const safeDownQueries = this.transformDestructiveQueriesToSafeModify(
-          sqlInMemory.downQueries,
-        );
-
         console.log(
           `   🔍 Detected ${sqlInMemory.upQueries.length} raw queries -> Optimized to ${safeUpQueries.length} zero-data-loss queries.`,
         );
@@ -99,7 +99,7 @@ export class SmartMigrationEngine {
 
       console.log('\n🔹 [Step 4/5] Synchronizing and normalizing legacy data into new fields...');
       const evolutionService = new DatabaseEvolutionService(this.ds);
-      await evolutionService.onApplicationBootstrap();
+      await evolutionService.onModuleInit();
       console.log('   ✅ Legacy data synchronization completed.');
 
       console.log(
@@ -115,6 +115,22 @@ export class SmartMigrationEngine {
         await this.ds.destroy();
       }
     }
+  }
+
+  private isPartitionIncompatibleAlter(sql: string): boolean {
+    const trimmed = sql.trim();
+    const alterTableMatch = /^ALTER TABLE `([^`]+)`\s+(.+)$/i.exec(trimmed);
+    if (!alterTableMatch) return false;
+    const [, tableName, actionSql] = alterTableMatch;
+    if (!PARTITIONED_TABLES.has(tableName.toLowerCase())) return false;
+
+    if (/DROP PRIMARY KEY/i.test(actionSql) || /ADD PRIMARY KEY/i.test(actionSql)) {
+      return true;
+    }
+    if (/ADD CONSTRAINT .+ FOREIGN KEY/i.test(actionSql) || /DROP FOREIGN KEY/i.test(actionSql)) {
+      return true;
+    }
+    return false;
   }
 
   private transformDestructiveQueriesToSafeModify(queries: Query[]): Query[] {
@@ -157,6 +173,10 @@ export class SmartMigrationEngine {
       }
 
       let sql = addIndicesToConvert.get(idx) ?? q.query;
+
+      if (this.isPartitionIncompatibleAlter(sql)) {
+        return;
+      }
 
       if (!addIndicesToConvert.has(idx)) {
         sql = this.ensureSafeDefaultOnNewNotNullColumn(sql);
@@ -209,7 +229,15 @@ export class SmartMigrationEngine {
         } catch (err: any) {
           const errno = err?.errno || err?.driverError?.errno;
 
-          if (errno === 1061 || errno === 1062 || errno === 1826 || errno === 1091) {
+          if (
+            errno === 1060 ||
+            errno === 1061 ||
+            errno === 1062 ||
+            errno === 1826 ||
+            errno === 1091 ||
+            errno === 1503 ||
+            errno === 1215
+          ) {
             if (errno === 1062) {
               console.warn(`   ⚠️ Skipped duplicate constraint warning on query: ${sql}`);
             }

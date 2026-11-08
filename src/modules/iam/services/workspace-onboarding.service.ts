@@ -77,6 +77,8 @@ export class WorkspaceOnboardingService {
     private readonly invitationRepo: Repository<ShopInvitationEntity>,
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
+    @InjectRepository(WarehouseEntity)
+    private readonly warehouseRepo: Repository<WarehouseEntity>,
     private readonly granularIamService: GranularIamService,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
@@ -1012,6 +1014,9 @@ export class WorkspaceOnboardingService {
     member.dataScope = dto.dataScope;
     member.maxDiscountPercent = dto.maxDiscountPercent;
     member.unmaskPhoneHourlyLimit = dto.unmaskPhoneHourlyLimit;
+    if (dto.teamCode !== undefined) {
+      member.teamCode = dto.teamCode.trim() || null;
+    }
     if (dto.maxConcurrentChats !== undefined) {
       member.maxConcurrentChats = dto.maxConcurrentChats;
     }
@@ -1265,8 +1270,9 @@ export class WorkspaceOnboardingService {
     shop: ShopWorkspaceEntity | null;
     members: ShopMemberEntity[];
     invitations: ShopInvitationEntity[];
+    warehouses: WarehouseEntity[];
   }> {
-    const [shop, members, invitations] = await Promise.all([
+    const [shop, members, invitations, warehouses] = await Promise.all([
       this.shopRepo.findOne({ where: { id: shopId } }),
       this.memberRepo.find({
         where: { shopId },
@@ -1277,8 +1283,12 @@ export class WorkspaceOnboardingService {
         where: { shopId },
         order: { createdAt: 'DESC' },
       }),
+      this.warehouseRepo.find({
+        where: { shopId, isActive: true },
+        order: { priorityOrder: 'ASC' },
+      }),
     ]);
 
-    return { shop, members, invitations };
+    return { shop, members, invitations, warehouses };
   }
 }

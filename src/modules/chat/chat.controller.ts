@@ -30,6 +30,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
+import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { FileValidators } from 'src/common/pipes/file-validation.pipe';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
@@ -916,9 +917,10 @@ export class ChatController {
   @Post('omnichannel/query')
   @HttpCode(HttpStatus.OK)
   async queryOmnichannelInbox(@Req() req, @Body() dto: OmnichannelInboxFilterDto) {
-    const memberCtx = await this.granularIamService.getEffectiveMemberContext(
+    const memberCtx = await this.granularIamService.assertHasPermission(
       dto.shopId,
       req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
     );
     const data = await this.omnichannelInboxQueryService.queryMergedConversations(dto, memberCtx);
     return {
@@ -984,6 +986,11 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: SnoozeConversationDto,
   ) {
+    await this.chatService.assertShopConversationPermission(
+      conversationId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE,
+    );
     const data = await this.conversationSnoozeService.snoozeConversation({
       conversationId,
       actorUserId: req.user.id,
@@ -1003,6 +1010,11 @@ export class ChatController {
   @Delete('conversations/:id/snooze')
   @HttpCode(HttpStatus.OK)
   async cancelSnooze(@Req() req, @Param('id') conversationId: string) {
+    await this.chatService.assertShopConversationPermission(
+      conversationId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE,
+    );
     const data = await this.conversationSnoozeService.cancelSnooze({
       conversationId,
       actorUserId: req.user.id,
@@ -1026,6 +1038,11 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: TransferConversationDto,
   ) {
+    await this.chatService.assertShopConversationPermission(
+      conversationId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_TRANSFER,
+    );
     const data = await this.accountabilityTimelineService.transferConversation({
       conversationId,
       actorUserId: req.user.id,
@@ -1125,6 +1142,11 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: InitiateMaskedVoipCallDto,
   ) {
+    await this.chatService.assertShopConversationPermission(
+      conversationId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_VOIP_CALL_MASKED,
+    );
     const data = await this.maskedVoipCallService.initiateMaskedPstnCall({
       conversationId,
       agentUserId: req.user.id,
@@ -1149,6 +1171,11 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: FinalizeMaskedVoipCallDto,
   ) {
+    await this.chatService.assertShopConversationPermission(
+      conversationId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_VOIP_CALL_MASKED,
+    );
     const data = await this.maskedVoipCallService.finalizeCallAndAttachRecordingBubble({
       conversationId,
       agentUserId: req.user.id,
@@ -1167,7 +1194,14 @@ export class ChatController {
   })
   @Post('translate')
   @HttpCode(HttpStatus.OK)
-  async translateChatMessage(@Body() dto: TranslateChatMessageDto) {
+  async translateChatMessage(@Req() req, @Body() dto: TranslateChatMessageDto) {
+    if (dto.conversationId) {
+      await this.chatService.assertShopConversationPermission(
+        dto.conversationId,
+        req.user.id,
+        PermissionCodeEnum.INBOX_TRANSLATION_USE,
+      );
+    }
     const data = await this.realtimeChatTranslationService.translateMessageOrDraft(dto);
     return {
       status: HttpStatus.OK,
@@ -1182,7 +1216,16 @@ export class ChatController {
   })
   @Get('quick-replies/:shopId')
   @HttpCode(HttpStatus.OK)
-  async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
+  async listQuickReplyTemplates(
+    @Req() req,
+    @Param('shopId') shopId: string,
+    @Query('search') search?: string,
+  ) {
+    await this.granularIamService.assertHasPermission(
+      shopId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
+    );
     const data = await this.quickReplyService.listTemplates(shopId, search);
     return {
       status: HttpStatus.OK,
@@ -1198,9 +1241,15 @@ export class ChatController {
   @Post('quick-replies/:shopId')
   @HttpCode(HttpStatus.CREATED)
   async createQuickReplyTemplate(
+    @Req() req,
     @Param('shopId') shopId: string,
     @Body() dto: CreateQuickReplyTemplateDto,
   ) {
+    await this.granularIamService.assertHasPermission(
+      shopId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
+    );
     const data = await this.quickReplyService.createTemplate(shopId, dto);
     return {
       status: HttpStatus.CREATED,
@@ -1216,10 +1265,16 @@ export class ChatController {
   @Patch('quick-replies/:shopId/:templateId')
   @HttpCode(HttpStatus.OK)
   async updateQuickReplyTemplate(
+    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
     @Body() dto: UpdateQuickReplyTemplateDto,
   ) {
+    await this.granularIamService.assertHasPermission(
+      shopId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
+    );
     const data = await this.quickReplyService.updateTemplate(shopId, templateId, dto);
     return {
       status: HttpStatus.OK,
@@ -1235,9 +1290,15 @@ export class ChatController {
   @Delete('quick-replies/:shopId/:templateId')
   @HttpCode(HttpStatus.OK)
   async deleteQuickReplyTemplate(
+    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
   ) {
+    await this.granularIamService.assertHasPermission(
+      shopId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
+    );
     const data = await this.quickReplyService.deleteTemplate(shopId, templateId);
     return {
       status: HttpStatus.OK,
@@ -1254,6 +1315,7 @@ export class ChatController {
   @Post('quick-replies/:shopId/:templateId/interpolate')
   @HttpCode(HttpStatus.OK)
   async interpolateQuickReplyTemplate(
+    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
     @Body()
@@ -1264,6 +1326,11 @@ export class ChatController {
       trackingLink?: string;
     },
   ) {
+    await this.granularIamService.assertHasPermission(
+      shopId,
+      req.user.id,
+      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
+    );
     const data = await this.quickReplyService.interpolateTemplate({
       shopId,
       templateId,

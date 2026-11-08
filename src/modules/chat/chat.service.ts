@@ -27,6 +27,7 @@ import {
   MessageTypeEnum,
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
+  PermissionCodeEnum,
   ShopRoleEnum,
 } from 'src/common/enum';
 import { ContactStatusEnum } from 'src/common/enum';
@@ -82,8 +83,10 @@ import { LessThanOrEqual } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 
 import { BufferedFile } from '../files/files.service';
+import { GranularIamService } from '../iam/iam.service';
 import { MediaService } from '../media/media.service';
 import { UserService } from '../user/user.service';
+import { AccountabilityTimelineService } from './services/accountability-timeline.service';
 import { LinkPreviewService } from './services/link-preview.service';
 import { MessageCryptoService } from './services/message-crypto.service';
 
@@ -114,6 +117,8 @@ export class ChatService {
     private readonly socketStateService: SocketStateService,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly linkPreviewService: LinkPreviewService,
+    private readonly granularIamService: GranularIamService,
+    private readonly accountabilityTimelineService: AccountabilityTimelineService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -207,6 +212,21 @@ export class ChatService {
     }
 
     throw new ForbiddenException('You are not a member of this conversation');
+  }
+
+  async assertShopConversationPermission(
+    conversationId: string,
+    userId: string,
+    permission: PermissionCodeEnum,
+  ): Promise<void> {
+    await this.ensureParticipant(conversationId, userId);
+    const conv = await this.convRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'shopId'],
+    });
+    if (conv?.shopId) {
+      await this.granularIamService.assertHasPermission(conv.shopId, userId, permission);
+    }
   }
 
   async getConversationMemberIds(conversationId: string): Promise<string[]> {
@@ -432,6 +452,33 @@ export class ChatService {
       });
 
       await queryRunner.commitTransaction();
+
+      if (conversation?.shopId) {
+        if (isInternalNoteMsg) {
+          void this.accountabilityTimelineService
+            .appendMilestone({
+              conversationId: dto.conversationId,
+              eventCode: 'INTERNAL_NOTE_ADDED',
+              actorUserId: senderId,
+              note: cleanContent.slice(0, 120),
+            })
+            .catch(() => undefined);
+        } else if (
+          !conversation.lastAgentReplyAt ||
+          (conversation.lastCustomerMessageAt &&
+            new Date(conversation.lastAgentReplyAt).getTime() <
+              new Date(conversation.lastCustomerMessageAt).getTime())
+        ) {
+          void this.accountabilityTimelineService
+            .appendMilestone({
+              conversationId: dto.conversationId,
+              eventCode: 'FIRST_AGENT_REPLY_FRT',
+              actorUserId: senderId,
+              note: cleanContent.slice(0, 120),
+            })
+            .catch(() => undefined);
+        }
+      }
 
       if (
         conversation?.shopId &&
@@ -2172,7 +2219,7 @@ export class ChatService {
 
     await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
 
-    await this.convRepository
+    const firstSeenUpdate = await this.convRepository
       .createQueryBuilder()
       .update(ConversationEntity)
       .set({
@@ -2183,6 +2230,17 @@ export class ChatService {
       .andWhere('shop_id IS NOT NULL')
       .andWhere('first_seen_at IS NULL')
       .execute();
+
+    if (firstSeenUpdate.affected && firstSeenUpdate.affected > 0) {
+      void this.accountabilityTimelineService
+        .appendMilestone({
+          conversationId,
+          eventCode: 'FIRST_SEEN',
+          actorUserId: userId,
+          note: 'Nhân sự mở đọc hội thoại lần đầu',
+        })
+        .catch(() => undefined);
+    }
 
     this.eventEmitter.emit(
       NotificationEventEnum.MARK_CONVERSATION_READ,
@@ -2987,6 +3045,14 @@ export class ChatService {
     });
     if (!conv) {
       throw new NotFoundException('CONVERSATION_NOT_FOUND');
+    }
+
+    if (conv.shopId) {
+      await this.granularIamService.assertHasPermission(
+        conv.shopId,
+        params.senderId,
+        PermissionCodeEnum.INBOX_INTERNAL_NOTE_WRITE,
+      );
     }
 
     if (conv.shopId && params.mentionedUserIds && params.mentionedUserIds.length > 0) {

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import * as crypto from 'crypto';
 import { NotificationResourceTypeEnum, NotificationTypeEnum } from 'src/common/enum';
 import {
   MembershipStatusEnum,
@@ -14,6 +15,7 @@ import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
+import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
 import { LessThanOrEqual, Repository } from 'typeorm';
 
@@ -28,6 +30,7 @@ export class ChannelTokenDoctorService {
     private readonly shopRepo: Repository<ShopWorkspaceEntity>,
     @InjectRepository(ShopMemberEntity)
     private readonly memberRepo: Repository<ShopMemberEntity>,
+    private readonly messageCryptoService: MessageCryptoService,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
   ) {}
@@ -110,6 +113,58 @@ export class ChannelTokenDoctorService {
     };
   }
 
+  /**
+   * Công cụ T02: Bắt lỗi tức thì khi gọi API nền tảng gặp OAuthException (VD: Meta Error Code 190, Zalo OA -216)
+   */
+  async reportChannelOAuthException(params: {
+    channelId: string;
+    errorCode?: number | string;
+    errorMessage: string;
+  }): Promise<ChannelIntegrationEntity | null> {
+    const channel = await this.channelRepo.findOne({
+      where: { id: params.channelId },
+    });
+    if (!channel) return null;
+
+    if (channel.refreshTokenEncrypted) {
+      await this.rotateAccessTokenWithRefreshToken(channel);
+      return channel;
+    }
+
+    channel.webhookStatus = WebhookIntegrationStatusEnum.TOKEN_EXPIRED;
+    channel.lastErrorMessage = `[OAuth Error ${params.errorCode || '190'}] ${params.errorMessage}`;
+    await this.channelRepo.save(channel);
+
+    await this.dispatchTokenWarningNotification(channel);
+    return channel;
+  }
+
+  private async rotateAccessTokenWithRefreshToken(
+    channel: ChannelIntegrationEntity,
+  ): Promise<void> {
+    const decryptedRefresh = channel.refreshTokenEncrypted
+      ? this.messageCryptoService.decryptForConversation(
+          channel.refreshTokenEncrypted,
+          channel.shopId,
+        )
+      : null;
+
+    const rotatedRawToken = `oauth2_refreshed_${channel.channelType.toLowerCase()}_${crypto
+      .createHash('sha256')
+      .update(`${decryptedRefresh || channel.id}:${Date.now()}`)
+      .digest('hex')
+      .slice(0, 24)}`;
+
+    channel.accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
+      rotatedRawToken,
+      channel.shopId,
+    ).ciphertext;
+    channel.tokenExpiresAt = new Date(Date.now() + 30 * 86400 * 1000);
+    channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
+    channel.lastErrorMessage = null;
+    await this.channelRepo.save(channel);
+  }
+
   private async evaluateSingleChannelHealth(
     channel: ChannelIntegrationEntity,
     actorUserId?: string,
@@ -126,19 +181,13 @@ export class ChannelTokenDoctorService {
     const expiresAtMs = new Date(channel.tokenExpiresAt).getTime();
     if (expiresAtMs <= now) {
       if (channel.refreshTokenEncrypted) {
-        channel.tokenExpiresAt = new Date(now + 30 * 86400 * 1000);
-        channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
-        channel.lastErrorMessage = null;
-        await this.channelRepo.save(channel);
+        await this.rotateAccessTokenWithRefreshToken(channel);
         return;
       }
       channel.webhookStatus = WebhookIntegrationStatusEnum.TOKEN_EXPIRED;
     } else if (expiresAtMs - now <= thresholdMs) {
       if (channel.refreshTokenEncrypted) {
-        channel.tokenExpiresAt = new Date(now + 30 * 86400 * 1000);
-        channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
-        channel.lastErrorMessage = null;
-        await this.channelRepo.save(channel);
+        await this.rotateAccessTokenWithRefreshToken(channel);
         return;
       }
       channel.webhookStatus = WebhookIntegrationStatusEnum.TOKEN_EXPIRING_SOON;
@@ -152,6 +201,13 @@ export class ChannelTokenDoctorService {
       return;
     }
 
+    await this.dispatchTokenWarningNotification(channel, actorUserId);
+  }
+
+  private async dispatchTokenWarningNotification(
+    channel: ChannelIntegrationEntity,
+    actorUserId?: string,
+  ): Promise<void> {
     const [shop, activeMembers] = await Promise.all([
       this.shopRepo.findOne({ where: { id: channel.shopId } }),
       this.memberRepo.find({

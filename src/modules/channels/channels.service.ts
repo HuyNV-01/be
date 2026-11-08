@@ -1,8 +1,10 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
+import Redis from 'ioredis';
 import {
   ChannelTypeEnum,
   ConversationSupportStatusEnum,
@@ -27,7 +29,7 @@ import {
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ChannelWebhookLogEntity } from 'src/entity/channel-webhook-log.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
-import { ConversationEntity } from 'src/entity/conversation.entity';
+import { ConversationEntity, ConversationInteractionType } from 'src/entity/conversation.entity';
 import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -39,6 +41,54 @@ import { In, Repository } from 'typeorm';
 
 import { ConversationRoutingEngine } from './routing/conversation-routing.engine';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
+
+export interface NormalizedOmnichannelEvent {
+  externalPageId: string;
+  externalThreadId: string;
+  externalMessageId: string;
+  customerName: string;
+  messageText: string;
+  interactionType: ConversationInteractionType;
+  verb: 'add' | 'edited' | 'remove';
+  sourcePostId: string | null;
+  sourceAdId: string | null;
+  ctwaClickId: string | null;
+  externalCommentId: string | null;
+  parentCommentId: string | null;
+  mediaAttachmentUrl: string | null;
+}
+
+const TOKEN_BUCKET_LUA_SCRIPT = `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refillRatePerSec = tonumber(ARGV[2])
+local nowMs = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+local data = redis.call('HMGET', key, 'tokens', 'lastRefillMs')
+local tokens = tonumber(data[1])
+local lastRefillMs = tonumber(data[2])
+
+if tokens == nil then
+  tokens = capacity
+  lastRefillMs = nowMs
+else
+  local elapsedSec = math.max(0, (nowMs - lastRefillMs) / 1000.0)
+  tokens = math.min(capacity, tokens + (elapsedSec * refillRatePerSec))
+  lastRefillMs = nowMs
+end
+
+if tokens < requested then
+  redis.call('HMSET', key, 'tokens', tokens, 'lastRefillMs', lastRefillMs)
+  redis.call('EXPIRE', key, 3600)
+  return {0, math.floor(tokens)}
+end
+
+tokens = tokens - requested
+redis.call('HMSET', key, 'tokens', tokens, 'lastRefillMs', lastRefillMs)
+redis.call('EXPIRE', key, 3600)
+return {1, math.floor(tokens)}
+`;
 
 @Injectable()
 export class ChannelsService {
@@ -59,6 +109,7 @@ export class ChannelsService {
     private readonly memberRepo: Repository<ShopMemberEntity>,
     @InjectRepository(ShopWorkspaceEntity)
     private readonly shopRepo: Repository<ShopWorkspaceEntity>,
+    @InjectRedis() private readonly redis: Redis,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly routingEngine: ConversationRoutingEngine,
     private readonly marketplaceBridge: MarketplaceBridgeService,
@@ -124,6 +175,85 @@ export class ChannelsService {
   }
 
   /**
+   * Kiểm tra hạn ngạch Token-Bucket trên Redis Lua cho từng kênh để chống vượt ngưỡng Rate Limit nền tảng
+   */
+  async consumeChannelRateLimitToken(
+    channelIntegrationId: string,
+    capacity = 60,
+    refillRatePerSec = 2,
+  ): Promise<{ allowed: boolean; remainingTokens: number }> {
+    const bucketKey = `rate_limit:channel_bucket:${channelIntegrationId}`;
+    try {
+      const res = (await this.redis.eval(
+        TOKEN_BUCKET_LUA_SCRIPT,
+        1,
+        bucketKey,
+        capacity,
+        refillRatePerSec,
+        Date.now(),
+        1,
+      )) as [number, number];
+      return {
+        allowed: Number(res?.[0] ?? 1) === 1,
+        remainingTokens: Number(res?.[1] ?? capacity),
+      };
+    } catch {
+      return { allowed: true, remainingTokens: capacity };
+    }
+  }
+
+  /**
+   * Xác thực chữ ký mật mã HMAC-SHA256 trên Header Webhook (Meta X-Hub-Signature-256, Zalo, Shopee, TikTok)
+   */
+  verifyWebhookSignatureIfConfigured(params: {
+    channel: ChannelIntegrationEntity | null;
+    headers: Record<string, string>;
+    rawPayload: Record<string, unknown>;
+  }): boolean {
+    const { channel, headers, rawPayload } = params;
+    if (!channel || !channel.webhookVerifySecretEncrypted) {
+      return true;
+    }
+
+    const signatureHeader =
+      headers['x-hub-signature-256'] ||
+      headers['x-zalo-signature'] ||
+      headers['x-shopee-signature'] ||
+      headers['x-tts-signature'];
+
+    if (!signatureHeader) {
+      return true;
+    }
+
+    const secret = this.messageCryptoService.decryptForConversation(
+      channel.webhookVerifySecretEncrypted,
+      channel.shopId,
+    );
+    if (!secret) {
+      return true;
+    }
+
+    const cleanProvidedSig = signatureHeader.replace(/^sha256=/i, '').trim();
+    const expectedHmac = crypto
+      .createHmac('sha256', secret)
+      .update(JSON.stringify(rawPayload || {}))
+      .digest('hex');
+
+    if (cleanProvidedSig.length !== expectedHmac.length) {
+      throw new BadRequestException('INVALID_WEBHOOK_HMAC_SIGNATURE');
+    }
+
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(cleanProvidedSig, 'utf8'),
+      Buffer.from(expectedHmac, 'utf8'),
+    );
+    if (!isValid) {
+      throw new BadRequestException('INVALID_WEBHOOK_HMAC_SIGNATURE');
+    }
+    return true;
+  }
+
+  /**
    * Kết nối mới hoặc khôi phục/cập nhật kênh đã từng ngắt kết nối (withDeleted: true)
    * Tránh triệt để lỗi ER_DUP_ENTRY trên unique index uq_channel_ext_page (shopId, channelType, externalPageId)
    */
@@ -153,7 +283,6 @@ export class ChannelsService {
     const rawRefreshToken =
       dto.refreshToken?.trim() || (dto.oauthCode ? `oauth2_rft_${dto.oauthCode.trim()}` : null);
 
-    // Quan trọng: thêm withDeleted: true để tìm cả kênh đã từng bị softRemove khi ngắt kết nối trước đó
     let channel = await this.channelRepo.findOne({
       where: {
         shopId,
@@ -202,7 +331,6 @@ export class ChannelsService {
       : new Date(Date.now() + 60 * 86400 * 1000);
 
     if (channel) {
-      // Khôi phục bản ghi ở tầng DB trước khi save() để TypeORM thực thi UPDATE thay vì INSERT
       if (channel.deletedAt) {
         await this.channelRepo.restore(channel.id);
       }
@@ -580,25 +708,222 @@ export class ChannelsService {
     );
   }
 
-  async resolveChannelByWebhookPayload(
+  /**
+   * Chuẩn hóa toàn bộ cấu trúc Payload từ Facebook (feed, live_videos, group_feed, messaging),
+   * Instagram (comments, live_comments, messages), Zalo OA, TikTok Shop, Shopee, Lazada và Livechat.
+   */
+  normalizeInboundWebhookEvent(
     channelType: ChannelTypeEnum,
-    payload: Record<string, unknown>,
-  ): Promise<ChannelIntegrationEntity | null> {
+    payload: Record<string, any>,
+    fallbackLogId: string,
+  ): NormalizedOmnichannelEvent {
+    const firstEntry = Array.isArray(payload?.entry) ? payload.entry[0] : null;
+    const firstChange = Array.isArray(firstEntry?.changes) ? firstEntry.changes[0] : null;
+    const changeVal = firstChange?.value || null;
+    const firstMessaging = Array.isArray(firstEntry?.messaging) ? firstEntry.messaging[0] : null;
+
     const externalPageId = String(
       payload?.pageId ||
         payload?.externalPageId ||
         payload?.recipientId ||
+        payload?.oa_id ||
         payload?.shop_id ||
-        (Array.isArray(payload?.entry) && (payload.entry[0] as any)?.id) ||
+        firstEntry?.id ||
+        firstMessaging?.recipient?.id ||
         '',
     ).trim();
 
-    if (!externalPageId) {
+    // 1. Trường hợp Bình luận từ Facebook Page Feed / Live Videos / Group Feed hoặc Instagram Comments
+    if (
+      changeVal &&
+      (firstChange?.field === 'feed' ||
+        firstChange?.field === 'live_videos' ||
+        firstChange?.field === 'group_feed' ||
+        firstChange?.field === 'comments' ||
+        firstChange?.field === 'live_comments' ||
+        changeVal.item === 'comment' ||
+        changeVal.comment_id)
+    ) {
+      const isLive =
+        firstChange?.field === 'live_videos' ||
+        firstChange?.field === 'live_comments' ||
+        Boolean(changeVal.live_video_id);
+      const commentId = String(changeVal.comment_id || changeVal.id || `cmt_${fallbackLogId}`);
+      const postId = String(
+        changeVal.post_id || changeVal.media?.id || changeVal.live_video_id || 'post_default',
+      );
+      const commenterId = String(
+        changeVal.from?.id || changeVal.sender_id || `commenter_${commentId.slice(-6)}`,
+      );
+      const commenterName = String(
+        changeVal.from?.name ||
+          changeVal.from?.username ||
+          `Khách bình luận #${commenterId.slice(-4)}`,
+      );
+      const rawVerb = String(changeVal.verb || 'add').toLowerCase();
+      const verb: 'add' | 'edited' | 'remove' =
+        rawVerb === 'remove' || rawVerb === 'delete'
+          ? 'remove'
+          : rawVerb === 'edited' || rawVerb === 'edit'
+            ? 'edited'
+            : 'add';
+
+      return {
+        externalPageId,
+        externalThreadId: `cmt_${postId}_${commenterId}`,
+        externalMessageId: commentId,
+        customerName: commenterName,
+        messageText: String(
+          changeVal.message || changeVal.text || '[Khách hàng gửi bình luận kèm hình ảnh/nhãn dán]',
+        ),
+        interactionType: isLive ? 'LIVESTREAM' : 'COMMENT',
+        verb,
+        sourcePostId: postId,
+        sourceAdId: changeVal.ad_id ? String(changeVal.ad_id) : null,
+        ctwaClickId: null,
+        externalCommentId: commentId,
+        parentCommentId: changeVal.parent_id ? String(changeVal.parent_id) : null,
+        mediaAttachmentUrl: changeVal.photo || changeVal.video || null,
+      };
+    }
+
+    // 2. Trường hợp Tin nhắn Facebook Messenger / Instagram Direct chuẩn Graph API (entry[].messaging[])
+    if (firstMessaging) {
+      const senderPsid = String(firstMessaging.sender?.id || `psid_${fallbackLogId.slice(0, 8)}`);
+      const referral = firstMessaging.referral || firstMessaging.message?.referral || null;
+      const msgId = String(firstMessaging.message?.mid || `mid_${fallbackLogId}`);
+      const text = String(
+        firstMessaging.message?.text ||
+          firstMessaging.postback?.title ||
+          '[Khách hàng gửi tệp đính kèm]',
+      );
+      const attachmentUrl =
+        Array.isArray(firstMessaging.message?.attachments) &&
+        firstMessaging.message.attachments[0]?.payload?.url
+          ? String(firstMessaging.message.attachments[0].payload.url)
+          : null;
+
+      return {
+        externalPageId,
+        externalThreadId: `inbox_${senderPsid}`,
+        externalMessageId: msgId,
+        customerName: String(
+          firstMessaging.sender?.name || `Khách ${channelType} #${senderPsid.slice(-4)}`,
+        ),
+        messageText: text,
+        interactionType: 'INBOX',
+        verb: 'add',
+        sourcePostId: referral?.post_id ? String(referral.post_id) : null,
+        sourceAdId: referral?.ad_id ? String(referral.ad_id) : null,
+        ctwaClickId: referral?.ctwa_clid ? String(referral.ctwa_clid) : null,
+        externalCommentId: null,
+        parentCommentId: null,
+        mediaAttachmentUrl: attachmentUrl,
+      };
+    }
+
+    // 3. Trường hợp Zalo Official Account Webhook (user_send_text, user_send_image, follow...)
+    if (channelType === ChannelTypeEnum.ZALO_OA && (payload?.event_name || payload?.sender)) {
+      const zaloSenderId = String(
+        payload.sender?.id || payload.user_id_by_app || `zalo_${fallbackLogId.slice(0, 8)}`,
+      );
+      const zaloMsgId = String(payload.message?.msg_id || `zalo_msg_${fallbackLogId}`);
+      const zaloText = String(
+        payload.message?.text ||
+          (payload.event_name === 'follow'
+            ? '[Khách hàng vừa nhấn Quan tâm Zalo OA]'
+            : '[Tin nhắn hình ảnh/vị trí Zalo OA]'),
+      );
+
+      return {
+        externalPageId,
+        externalThreadId: `zalo_${zaloSenderId}`,
+        externalMessageId: zaloMsgId,
+        customerName: String(payload.sender?.name || `Khách Zalo #${zaloSenderId.slice(-4)}`),
+        messageText: zaloText,
+        interactionType: 'INBOX',
+        verb: 'add',
+        sourcePostId: null,
+        sourceAdId: null,
+        ctwaClickId: null,
+        externalCommentId: null,
+        parentCommentId: null,
+        mediaAttachmentUrl:
+          Array.isArray(payload.message?.attachments) &&
+          payload.message.attachments[0]?.payload?.url
+            ? String(payload.message.attachments[0].payload.url)
+            : null,
+      };
+    }
+
+    // 4. Trường hợp Payload phẳng hoặc giả lập từ công cụ Simulator (Hỗ trợ cả INBOX, COMMENT, LIVESTREAM)
+    const isCommentEvent =
+      payload?.interactionType === 'COMMENT' ||
+      payload?.interactionType === 'LIVESTREAM' ||
+      payload?.event === 'COMMENT_INBOUND' ||
+      Boolean(payload?.commentId);
+
+    const resolvedInteractionType: ConversationInteractionType =
+      payload?.interactionType === 'LIVESTREAM' || payload?.event === 'LIVESTREAM_COMMENT'
+        ? 'LIVESTREAM'
+        : isCommentEvent
+          ? 'COMMENT'
+          : 'INBOX';
+
+    const rawVerb = String(payload?.verb || 'add').toLowerCase();
+    const verb: 'add' | 'edited' | 'remove' =
+      rawVerb === 'remove' ? 'remove' : rawVerb === 'edited' ? 'edited' : 'add';
+
+    const externalThreadId = String(
+      payload?.threadId ||
+        payload?.senderId ||
+        payload?.conversation_id ||
+        payload?.order_sn ||
+        (isCommentEvent && payload?.postId
+          ? `cmt_${String(payload.postId)}_${String(payload.senderId || 'guest')}`
+          : `thread_${externalPageId || 'default'}`),
+    );
+
+    const externalCommentId = payload?.commentId ? String(payload.commentId) : null;
+
+    return {
+      externalPageId,
+      externalThreadId,
+      externalMessageId: String(payload?.messageId || externalCommentId || `wh_${fallbackLogId}`),
+      customerName: String(
+        payload?.senderName ||
+          payload?.buyer_username ||
+          `Khách ${channelType} #${externalThreadId.slice(-4)}`,
+      ),
+      messageText: String(
+        payload?.messageText ||
+          payload?.text ||
+          (payload?.order_sn
+            ? `[Đơn sàn ${channelType} #${String(payload.order_sn)}]`
+            : 'Khách hàng vừa gửi tương tác mới'),
+      ),
+      interactionType: resolvedInteractionType,
+      verb,
+      sourcePostId: payload?.postId ? String(payload.postId) : null,
+      sourceAdId: payload?.adId ? String(payload.adId) : null,
+      ctwaClickId: payload?.ctwaClid ? String(payload.ctwaClid) : null,
+      externalCommentId,
+      parentCommentId: payload?.parentCommentId ? String(payload.parentCommentId) : null,
+      mediaAttachmentUrl: payload?.mediaAttachmentUrl ? String(payload.mediaAttachmentUrl) : null,
+    };
+  }
+
+  async resolveChannelByWebhookPayload(
+    channelType: ChannelTypeEnum,
+    payload: Record<string, unknown>,
+  ): Promise<ChannelIntegrationEntity | null> {
+    const normalized = this.normalizeInboundWebhookEvent(channelType, payload, 'lookup');
+    if (!normalized.externalPageId) {
       return null;
     }
 
     return this.channelRepo.findOne({
-      where: { channelType, externalPageId },
+      where: { channelType, externalPageId: normalized.externalPageId },
     });
   }
 
@@ -613,7 +938,7 @@ export class ChannelsService {
     conversationId: string | null;
     assignedAgentId: string | null;
   }> {
-    const { channelType, payload } = params;
+    const { channelType, payload, headers } = params;
 
     const channel = await this.resolveChannelByWebhookPayload(channelType, payload);
 
@@ -626,8 +951,19 @@ export class ChannelsService {
       };
     }
 
+    // Kiểm tra chữ ký HMAC nếu kênh đã cấu hình webhookVerifySecretEncrypted
+    this.verifyWebhookSignatureIfConfigured({
+      channel,
+      headers,
+      rawPayload: payload,
+    });
+
+    // Kiểm tra bộ điều tốc Token-Bucket chống bão request
+    const rateCheck = await this.consumeChannelRateLimitToken(channel.id, 120, 5);
     channel.lastWebhookReceivedAt = new Date();
-    channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
+    channel.webhookStatus = rateCheck.allowed
+      ? WebhookIntegrationStatusEnum.HEALTHY
+      : WebhookIntegrationStatusEnum.RATE_LIMITED;
     await this.channelRepo.save(channel);
 
     const isMarketplaceChannel =
@@ -693,37 +1029,56 @@ export class ChannelsService {
       };
     }
 
-    const externalThreadId = String(
-      payload.threadId ||
-        payload.senderId ||
-        payload.conversation_id ||
-        payload.order_sn ||
-        `thread_${channel.externalPageId}_default`,
-    );
+    const normalized = this.normalizeInboundWebhookEvent(channelType, payload, params.logId);
 
-    const customerName = String(
-      payload.senderName ||
-        payload.buyer_username ||
-        `Khách ${channel.pageShortCode} #${externalThreadId.slice(-4)}`,
-    );
+    // Bảo toàn Bình luận khi bị xóa trên nền tảng (Immutable Comment Retention — Pancake CRM rule)
+    if (normalized.verb === 'remove' && normalized.externalCommentId) {
+      const existingMsg = await this.messageRepo.findOne({
+        where: {
+          shopId: channel.shopId,
+          externalMessageId: normalized.externalCommentId,
+        },
+      });
 
-    const messageText = String(
-      payload.messageText ||
-        payload.text ||
-        (payload.order_sn
-          ? `[Đơn sàn ${channelType} #${String(payload.order_sn)}]`
-          : 'Khách hàng vừa gửi tin nhắn mới'),
-    );
+      if (existingMsg) {
+        const updatedMetadata = {
+          ...(existingMsg.metadata || {}),
+          isDeletedOnPlatform: true,
+          deletedOnPlatformAt: new Date().toISOString(),
+        };
+        await this.messageRepo.update(
+          { id: existingMsg.id, createdAt: existingMsg.createdAt },
+          { metadata: updatedMetadata as any },
+        );
 
-    const hasPhoneMatch = /(?:\+84|84|0)(?:3|5|7|8|9)\d{8}\b/.test(
-      messageText.replace(/[\s.-]/g, ''),
+        await this.broadcastChannelEventToShop(
+          channel.shopId,
+          SOCKET_CONFIG.events.CHAT.MESSAGE_EDITED,
+          {
+            id: existingMsg.id,
+            conversationId: existingMsg.conversationId,
+            metadata: updatedMetadata,
+          },
+        );
+
+        return {
+          shopId: channel.shopId,
+          channelIntegrationId: channel.id,
+          conversationId: existingMsg.conversationId,
+          assignedAgentId: null,
+        };
+      }
+    }
+
+    const hasPhoneMatch = /(?:\+84|84|0)(?:3|5|7|8|9)\d{8}/.test(
+      normalized.messageText.replace(/[\s.-]/g, ''),
     );
 
     let conversation = await this.conversationRepo.findOne({
       where: {
         shopId: channel.shopId,
         channelIntegrationId: channel.id,
-        externalThreadId,
+        externalThreadId: normalized.externalThreadId,
       },
       withDeleted: true,
     });
@@ -736,9 +1091,10 @@ export class ChannelsService {
         shopId: channel.shopId,
         channelType: channel.channelType,
         channelIntegrationId: channel.id,
-        externalThreadId,
-        name: customerName,
-        lastMessage: messageText,
+        externalThreadId: normalized.externalThreadId,
+        interactionType: normalized.interactionType,
+        name: normalized.customerName,
+        lastMessage: normalized.messageText,
         lastMessageAt: now,
         lastCustomerMessageAt: now,
         supportStatus: ConversationSupportStatusEnum.WAITING_AGENT_REPLY,
@@ -746,9 +1102,9 @@ export class ChannelsService {
         firstSeenByAgentId: null,
         isGhostedByAgent: false,
         hasPhoneCollected: hasPhoneMatch,
-        sourceAdId: payload.adId ? String(payload.adId) : null,
-        sourcePostId: payload.postId ? String(payload.postId) : null,
-        ctwaClickId: payload.ctwaClid ? String(payload.ctwaClid) : null,
+        sourceAdId: normalized.sourceAdId,
+        sourcePostId: normalized.sourcePostId,
+        ctwaClickId: normalized.ctwaClickId,
         activeTagIdsJson: [],
       });
     } else {
@@ -757,7 +1113,8 @@ export class ChannelsService {
       }
       conversation.deletedAt = null;
       conversation.deletedBy = null;
-      conversation.lastMessage = messageText;
+      conversation.interactionType = normalized.interactionType || conversation.interactionType;
+      conversation.lastMessage = normalized.messageText;
       conversation.lastMessageAt = now;
       conversation.lastCustomerMessageAt = now;
       conversation.supportStatus = ConversationSupportStatusEnum.WAITING_AGENT_REPLY;
@@ -767,22 +1124,21 @@ export class ChannelsService {
       if (hasPhoneMatch) {
         conversation.hasPhoneCollected = true;
       }
-      if (payload.adId) {
-        conversation.sourceAdId = String(payload.adId);
+      if (normalized.sourceAdId && !conversation.sourceAdId) {
+        conversation.sourceAdId = normalized.sourceAdId;
       }
-      if (payload.postId) {
-        conversation.sourcePostId = String(payload.postId);
+      if (normalized.sourcePostId) {
+        conversation.sourcePostId = normalized.sourcePostId;
       }
-      if (payload.ctwaClid) {
-        conversation.ctwaClickId = String(payload.ctwaClid);
+      if (normalized.ctwaClickId && !conversation.ctwaClickId) {
+        conversation.ctwaClickId = normalized.ctwaClickId;
       }
     }
 
     const savedConversation = await this.conversationRepo.save(conversation);
 
-    // Mã hóa lastMessage bằng MessageCryptoService để đồng bộ với ChatService.getUserInbox
     const encryptedMsg = this.messageCryptoService.encryptForConversation(
-      messageText,
+      normalized.messageText,
       savedConversation.id,
     );
 
@@ -826,13 +1182,13 @@ export class ChannelsService {
 
     await this.ensureConversationParticipants(savedConversation.id, participantUserIds);
 
-    const inboundSenderId = `ext:${channel.channelType.toLowerCase()}:${externalThreadId.slice(0, 18)}`;
+    const inboundSenderId = `ext:${channel.channelType.toLowerCase()}:${normalized.externalThreadId.slice(0, 18)}`;
     const inboundMessage = this.messageRepo.create({
       conversationId: savedConversation.id,
       senderId: inboundSenderId,
       shopId: channel.shopId,
       direction: MessageDirectionEnum.INBOUND,
-      externalMessageId: payload.messageId ? String(payload.messageId) : `wh_${params.logId}`,
+      externalMessageId: normalized.externalMessageId,
       content: encryptedMsg.ciphertext,
       type: MessageTypeEnum.TEXT,
       status: MessageStatusEnum.SENT,
@@ -845,24 +1201,34 @@ export class ChannelsService {
         channelType: channel.channelType,
         pageShortCode: channel.pageShortCode,
         pageName: channel.pageName,
-        externalCustomerName: customerName,
+        externalCustomerName: normalized.customerName,
+        interactionType: normalized.interactionType,
+        externalCommentId: normalized.externalCommentId,
+        parentCommentId: normalized.parentCommentId,
+        sourcePostId: normalized.sourcePostId,
+        sourceAdId: normalized.sourceAdId,
+        ctwaClickId: normalized.ctwaClickId,
+        mediaAttachmentUrl: normalized.mediaAttachmentUrl,
+        isDeletedOnPlatform: false,
       } as any,
       createdAt: now,
       updatedAt: now,
     });
     const savedMsg = await this.messageRepo.save(inboundMessage);
 
-    // Kích hoạt AutoTagRuleEngine (F02.5) tự động gắn Tag theo từ khóa hoặc khi trích xuất được SĐT
     this.eventEmitter.emit('chat.message.inbound', {
       shopId: channel.shopId,
       conversationId: savedConversation.id,
-      messageContent: messageText,
+      messageContent: normalized.messageText,
+      interactionType: normalized.interactionType,
+      externalCommentId: normalized.externalCommentId,
+      sourcePostId: normalized.sourcePostId,
     });
     if (hasPhoneMatch) {
       this.eventEmitter.emit('ner.phone.extracted', {
         shopId: channel.shopId,
         conversationId: savedConversation.id,
-        messageContent: messageText,
+        messageContent: normalized.messageText,
       });
     }
 
@@ -873,12 +1239,12 @@ export class ChannelsService {
         SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
         {
           ...savedMsg,
-          content: messageText,
+          content: normalized.messageText,
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
           sender: {
             id: inboundSenderId,
-            name: customerName,
+            name: normalized.customerName,
             avatar: channel.avatarUrl || null,
           },
         },
