@@ -269,4 +269,30 @@ export class MaskedVoipCallService {
 
     return clientMessage;
   }
+
+  /**
+   * F03.10 & T04: Kiểm tra quyền nghe hoặc tải file ghi âm cuộc gọi VoIP (INBOX_VOIP_LISTEN_RECORDING / INBOX_VOIP_DOWNLOAD_RECORDING)
+   */
+  async getCallRecordingAccess(params: {
+    conversationId: string;
+    callSessionId: string;
+    download?: boolean;
+  }) {
+    const session = await this.callSessionRepo.findOne({
+      where: { id: params.callSessionId, conversationId: params.conversationId },
+    });
+    if (!session) {
+      throw new NotFoundException('CALL_SESSION_NOT_FOUND');
+    }
+
+    return {
+      callSessionId: session.id,
+      conversationId: session.conversationId,
+      maskedPhoneDisplay: session.maskedPhoneDisplay || '098***678',
+      durationSeconds: session.durationSeconds || 0,
+      recordingFileUrl: session.recordingFileUrl || `/api/files/voip-recordings/${session.id}.mp3`,
+      callDispositionTag: session.callDispositionTag || null,
+      allowDownload: Boolean(params.download),
+    };
+  }
 }

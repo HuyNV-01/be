@@ -30,6 +30,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
+import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { FileValidators } from 'src/common/pipes/file-validation.pipe';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
@@ -72,6 +73,11 @@ import {
   TranslateChatMessageDto,
   UpdateQuickReplyTemplateDto,
 } from 'src/dto/chat/omnichannel-inbox.dto';
+import {
+  RequireShopPermissions,
+  ShopPermissionGuard,
+} from 'src/modules/iam/guards/shop-permission.guard';
+import { FieldLevelSecurityInterceptor } from 'src/modules/iam/interceptors/field-level-security.interceptor';
 import * as queryTypes from 'src/types/query.types';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -91,6 +97,7 @@ import { RealtimeChatTranslationService } from './services/realtime-chat-transla
 @Controller('chat')
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(FieldLevelSecurityInterceptor)
 export class ChatController {
   private readonly logger = new Logger(ChatController.name, {
     timestamp: true,
@@ -917,6 +924,8 @@ export class ChatController {
       'F03.1 & F03.2: Truy vấn Hộp thư bán hàng đa kênh 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT',
   })
   @Post('omnichannel/query')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   async queryOmnichannelInbox(@Req() req, @Body() dto: OmnichannelInboxFilterDto) {
     const memberCtx = await this.granularIamService.getEffectiveMemberContext(
@@ -937,6 +946,8 @@ export class ChatController {
       'F03.5: Tạo Ghi chú nội bộ (Alt+N) & @mention đồng nghiệp (Không gửi ra Facebook/Zalo bên ngoài)',
   })
   @Post('conversations/:id/internal-note')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_INTERNAL_NOTE_WRITE)
   @HttpCode(HttpStatus.CREATED)
   async createInternalNote(
     @Req() req,
@@ -981,6 +992,8 @@ export class ChatController {
     summary: 'F03.6: Đặt lịch hẹn nhắc chăm sóc lại (Snooze Conversation)',
   })
   @Post('conversations/:id/snooze')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE)
   @HttpCode(HttpStatus.OK)
   async snoozeConversation(
     @Req() req,
@@ -1004,6 +1017,8 @@ export class ChatController {
     summary: 'F03.6: Hủy hẹn giờ Snooze để đưa hội thoại về danh sách chờ trả lời ngay',
   })
   @Delete('conversations/:id/snooze')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE)
   @HttpCode(HttpStatus.OK)
   async cancelSnooze(@Req() req, @Param('id') conversationId: string) {
     const data = await this.conversationSnoozeService.cancelSnooze({
@@ -1023,6 +1038,8 @@ export class ChatController {
       'F03.8 & F03.9: Chuyển giao hội thoại cho đồng nghiệp & ghi nhận Dòng thời gian Trách nhiệm',
   })
   @Post('conversations/:id/transfer')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_TRANSFER)
   @HttpCode(HttpStatus.OK)
   async transferConversation(
     @Req() req,
@@ -1046,6 +1063,8 @@ export class ChatController {
     summary: 'F03.7 & T03: Kiểm tra trạng thái Khóa chống đụng độ nhân viên (Collision Lock)',
   })
   @Get('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   async getCollisionLock(@Param('id') conversationId: string) {
     const data = await this.agentCollisionLockService.getLockStatus(conversationId);
@@ -1061,6 +1080,8 @@ export class ChatController {
     summary: 'F03.7 & T03: Giữ hoặc gia hạn Khóa chống đụng độ nhân viên (Heartbeat 30s)',
   })
   @Post('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   async acquireCollisionLock(@Req() req, @Param('id') conversationId: string) {
     const data = await this.agentCollisionLockService.acquireOrHeartbeatLock({
@@ -1079,6 +1100,8 @@ export class ChatController {
     summary: 'F03.7 & T03: Giải phóng Khóa chống đụng độ khi nhân viên rời hội thoại',
   })
   @Delete('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   async releaseCollisionLock(@Req() req, @Param('id') conversationId: string) {
     const data = await this.agentCollisionLockService.releaseLock({
@@ -1098,6 +1121,8 @@ export class ChatController {
       'F03.7: Quản lý / Trưởng ca chiếm quyền xử lý cuộc hội thoại đang bị khóa (Force Takeover)',
   })
   @Post('conversations/:id/collision-lock/takeover')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_COLLISION_FORCE_TAKEOVER)
   @HttpCode(HttpStatus.OK)
   async forceTakeoverCollisionLock(
     @Req() req,
@@ -1122,6 +1147,8 @@ export class ChatController {
       'F03.10 & T04: Khởi tạo cuộc gọi chốt đơn ẩn SĐT (Masked WebRTC-to-SIP VoIP — Sale chỉ thấy 098***678)',
   })
   @Post('conversations/:id/masked-call')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_CALL_MASKED)
   @HttpCode(HttpStatus.CREATED)
   async initiateMaskedVoipCall(
     @Req() req,
@@ -1146,6 +1173,8 @@ export class ChatController {
       'F03.10 & T04: Kết thúc cuộc gọi VoIP ẩn SĐT & đính kèm bong bóng ghi âm cuộc gọi (AudioWaveformPlayer)',
   })
   @Post('conversations/:id/masked-call/finalize')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_CALL_MASKED)
   @HttpCode(HttpStatus.OK)
   async finalizeMaskedVoipCall(
     @Req() req,
@@ -1169,6 +1198,8 @@ export class ChatController {
     summary: 'F03.11: Dịch tự động đa ngôn ngữ hai chiều trong khung chat',
   })
   @Post('translate')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_TRANSLATION_USE)
   @HttpCode(HttpStatus.OK)
   async translateChatMessage(@Body() dto: TranslateChatMessageDto) {
     const data = await this.realtimeChatTranslationService.translateMessageOrDraft(dto);
@@ -1184,6 +1215,8 @@ export class ChatController {
     summary: 'F03.3 & F03.4: Lấy danh sách thư viện mẫu câu trả lời nhanh (/shortcut) của cửa hàng',
   })
   @Get('quick-replies/:shopId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
     const data = await this.quickReplyService.listTemplates(shopId, search);
@@ -1199,6 +1232,8 @@ export class ChatController {
     summary: 'F03.3 & F03.4: Tạo mẫu câu trả lời nhanh (/shortcut) kèm biến động & thẻ sản phẩm',
   })
   @Post('quick-replies/:shopId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
   @HttpCode(HttpStatus.CREATED)
   async createQuickReplyTemplate(
     @Param('shopId') shopId: string,
@@ -1217,6 +1252,8 @@ export class ChatController {
     summary: 'F03.3 & F03.4: Cập nhật mẫu câu trả lời nhanh (/shortcut)',
   })
   @Patch('quick-replies/:shopId/:templateId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
   @HttpCode(HttpStatus.OK)
   async updateQuickReplyTemplate(
     @Param('shopId') shopId: string,
@@ -1236,6 +1273,8 @@ export class ChatController {
     summary: 'F03.3 & F03.4: Xóa mẫu câu trả lời nhanh (/shortcut)',
   })
   @Delete('quick-replies/:shopId/:templateId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
   @HttpCode(HttpStatus.OK)
   async deleteQuickReplyTemplate(
     @Param('shopId') shopId: string,
@@ -1255,6 +1294,8 @@ export class ChatController {
       'F03.3 & F03.4: Nội suy biến động ({{customer_name}}, {{salutation}}, {{agent_name}}, {{shop_name}})',
   })
   @Post('quick-replies/:shopId/:templateId/interpolate')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
   @HttpCode(HttpStatus.OK)
   async interpolateQuickReplyTemplate(
     @Param('shopId') shopId: string,
@@ -1264,6 +1305,7 @@ export class ChatController {
       customerName?: string;
       salutation?: string;
       agentName?: string;
+      pageName?: string;
       trackingLink?: string;
     },
   ) {
@@ -1285,6 +1327,8 @@ export class ChatController {
       'F03.3 & F03.4: Ẩn hoặc hiện bình luận của khách trên nền tảng gốc để chống đối thủ cướp SĐT',
   })
   @Post('conversations/:id/messages/:messageId/comment-visibility')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
   @HttpCode(HttpStatus.OK)
   async toggleCommentVisibility(
     @Req() req,
@@ -1316,6 +1360,8 @@ export class ChatController {
     summary: 'F03.3 & F03.4: Thả tim / Thích bình luận của khách hàng dưới tư cách Fanpage',
   })
   @Post('conversations/:id/messages/:messageId/comment-like')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
   @HttpCode(HttpStatus.OK)
   async toggleCommentLike(
     @Req() req,
@@ -1348,6 +1394,8 @@ export class ChatController {
       'F03.3 & F03.4: Gửi tin nhắn riêng (Private Reply Inbox) từ bình luận bài viết/Livestream trong hạn 7 ngày',
   })
   @Post('conversations/:id/messages/:messageId/private-reply')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
   @HttpCode(HttpStatus.OK)
   async sendPrivateReplyFromComment(
     @Req() req,
@@ -1373,6 +1421,41 @@ export class ChatController {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Kiểm tra quyền nghe hoặc tải file ghi âm cuộc gọi VoIP (INBOX_VOIP_LISTEN_RECORDING / INBOX_VOIP_DOWNLOAD_RECORDING)',
+  })
+  @Get('conversations/:id/masked-call/:callSessionId/recording')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_LISTEN_RECORDING)
+  @HttpCode(HttpStatus.OK)
+  async getMaskedCallRecordingAccess(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('callSessionId') callSessionId: string,
+    @Query('download') download?: string,
+  ) {
+    const wantsDownload = download === 'true' || download === '1';
+    if (wantsDownload) {
+      await this.granularIamService.assertConversationPermission(
+        conversationId,
+        req.user.id,
+        PermissionCodeEnum.INBOX_VOIP_DOWNLOAD_RECORDING,
+      );
+    }
+    const data = await this.maskedVoipCallService.getCallRecordingAccess({
+      conversationId,
+      callSessionId,
+      download: wantsDownload,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
       data,
     };
   }

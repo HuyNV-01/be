@@ -42,13 +42,36 @@ export class ShopPermissionGuard implements CanActivate {
       throw new UnauthorizedException('AUTHENTICATION_REQUIRED');
     }
 
-    const shopId: string | undefined =
+    let shopId: string | undefined | null =
       req.params?.shopId || req.headers?.['x-shop-id'] || req.body?.shopId || req.query?.shopId;
 
+    // Tự động suy diễn shopId từ conversationId trên các route /chat/conversations/:id/* hoặc /chat/translate
     if (!shopId) {
+      const candidateConvId: string | undefined =
+        req.params?.conversationId || req.params?.id || req.body?.conversationId;
+      if (candidateConvId) {
+        shopId = await this.granularIamService.resolveShopIdFromConversation(
+          String(candidateConvId),
+        );
+      }
+    }
+
+    // Nếu không truyền shopId trên route không gắn với hội thoại cửa hàng, thử lấy từ lastActiveShopId
+    if (!shopId && req.user?.lastActiveShopId) {
+      shopId = String(req.user.lastActiveShopId);
+    }
+
+    // Nếu là hội thoại cá nhân thuần túy (conv.shopId === null) và không có shopId, nhường kiểm tra thành viên cho ChatService.ensureParticipant
+    if (!shopId) {
+      const hasConvTarget = Boolean(
+        req.params?.conversationId || req.params?.id || req.body?.conversationId,
+      );
+      if (hasConvTarget) {
+        return true;
+      }
       throw new ForbiddenException({
         code: 'SHOP_WORKSPACE_HEADER_REQUIRED',
-        message: 'Missing shopId in route params or x-shop-id header',
+        message: 'Missing shopId in route params, body, or x-shop-id header',
       });
     }
 

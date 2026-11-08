@@ -134,7 +134,8 @@ export class OmnichannelInboxQueryService {
 
     // Toán tử tập hợp Tag AND / OR / NOT
     if (filter.includeTagIds && filter.includeTagIds.length > 0) {
-      if (filter.includeTagOperator === 'AND') {
+      const tagMatchMode = filter.includeTagMatchMode || filter.includeTagOperator || 'OR';
+      if (tagMatchMode === 'AND') {
         qb.andWhere(
           'JSON_CONTAINS(COALESCE(conv.active_tag_ids_json, JSON_ARRAY()), :includeTagsJson)',
           { includeTagsJson: JSON.stringify(filter.includeTagIds) },
@@ -160,6 +161,17 @@ export class OmnichannelInboxQueryService {
         '(conv.name LIKE :kw OR conv.external_thread_id LIKE :kw OR conv.source_ad_id LIKE :kw OR conv.source_post_id LIKE :kw)',
         { kw },
       );
+    }
+
+    if (filter.dateFrom) {
+      qb.andWhere('conv.lastMessageAt >= :dateFrom', {
+        dateFrom: new Date(filter.dateFrom),
+      });
+    }
+    if (filter.dateTo) {
+      qb.andWhere('conv.lastMessageAt <= :dateTo', {
+        dateTo: new Date(filter.dateTo),
+      });
     }
 
     if (filter.cursorLastMessageAt) {

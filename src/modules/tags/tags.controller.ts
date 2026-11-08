@@ -209,6 +209,7 @@ export class TagsController {
   }
 
   @Get('bookmarks')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:

@@ -113,6 +113,15 @@ export class OmnichannelInboxFilterDto {
   @IsEnum(['AND', 'OR'])
   includeTagOperator?: 'AND' | 'OR';
 
+  @ApiPropertyOptional({
+    enum: ['AND', 'OR'],
+    default: 'OR',
+    description: 'Chế độ khớp tập hợp Tag (AND bắt buộc đủ / OR có ít nhất 1)',
+  })
+  @IsOptional()
+  @IsEnum(['AND', 'OR'])
+  includeTagMatchMode?: 'AND' | 'OR';
+
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
@@ -123,6 +132,16 @@ export class OmnichannelInboxFilterDto {
   @IsOptional()
   @IsString()
   searchKeyword?: string;
+
+  @ApiPropertyOptional({ description: 'Lọc từ ngày (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @ApiPropertyOptional({ description: 'Lọc đến ngày (ISO 8601)' })
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

@@ -46,6 +46,8 @@ export class AutoTagRuleEngine {
         const rule = tag.autoRuleConfigJson;
         if (!rule) {
           if (triggerEvent === 'NER_PHONE_EXTRACTED' && tag.slug === 'HAS_PHONE') return true;
+          if (triggerEvent === 'NER_ADDRESS_EXTRACTED' && tag.slug === 'HAS_ADDRESS') return true;
+          if (triggerEvent === 'VIETQR_PAID' && tag.slug === 'PAYMENT_RECEIVED') return true;
           if (triggerEvent === 'POS_ORDER_CONFIRMED' && tag.slug === 'ORDER_CREATED') return true;
           if (triggerEvent === 'CARRIER_DELIVERY_FAILED' && tag.slug === 'DELIVERY_RESCUE_URGENT') {
             return true;

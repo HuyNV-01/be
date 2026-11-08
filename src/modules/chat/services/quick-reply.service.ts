@@ -229,6 +229,7 @@ export class QuickReplyService {
     customerName?: string;
     salutation?: string;
     agentName?: string;
+    pageName?: string;
     trackingLink?: string;
   }): Promise<{
     interpolatedContent: string;
@@ -252,6 +253,7 @@ export class QuickReplyService {
       salutation: params.salutation || 'anh/chị',
       agent_name: params.agentName || 'Tư vấn viên',
       shop_name: shop?.name || 'Cửa hàng',
+      page_name: params.pageName || shop?.name || 'Fanpage',
       tracking_link: params.trackingLink || 'https://tracking.pancake.vn',
     };
 

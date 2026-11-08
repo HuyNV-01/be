@@ -390,6 +390,30 @@ export class ChatService {
       );
 
       if (!isInternalNoteMsg) {
+        const currentTimeline = Array.isArray(conversation?.accountabilityTimelineJson)
+          ? [...conversation.accountabilityTimelineJson]
+          : [];
+        const hasFrtRecorded = currentTimeline.some(
+          (item) => item.eventCode === 'FIRST_AGENT_REPLY_FRT',
+        );
+        if (conversation?.shopId && !hasFrtRecorded) {
+          const elapsedSec = conversation.lastCustomerMessageAt
+            ? Math.max(
+                0,
+                Math.round(
+                  (now.getTime() - new Date(conversation.lastCustomerMessageAt).getTime()) / 1000,
+                ),
+              )
+            : 0;
+          currentTimeline.push({
+            eventCode: 'FIRST_AGENT_REPLY_FRT',
+            actorUserId: senderId,
+            elapsedSecondsFromInbound: elapsedSec,
+            note: `Phản hồi đầu tiên sau ${elapsedSec}s`,
+            timestamp: now.toISOString(),
+          });
+        }
+
         await queryRunner.manager.update(
           ConversationEntity,
           dto.conversationId,
@@ -406,6 +430,7 @@ export class ChatService {
                 snoozedUntilAt: null,
                 supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
                 assignedAgentId: conversation.assignedAgentId || senderId,
+                accountabilityTimelineJson: currentTimeline,
               }
             : {
                 lastMessage: encryptedLastMsg.ciphertext,
@@ -3012,8 +3037,25 @@ export class ChatService {
   }
 
   /**
+   * Điều tốc Token Bucket trên Redis cho Meta Private Replies API & Comment Actions (Tối đa 750 lệnh/giờ/Page)
+   */
+  private async consumeMetaGraphActionQuota(
+    bucketScope: string,
+    maxCallsPerHour = 750,
+  ): Promise<void> {
+    const hourSlot = Math.floor(Date.now() / 3_600_000);
+    const redisKey = `ratelimit:meta_comment_action:${bucketScope}:${hourSlot}`;
+    const used = await this.redis.incr(redisKey);
+    if (used === 1) {
+      await this.redis.expire(redisKey, 3660);
+    }
+    if (used > maxCallsPerHour) {
+      throw new BadRequestException('META_PRIVATE_REPLY_RATE_LIMIT_EXCEEDED');
+    }
+  }
+
+  /**
    * F03.3 & F03.4: Ẩn hoặc hiện bình luận của khách trên nền tảng gốc (Facebook / Instagram / TikTok)
-   * để chống đối thủ cướp số điện thoại khách hàng.
    */
   async toggleCommentVisibilityOnPlatform(params: {
     userId: string;
@@ -3118,6 +3160,11 @@ export class ChatService {
     if (!parentConv) {
       throw new NotFoundException('CONVERSATION_NOT_FOUND');
     }
+
+    await this.consumeMetaGraphActionQuota(
+      parentConv.channelIntegrationId || parentConv.shopId || parentConv.id,
+      750,
+    );
 
     let inboxConv = await this.convRepository.findOne({
       where: {

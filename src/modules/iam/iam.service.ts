@@ -593,4 +593,46 @@ export class GranularIamService {
 
     return saved;
   }
+
+  async resolveShopIdFromConversation(conversationId: string): Promise<string | null> {
+    if (!conversationId) return null;
+    const conv = await this.conversationRepo.findOne({
+      where: { id: conversationId },
+      select: ['id', 'shopId'],
+    });
+    return conv?.shopId || null;
+  }
+
+  async assertHasPermission(
+    shopId: string,
+    userId: string,
+    requiredPermission: PermissionCodeEnum,
+  ): Promise<EffectiveMemberContext> {
+    const ctx = await this.getEffectiveMemberContext(shopId, userId);
+    if (ctx.membershipStatus !== MembershipStatusEnum.ACTIVE) {
+      throw new ForbiddenException({
+        code: 'MEMBERSHIP_NOT_ACTIVE',
+        membershipStatus: ctx.membershipStatus,
+      });
+    }
+    if (ctx.role !== ShopRoleEnum.SHOP_OWNER && !ctx.permissions.includes(requiredPermission)) {
+      throw new ForbiddenException({
+        code: 'INSUFFICIENT_SHOP_PERMISSIONS',
+        requiredPermission,
+      });
+    }
+    return ctx;
+  }
+
+  async assertConversationPermission(
+    conversationId: string,
+    userId: string,
+    requiredPermission: PermissionCodeEnum,
+  ): Promise<EffectiveMemberContext | null> {
+    const shopId = await this.resolveShopIdFromConversation(conversationId);
+    if (!shopId) {
+      return null;
+    }
+    return this.assertHasPermission(shopId, userId, requiredPermission);
+  }
 }

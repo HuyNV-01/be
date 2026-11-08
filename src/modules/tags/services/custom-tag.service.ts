@@ -153,6 +153,48 @@ export class CustomTagService {
         shortcutKey: '9',
         sortOrder: 9,
       },
+      {
+        shopId,
+        name: 'Đã có địa chỉ',
+        slug: 'HAS_ADDRESS',
+        colorHex: '#06B6D4',
+        colorOklch: 'oklch(0.71 0.14 215)',
+        category: TagCategoryEnum.CONSULTATION_STATUS,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['CONVERSATION', 'CUSTOMER'],
+        shortcutKey: null,
+        sortOrder: 10,
+        autoRuleConfigJson: {
+          triggerEvent: 'NER_ADDRESS_EXTRACTED',
+        },
+      },
+      {
+        shopId,
+        name: 'Đã chuyển khoản',
+        slug: 'PAYMENT_RECEIVED',
+        colorHex: '#14B8A6',
+        colorOklch: 'oklch(0.70 0.15 180)',
+        category: TagCategoryEnum.CONSULTATION_STATUS,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['CONVERSATION', 'ORDER'],
+        shortcutKey: null,
+        sortOrder: 11,
+        autoRuleConfigJson: {
+          triggerEvent: 'VIETQR_PAID',
+        },
+      },
+      {
+        shopId,
+        name: 'Phản hồi / Đánh giá',
+        slug: 'CUSTOMER_FEEDBACK',
+        colorHex: '#6366F1',
+        colorOklch: 'oklch(0.58 0.23 277)',
+        category: TagCategoryEnum.MESSAGE_BOOKMARK,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['MESSAGE'],
+        shortcutKey: null,
+        sortOrder: 12,
+      },
     ];
 
     const created = this.customTagRepo.create(defaults);
