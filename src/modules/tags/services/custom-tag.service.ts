@@ -5,128 +5,6 @@ import { CreateCustomTagDto, QueryCustomTagsDto, UpdateCustomTagDto } from 'src/
 import { CustomTagEntity, TagCategoryEnum } from 'src/entity/custom-tag.entity';
 import { Repository } from 'typeorm';
 
-export function buildDefaultShopCustomTags(shopId: string): Array<Partial<CustomTagEntity>> {
-  return [
-    {
-      shopId,
-      name: 'Đang tư vấn',
-      slug: 'CONSULTING',
-      colorHex: '#3B82F6',
-      colorOklch: 'oklch(0.62 0.19 259)',
-      category: TagCategoryEnum.CONSULTATION_STATUS,
-      isMutuallyExclusiveGroup: true,
-      applicableScopesJson: ['CONVERSATION'],
-      shortcutKey: '1',
-      sortOrder: 1,
-    },
-    {
-      shopId,
-      name: 'Đã có SĐT',
-      slug: 'HAS_PHONE',
-      colorHex: '#8B5CF6',
-      colorOklch: 'oklch(0.60 0.22 293)',
-      category: TagCategoryEnum.CONSULTATION_STATUS,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['CONVERSATION', 'CUSTOMER'],
-      shortcutKey: '2',
-      sortOrder: 2,
-      autoRuleConfigJson: {
-        triggerEvent: 'NER_PHONE_EXTRACTED',
-      },
-    },
-    {
-      shopId,
-      name: 'Đã chốt đơn',
-      slug: 'ORDER_CREATED',
-      colorHex: '#10B981',
-      colorOklch: 'oklch(0.69 0.17 162)',
-      category: TagCategoryEnum.CONSULTATION_STATUS,
-      isMutuallyExclusiveGroup: true,
-      applicableScopesJson: ['CONVERSATION', 'ORDER'],
-      shortcutKey: '3',
-      sortOrder: 3,
-      autoRuleConfigJson: {
-        triggerEvent: 'POS_ORDER_CONFIRMED',
-      },
-    },
-    {
-      shopId,
-      name: 'Cần cứu đơn gấp',
-      slug: 'DELIVERY_RESCUE_URGENT',
-      colorHex: '#EF4444',
-      colorOklch: 'oklch(0.63 0.24 29)',
-      category: TagCategoryEnum.DELIVERY_ISSUE,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['CONVERSATION', 'ORDER'],
-      shortcutKey: '4',
-      sortOrder: 4,
-      autoRuleConfigJson: {
-        triggerEvent: 'CARRIER_DELIVERY_FAILED',
-      },
-    },
-    {
-      shopId,
-      name: 'Địa chỉ giao hàng',
-      slug: 'SHIPPING_ADDRESS',
-      colorHex: '#0EA5E9',
-      colorOklch: 'oklch(0.68 0.16 237)',
-      category: TagCategoryEnum.MESSAGE_BOOKMARK,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['MESSAGE'],
-      shortcutKey: '5',
-      sortOrder: 5,
-    },
-    {
-      shopId,
-      name: 'Bill chuyển khoản',
-      slug: 'BANK_TRANSFER_RECEIPT',
-      colorHex: '#F59E0B',
-      colorOklch: 'oklch(0.76 0.18 70)',
-      category: TagCategoryEnum.MESSAGE_BOOKMARK,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['MESSAGE'],
-      shortcutKey: '6',
-      sortOrder: 6,
-    },
-    {
-      shopId,
-      name: 'Chiều cao & Cân nặng',
-      slug: 'BODY_MEASUREMENT',
-      colorHex: '#EC4899',
-      colorOklch: 'oklch(0.65 0.21 354)',
-      category: TagCategoryEnum.MESSAGE_BOOKMARK,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['MESSAGE'],
-      shortcutKey: '7',
-      sortOrder: 7,
-    },
-    {
-      shopId,
-      name: 'Lưu ý đóng gói kho',
-      slug: 'PACKING_INSTRUCTION',
-      colorHex: '#F97316',
-      colorOklch: 'oklch(0.70 0.19 48)',
-      category: TagCategoryEnum.MESSAGE_BOOKMARK,
-      isMutuallyExclusiveGroup: false,
-      applicableScopesJson: ['MESSAGE', 'ORDER'],
-      shortcutKey: '8',
-      sortOrder: 8,
-    },
-    {
-      shopId,
-      name: 'Khách VIP thân thiết',
-      slug: 'CUSTOMER_VIP',
-      colorHex: '#EAB308',
-      colorOklch: 'oklch(0.79 0.18 86)',
-      category: TagCategoryEnum.CUSTOMER_TIER,
-      isMutuallyExclusiveGroup: true,
-      applicableScopesJson: ['CONVERSATION', 'CUSTOMER'],
-      shortcutKey: '9',
-      sortOrder: 9,
-    },
-  ];
-}
-
 @Injectable()
 export class CustomTagService {
   constructor(
@@ -146,33 +24,139 @@ export class CustomTagService {
   }
 
   async ensureDefaultShopTags(shopId: string): Promise<CustomTagEntity[]> {
-    const existingAll = await this.customTagRepo.find({
+    const count = await this.customTagRepo.count({
       where: { shopId },
       withDeleted: true,
     });
-
-    const existingSlugs = new Set(existingAll.map((t) => t.slug));
-    const defaults = buildDefaultShopCustomTags(shopId);
-    const missingDefaults = defaults.filter((d) => d.slug && !existingSlugs.has(d.slug));
-
-    if (missingDefaults.length > 0) {
-      const usedShortcuts = new Set(
-        existingAll.map((t) => t.shortcutKey).filter((k): k is string => Boolean(k)),
-      );
-      const entitiesToCreate = missingDefaults.map((d) =>
-        this.customTagRepo.create({
-          ...d,
-          shortcutKey: d.shortcutKey && !usedShortcuts.has(d.shortcutKey) ? d.shortcutKey : null,
-          isActive: true,
-        }),
-      );
-      await this.customTagRepo.save(entitiesToCreate);
+    if (count > 0) {
+      return this.customTagRepo.find({
+        where: { shopId, isActive: true },
+        order: { sortOrder: 'ASC', createdAt: 'ASC' },
+      });
     }
 
-    return this.customTagRepo.find({
-      where: { shopId, isActive: true },
-      order: { sortOrder: 'ASC', createdAt: 'ASC' },
-    });
+    const defaults: Array<Partial<CustomTagEntity>> = [
+      {
+        shopId,
+        name: 'Đang tư vấn',
+        slug: 'CONSULTING',
+        colorHex: '#3B82F6',
+        colorOklch: 'oklch(0.62 0.19 259)',
+        category: TagCategoryEnum.CONSULTATION_STATUS,
+        isMutuallyExclusiveGroup: true,
+        applicableScopesJson: ['CONVERSATION'],
+        shortcutKey: '1',
+        sortOrder: 1,
+      },
+      {
+        shopId,
+        name: 'Đã có SĐT',
+        slug: 'HAS_PHONE',
+        colorHex: '#8B5CF6',
+        colorOklch: 'oklch(0.60 0.22 293)',
+        category: TagCategoryEnum.CONSULTATION_STATUS,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['CONVERSATION', 'CUSTOMER'],
+        shortcutKey: '2',
+        sortOrder: 2,
+        autoRuleConfigJson: {
+          triggerEvent: 'NER_PHONE_EXTRACTED',
+        },
+      },
+      {
+        shopId,
+        name: 'Đã chốt đơn',
+        slug: 'ORDER_CREATED',
+        colorHex: '#10B981',
+        colorOklch: 'oklch(0.69 0.17 162)',
+        category: TagCategoryEnum.CONSULTATION_STATUS,
+        isMutuallyExclusiveGroup: true,
+        applicableScopesJson: ['CONVERSATION', 'ORDER'],
+        shortcutKey: '3',
+        sortOrder: 3,
+        autoRuleConfigJson: {
+          triggerEvent: 'POS_ORDER_CONFIRMED',
+        },
+      },
+      {
+        shopId,
+        name: 'Cần cứu đơn gấp',
+        slug: 'DELIVERY_RESCUE_URGENT',
+        colorHex: '#EF4444',
+        colorOklch: 'oklch(0.63 0.24 29)',
+        category: TagCategoryEnum.DELIVERY_ISSUE,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['CONVERSATION', 'ORDER'],
+        shortcutKey: '4',
+        sortOrder: 4,
+        autoRuleConfigJson: {
+          triggerEvent: 'CARRIER_DELIVERY_FAILED',
+        },
+      },
+      {
+        shopId,
+        name: 'Địa chỉ giao hàng',
+        slug: 'SHIPPING_ADDRESS',
+        colorHex: '#0EA5E9',
+        colorOklch: 'oklch(0.68 0.16 237)',
+        category: TagCategoryEnum.MESSAGE_BOOKMARK,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['MESSAGE'],
+        shortcutKey: '5',
+        sortOrder: 5,
+      },
+      {
+        shopId,
+        name: 'Bill chuyển khoản',
+        slug: 'BANK_TRANSFER_RECEIPT',
+        colorHex: '#F59E0B',
+        colorOklch: 'oklch(0.76 0.18 70)',
+        category: TagCategoryEnum.MESSAGE_BOOKMARK,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['MESSAGE'],
+        shortcutKey: '6',
+        sortOrder: 6,
+      },
+      {
+        shopId,
+        name: 'Chiều cao & Cân nặng',
+        slug: 'BODY_MEASUREMENT',
+        colorHex: '#EC4899',
+        colorOklch: 'oklch(0.65 0.21 354)',
+        category: TagCategoryEnum.MESSAGE_BOOKMARK,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['MESSAGE'],
+        shortcutKey: '7',
+        sortOrder: 7,
+      },
+      {
+        shopId,
+        name: 'Lưu ý đóng gói kho',
+        slug: 'PACKING_INSTRUCTION',
+        colorHex: '#F97316',
+        colorOklch: 'oklch(0.70 0.19 48)',
+        category: TagCategoryEnum.MESSAGE_BOOKMARK,
+        isMutuallyExclusiveGroup: false,
+        applicableScopesJson: ['MESSAGE', 'ORDER'],
+        shortcutKey: '8',
+        sortOrder: 8,
+      },
+      {
+        shopId,
+        name: 'Khách VIP thân thiết',
+        slug: 'CUSTOMER_VIP',
+        colorHex: '#EAB308',
+        colorOklch: 'oklch(0.79 0.18 86)',
+        category: TagCategoryEnum.CUSTOMER_TIER,
+        isMutuallyExclusiveGroup: true,
+        applicableScopesJson: ['CONVERSATION', 'CUSTOMER'],
+        shortcutKey: '9',
+        sortOrder: 9,
+      },
+    ];
+
+    const created = this.customTagRepo.create(defaults);
+    return this.customTagRepo.save(created);
   }
 
   async listShopTags(shopId: string, query: QueryCustomTagsDto): Promise<CustomTagEntity[]> {

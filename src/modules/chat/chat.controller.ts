@@ -30,7 +30,6 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
-import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { FileValidators } from 'src/common/pipes/file-validation.pipe';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
@@ -65,7 +64,10 @@ import {
   FinalizeMaskedVoipCallDto,
   InitiateMaskedVoipCallDto,
   OmnichannelInboxFilterDto,
+  SendPrivateReplyFromCommentDto,
   SnoozeConversationDto,
+  ToggleCommentLikeDto,
+  ToggleCommentVisibilityDto,
   TransferConversationDto,
   TranslateChatMessageDto,
   UpdateQuickReplyTemplateDto,
@@ -917,10 +919,9 @@ export class ChatController {
   @Post('omnichannel/query')
   @HttpCode(HttpStatus.OK)
   async queryOmnichannelInbox(@Req() req, @Body() dto: OmnichannelInboxFilterDto) {
-    const memberCtx = await this.granularIamService.assertHasPermission(
+    const memberCtx = await this.granularIamService.getEffectiveMemberContext(
       dto.shopId,
       req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
     );
     const data = await this.omnichannelInboxQueryService.queryMergedConversations(dto, memberCtx);
     return {
@@ -986,11 +987,6 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: SnoozeConversationDto,
   ) {
-    await this.chatService.assertShopConversationPermission(
-      conversationId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE,
-    );
     const data = await this.conversationSnoozeService.snoozeConversation({
       conversationId,
       actorUserId: req.user.id,
@@ -1010,11 +1006,6 @@ export class ChatController {
   @Delete('conversations/:id/snooze')
   @HttpCode(HttpStatus.OK)
   async cancelSnooze(@Req() req, @Param('id') conversationId: string) {
-    await this.chatService.assertShopConversationPermission(
-      conversationId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE,
-    );
     const data = await this.conversationSnoozeService.cancelSnooze({
       conversationId,
       actorUserId: req.user.id,
@@ -1038,11 +1029,6 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: TransferConversationDto,
   ) {
-    await this.chatService.assertShopConversationPermission(
-      conversationId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_TRANSFER,
-    );
     const data = await this.accountabilityTimelineService.transferConversation({
       conversationId,
       actorUserId: req.user.id,
@@ -1142,11 +1128,6 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: InitiateMaskedVoipCallDto,
   ) {
-    await this.chatService.assertShopConversationPermission(
-      conversationId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_VOIP_CALL_MASKED,
-    );
     const data = await this.maskedVoipCallService.initiateMaskedPstnCall({
       conversationId,
       agentUserId: req.user.id,
@@ -1171,11 +1152,6 @@ export class ChatController {
     @Param('id') conversationId: string,
     @Body() dto: FinalizeMaskedVoipCallDto,
   ) {
-    await this.chatService.assertShopConversationPermission(
-      conversationId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_VOIP_CALL_MASKED,
-    );
     const data = await this.maskedVoipCallService.finalizeCallAndAttachRecordingBubble({
       conversationId,
       agentUserId: req.user.id,
@@ -1194,14 +1170,7 @@ export class ChatController {
   })
   @Post('translate')
   @HttpCode(HttpStatus.OK)
-  async translateChatMessage(@Req() req, @Body() dto: TranslateChatMessageDto) {
-    if (dto.conversationId) {
-      await this.chatService.assertShopConversationPermission(
-        dto.conversationId,
-        req.user.id,
-        PermissionCodeEnum.INBOX_TRANSLATION_USE,
-      );
-    }
+  async translateChatMessage(@Body() dto: TranslateChatMessageDto) {
     const data = await this.realtimeChatTranslationService.translateMessageOrDraft(dto);
     return {
       status: HttpStatus.OK,
@@ -1216,16 +1185,7 @@ export class ChatController {
   })
   @Get('quick-replies/:shopId')
   @HttpCode(HttpStatus.OK)
-  async listQuickReplyTemplates(
-    @Req() req,
-    @Param('shopId') shopId: string,
-    @Query('search') search?: string,
-  ) {
-    await this.granularIamService.assertHasPermission(
-      shopId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
-    );
+  async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
     const data = await this.quickReplyService.listTemplates(shopId, search);
     return {
       status: HttpStatus.OK,
@@ -1241,15 +1201,9 @@ export class ChatController {
   @Post('quick-replies/:shopId')
   @HttpCode(HttpStatus.CREATED)
   async createQuickReplyTemplate(
-    @Req() req,
     @Param('shopId') shopId: string,
     @Body() dto: CreateQuickReplyTemplateDto,
   ) {
-    await this.granularIamService.assertHasPermission(
-      shopId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
-    );
     const data = await this.quickReplyService.createTemplate(shopId, dto);
     return {
       status: HttpStatus.CREATED,
@@ -1265,16 +1219,10 @@ export class ChatController {
   @Patch('quick-replies/:shopId/:templateId')
   @HttpCode(HttpStatus.OK)
   async updateQuickReplyTemplate(
-    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
     @Body() dto: UpdateQuickReplyTemplateDto,
   ) {
-    await this.granularIamService.assertHasPermission(
-      shopId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
-    );
     const data = await this.quickReplyService.updateTemplate(shopId, templateId, dto);
     return {
       status: HttpStatus.OK,
@@ -1290,15 +1238,9 @@ export class ChatController {
   @Delete('quick-replies/:shopId/:templateId')
   @HttpCode(HttpStatus.OK)
   async deleteQuickReplyTemplate(
-    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
   ) {
-    await this.granularIamService.assertHasPermission(
-      shopId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE,
-    );
     const data = await this.quickReplyService.deleteTemplate(shopId, templateId);
     return {
       status: HttpStatus.OK,
@@ -1315,7 +1257,6 @@ export class ChatController {
   @Post('quick-replies/:shopId/:templateId/interpolate')
   @HttpCode(HttpStatus.OK)
   async interpolateQuickReplyTemplate(
-    @Req() req,
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
     @Body()
@@ -1326,11 +1267,6 @@ export class ChatController {
       trackingLink?: string;
     },
   ) {
-    await this.granularIamService.assertHasPermission(
-      shopId,
-      req.user.id,
-      PermissionCodeEnum.INBOX_CONVERSATION_VIEW,
-    );
     const data = await this.quickReplyService.interpolateTemplate({
       shopId,
       templateId,
@@ -1340,6 +1276,103 @@ export class ChatController {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Ẩn hoặc hiện bình luận của khách trên nền tảng gốc để chống đối thủ cướp SĐT',
+  })
+  @Post('conversations/:id/messages/:messageId/comment-visibility')
+  @HttpCode(HttpStatus.OK)
+  async toggleCommentVisibility(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: ToggleCommentVisibilityDto,
+  ) {
+    const data = await this.chatService.toggleCommentVisibilityOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+      isHidden: dto.isHidden,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
+      data,
+    );
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Thả tim / Thích bình luận của khách hàng dưới tư cách Fanpage',
+  })
+  @Post('conversations/:id/messages/:messageId/comment-like')
+  @HttpCode(HttpStatus.OK)
+  async toggleCommentLike(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: ToggleCommentLikeDto,
+  ) {
+    const data = await this.chatService.toggleCommentLikeOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+      isLiked: dto.isLiked,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_LIKE_UPDATED,
+      data,
+    );
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Gửi tin nhắn riêng (Private Reply Inbox) từ bình luận bài viết/Livestream trong hạn 7 ngày',
+  })
+  @Post('conversations/:id/messages/:messageId/private-reply')
+  @HttpCode(HttpStatus.OK)
+  async sendPrivateReplyFromComment(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: SendPrivateReplyFromCommentDto,
+  ) {
+    const data = await this.chatService.sendPrivateReplyFromComment({
+      senderId: req.user.id,
+      conversationId,
+      commentMessageId: messageId,
+      content: dto.content,
+      autoHideComment: dto.autoHideComment,
+      autoLikeComment: dto.autoLikeComment,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_PRIVATE_REPLY_SENT,
+      data,
+    );
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
       data,
     };
   }

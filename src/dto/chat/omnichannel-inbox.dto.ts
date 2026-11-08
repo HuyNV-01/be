@@ -347,3 +347,35 @@ export class TranslateChatMessageDto {
   @IsUUID()
   conversationId?: string;
 }
+
+export class ToggleCommentVisibilityDto {
+  @ApiProperty({
+    description: 'Ẩn hoặc hiện bình luận của khách trên nền tảng gốc (F03.3 & F03.4)',
+  })
+  @IsBoolean()
+  isHidden: boolean;
+}
+
+export class ToggleCommentLikeDto {
+  @ApiProperty({ description: 'Thích hoặc bỏ thích bình luận của khách dưới tư cách Fanpage' })
+  @IsBoolean()
+  isLiked: boolean;
+}
+
+export class SendPrivateReplyFromCommentDto {
+  @ApiProperty({ description: 'Nội dung tin nhắn riêng (Private Reply Inbox) gửi từ bình luận' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  content: string;
+
+  @ApiPropertyOptional({ description: 'Tự động ẩn bình luận sau khi gửi Private Reply' })
+  @IsOptional()
+  @IsBoolean()
+  autoHideComment?: boolean;
+
+  @ApiPropertyOptional({ description: 'Tự động thích bình luận sau khi gửi Private Reply' })
+  @IsOptional()
+  @IsBoolean()
+  autoLikeComment?: boolean;
+}

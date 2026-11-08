@@ -4,7 +4,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { ConversationSupportStatusEnum } from 'src/common/enum/permission.enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
-import { DatabaseEvolutionService } from 'src/config/databases/database-evolution.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -18,23 +17,18 @@ export class GhostedConversationWatchdogService {
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
     private readonly realtimeEmitter: RealtimeEmitterService,
-    private readonly databaseEvolutionService: DatabaseEvolutionService,
   ) {}
 
   /**
-   * Công cụ T03 & F03.1:
+   * Công cụ T03 & F03.8:
    * Chạy mỗi 30 giây để phát hiện:
-   * 1. Hội thoại "Đã xem nhưng bỏ quên" (Ghosted: first_seen_at <= NOW() - shop.ghosted_alert_seconds (mặc định 180s) mà chưa trả lời).
+   * 1. Hội thoại "Đã xem nhưng bỏ quên" (Ghosted: đã mở xem vượt ngưỡng ghosted_alert_seconds của cửa hàng mà chưa trả lời).
    * 2. Hội thoại quá hạn SLA (sla_deadline_at <= NOW() mà chưa trả lời).
    */
   @Cron(CronExpression.EVERY_30_SECONDS)
   async detectAndFlagGhostedAndSlaBreachedConversations(): Promise<void> {
-    if (!this.databaseEvolutionService.isReady()) {
-      return;
-    }
-
     try {
-      // 1. Quét hội thoại Ghosted theo cấu hình ghosted_alert_seconds của từng cửa hàng (mặc định 180 giây)
+      // 1. Quét hội thoại Ghosted (Đã mở xem vượt ngưỡng COALESCE(sw.ghosted_alert_seconds, 180) nhưng chưa phản hồi)
       const newlyGhosted = await this.conversationRepo
         .createQueryBuilder('conv')
         .leftJoin(ShopWorkspaceEntity, 'sw', 'sw.id = conv.shop_id')
@@ -44,7 +38,7 @@ export class GhostedConversationWatchdogService {
         .andWhere('conv.is_ghosted_by_agent = false')
         .andWhere('conv.first_seen_at IS NOT NULL')
         .andWhere(
-          'conv.first_seen_at <= DATE_SUB(NOW(), INTERVAL COALESCE(sw.ghosted_alert_seconds, 180) SECOND)',
+          'TIMESTAMPDIFF(SECOND, conv.first_seen_at, NOW()) >= COALESCE(sw.ghosted_alert_seconds, 180)',
         )
         .andWhere(
           '(conv.last_agent_reply_at IS NULL OR conv.last_agent_reply_at < conv.last_customer_message_at)',
@@ -118,26 +112,17 @@ export class GhostedConversationWatchdogService {
           .execute();
 
         for (const conv of newlyBreached) {
-          const slaPayload = {
-            conversationId: conv.id,
-            shopId: conv.shopId,
-            customerName: conv.name || 'Khách hàng',
-            isSlaBreached: true,
-          };
-
-          this.realtimeEmitter.emitToConversation(
-            SOCKET_CONFIG.namespaces.CHAT,
-            conv.id,
-            SOCKET_CONFIG.events.OMNICHANNEL_INBOX.SLA_WARNING_TICK,
-            slaPayload,
-          );
-
           if (conv.assignedAgentId) {
             this.realtimeEmitter.emitToUser(
               SOCKET_CONFIG.namespaces.CHAT,
               conv.assignedAgentId,
               SOCKET_CONFIG.events.OMNICHANNEL_INBOX.SLA_WARNING_TICK,
-              slaPayload,
+              {
+                conversationId: conv.id,
+                shopId: conv.shopId,
+                customerName: conv.name || 'Khách hàng',
+                isSlaBreached: true,
+              },
             );
           }
         }

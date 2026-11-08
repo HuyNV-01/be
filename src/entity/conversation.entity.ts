@@ -39,7 +39,6 @@ export interface AccountabilityMilestoneItem {
 @Index(['lastMessageAt'])
 @Index('idx_conv_shop_support_sla', ['shopId', 'supportStatus', 'slaDeadlineAt'])
 @Index('idx_conv_shop_status_last_msg', ['shopId', 'supportStatus', 'lastMessageAt'])
-@Index('idx_conv_shop_agent_status', ['shopId', 'assignedAgentId', 'supportStatus'])
 @Index('idx_conv_shop_channel_assigned', ['shopId', 'channelIntegrationId', 'assignedAgentId'])
 @Index('idx_conv_shop_channel_ext', ['shopId', 'channelIntegrationId', 'externalThreadId'])
 @Index('idx_conv_shop_ghosted', ['shopId', 'isGhostedByAgent', 'supportStatus'])

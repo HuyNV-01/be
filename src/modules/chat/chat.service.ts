@@ -27,7 +27,6 @@ import {
   MessageTypeEnum,
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
-  PermissionCodeEnum,
   ShopRoleEnum,
 } from 'src/common/enum';
 import { ContactStatusEnum } from 'src/common/enum';
@@ -83,10 +82,8 @@ import { LessThanOrEqual } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 
 import { BufferedFile } from '../files/files.service';
-import { GranularIamService } from '../iam/iam.service';
 import { MediaService } from '../media/media.service';
 import { UserService } from '../user/user.service';
-import { AccountabilityTimelineService } from './services/accountability-timeline.service';
 import { LinkPreviewService } from './services/link-preview.service';
 import { MessageCryptoService } from './services/message-crypto.service';
 
@@ -117,8 +114,6 @@ export class ChatService {
     private readonly socketStateService: SocketStateService,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly linkPreviewService: LinkPreviewService,
-    private readonly granularIamService: GranularIamService,
-    private readonly accountabilityTimelineService: AccountabilityTimelineService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -212,21 +207,6 @@ export class ChatService {
     }
 
     throw new ForbiddenException('You are not a member of this conversation');
-  }
-
-  async assertShopConversationPermission(
-    conversationId: string,
-    userId: string,
-    permission: PermissionCodeEnum,
-  ): Promise<void> {
-    await this.ensureParticipant(conversationId, userId);
-    const conv = await this.convRepository.findOne({
-      where: { id: conversationId },
-      select: ['id', 'shopId'],
-    });
-    if (conv?.shopId) {
-      await this.granularIamService.assertHasPermission(conv.shopId, userId, permission);
-    }
   }
 
   async getConversationMemberIds(conversationId: string): Promise<string[]> {
@@ -452,33 +432,6 @@ export class ChatService {
       });
 
       await queryRunner.commitTransaction();
-
-      if (conversation?.shopId) {
-        if (isInternalNoteMsg) {
-          void this.accountabilityTimelineService
-            .appendMilestone({
-              conversationId: dto.conversationId,
-              eventCode: 'INTERNAL_NOTE_ADDED',
-              actorUserId: senderId,
-              note: cleanContent.slice(0, 120),
-            })
-            .catch(() => undefined);
-        } else if (
-          !conversation.lastAgentReplyAt ||
-          (conversation.lastCustomerMessageAt &&
-            new Date(conversation.lastAgentReplyAt).getTime() <
-              new Date(conversation.lastCustomerMessageAt).getTime())
-        ) {
-          void this.accountabilityTimelineService
-            .appendMilestone({
-              conversationId: dto.conversationId,
-              eventCode: 'FIRST_AGENT_REPLY_FRT',
-              actorUserId: senderId,
-              note: cleanContent.slice(0, 120),
-            })
-            .catch(() => undefined);
-        }
-      }
 
       if (
         conversation?.shopId &&
@@ -2219,7 +2172,7 @@ export class ChatService {
 
     await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
 
-    const firstSeenUpdate = await this.convRepository
+    await this.convRepository
       .createQueryBuilder()
       .update(ConversationEntity)
       .set({
@@ -2230,17 +2183,6 @@ export class ChatService {
       .andWhere('shop_id IS NOT NULL')
       .andWhere('first_seen_at IS NULL')
       .execute();
-
-    if (firstSeenUpdate.affected && firstSeenUpdate.affected > 0) {
-      void this.accountabilityTimelineService
-        .appendMilestone({
-          conversationId,
-          eventCode: 'FIRST_SEEN',
-          actorUserId: userId,
-          note: 'Nhân sự mở đọc hội thoại lần đầu',
-        })
-        .catch(() => undefined);
-    }
 
     this.eventEmitter.emit(
       NotificationEventEnum.MARK_CONVERSATION_READ,
@@ -3047,14 +2989,6 @@ export class ChatService {
       throw new NotFoundException('CONVERSATION_NOT_FOUND');
     }
 
-    if (conv.shopId) {
-      await this.granularIamService.assertHasPermission(
-        conv.shopId,
-        params.senderId,
-        PermissionCodeEnum.INBOX_INTERNAL_NOTE_WRITE,
-      );
-    }
-
     if (conv.shopId && params.mentionedUserIds && params.mentionedUserIds.length > 0) {
       for (const mentionedUid of params.mentionedUserIds) {
         await this.ensureParticipant(params.conversationId, mentionedUid).catch(() => undefined);
@@ -3075,5 +3009,203 @@ export class ChatService {
         },
       },
     });
+  }
+
+  /**
+   * F03.3 & F03.4: Ẩn hoặc hiện bình luận của khách trên nền tảng gốc (Facebook / Instagram / TikTok)
+   * để chống đối thủ cướp số điện thoại khách hàng.
+   */
+  async toggleCommentVisibilityOnPlatform(params: {
+    userId: string;
+    conversationId: string;
+    messageId: string;
+    isHidden: boolean;
+  }) {
+    await this.ensureParticipant(params.conversationId, params.userId);
+    const msg = await this.msgRepository.findOne({
+      where: { id: params.messageId, conversationId: params.conversationId },
+    });
+    if (!msg) {
+      throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
+    }
+
+    const nowIso = new Date().toISOString();
+    msg.metadata = {
+      ...(msg.metadata || {}),
+      isHiddenOnPlatform: params.isHidden,
+      hiddenByAgentId: params.isHidden ? params.userId : undefined,
+      hiddenAt: params.isHidden ? nowIso : undefined,
+    };
+    await this.msgRepository.save(msg);
+
+    return {
+      conversationId: params.conversationId,
+      messageId: msg.id,
+      isHiddenOnPlatform: params.isHidden,
+      hiddenByAgentId: params.isHidden ? params.userId : null,
+      hiddenAt: params.isHidden ? nowIso : null,
+    };
+  }
+
+  /**
+   * F03.3 & F03.4: Thả tim / Thích bình luận của khách dưới tư cách Fanpage.
+   */
+  async toggleCommentLikeOnPlatform(params: {
+    userId: string;
+    conversationId: string;
+    messageId: string;
+    isLiked: boolean;
+  }) {
+    await this.ensureParticipant(params.conversationId, params.userId);
+    const msg = await this.msgRepository.findOne({
+      where: { id: params.messageId, conversationId: params.conversationId },
+    });
+    if (!msg) {
+      throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
+    }
+
+    msg.metadata = {
+      ...(msg.metadata || {}),
+      isLikedByPage: params.isLiked,
+      likedByAgentId: params.isLiked ? params.userId : undefined,
+    };
+    await this.msgRepository.save(msg);
+
+    return {
+      conversationId: params.conversationId,
+      messageId: msg.id,
+      isLikedByPage: params.isLiked,
+      likedByAgentId: params.isLiked ? params.userId : null,
+    };
+  }
+
+  /**
+   * F03.3 & F03.4: Gửi Tin Nhắn Riêng (Private Reply Inbox) từ một Bình luận công khai (Comment / Livestream).
+   * Kiểm tra chặt chẽ giới hạn của Meta Graph API:
+   * 1. Bình luận phải nằm trong cửa sổ 7 ngày (7 * 24h) kể từ thời điểm khách đăng bình luận.
+   * 2. Mỗi `comment_id` chỉ được phép gửi duy nhất 1 Private Reply.
+   */
+  async sendPrivateReplyFromComment(params: {
+    senderId: string;
+    conversationId: string;
+    commentMessageId: string;
+    content: string;
+    autoHideComment?: boolean;
+    autoLikeComment?: boolean;
+  }) {
+    await this.ensureParticipant(params.conversationId, params.senderId);
+
+    const commentMsg = await this.msgRepository.findOne({
+      where: { id: params.commentMessageId, conversationId: params.conversationId },
+    });
+    if (!commentMsg) {
+      throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
+    }
+
+    if (commentMsg.metadata?.privateReplySentAt) {
+      throw new BadRequestException('PRIVATE_REPLY_ALREADY_SENT_FOR_COMMENT');
+    }
+
+    const sevenDaysMs = 7 * 24 * 3600 * 1000;
+    const commentAgeMs = Date.now() - new Date(commentMsg.createdAt).getTime();
+    if (commentAgeMs > sevenDaysMs) {
+      throw new BadRequestException('PRIVATE_REPLY_7DAY_WINDOW_EXPIRED');
+    }
+
+    const parentConv = await this.convRepository.findOne({
+      where: { id: params.conversationId },
+    });
+    if (!parentConv) {
+      throw new NotFoundException('CONVERSATION_NOT_FOUND');
+    }
+
+    let inboxConv = await this.convRepository.findOne({
+      where: {
+        shopId: parentConv.shopId || undefined,
+        channelIntegrationId: parentConv.channelIntegrationId || undefined,
+        interactionType: 'INBOX',
+        name: parentConv.name,
+      },
+    });
+
+    const now = new Date();
+    if (!inboxConv) {
+      inboxConv = this.convRepository.create({
+        type: ConversationTypeEnum.DIRECT,
+        name: parentConv.name,
+        avatar: parentConv.avatar,
+        shopId: parentConv.shopId,
+        channelType: parentConv.channelType,
+        channelIntegrationId: parentConv.channelIntegrationId,
+        interactionType: 'INBOX',
+        customerId: parentConv.customerId,
+        assignedAgentId: params.senderId,
+        supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
+        sourcePostId: parentConv.sourcePostId,
+        sourceAdId: parentConv.sourceAdId,
+        lastMessageAt: now,
+        lastAgentReplyAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      inboxConv = await this.convRepository.save(inboxConv);
+
+      const agentPart = this.partRepository.create({
+        conversationId: inboxConv.id,
+        userId: params.senderId,
+        isAdmin: true,
+        joinedAt: now,
+        lastReadAt: now,
+      });
+      await this.partRepository.save(agentPart);
+    }
+
+    const decryptedCommentPreview = this.messageCryptoService
+      .decryptForConversation(commentMsg.content, params.conversationId)
+      .slice(0, 160);
+
+    await this.sendMessage({
+      senderId: params.senderId,
+      dto: {
+        conversationId: inboxConv.id,
+        content: params.content.trim(),
+        type: MessageTypeEnum.TEXT,
+        metadata: {
+          commentReplyMode: 'SEND_PRIVATE_REPLY_ONLY',
+          externalCommentId: commentMsg.metadata?.externalCommentId || commentMsg.id,
+          externalPostId: parentConv.sourcePostId || undefined,
+          replyPreview: {
+            messageId: commentMsg.id,
+            senderId: commentMsg.senderId,
+            senderName: parentConv.name || 'Khách hàng',
+            content: `[Bình luận bài viết]: ${decryptedCommentPreview}`,
+            type: MessageTypeEnum.TEXT,
+          },
+        },
+      },
+    });
+
+    const nowIso = now.toISOString();
+    commentMsg.metadata = {
+      ...(commentMsg.metadata || {}),
+      privateReplySentAt: nowIso,
+      privateReplyByAgentId: params.senderId,
+      linkedInboxConversationId: inboxConv.id,
+      ...(params.autoHideComment
+        ? { isHiddenOnPlatform: true, hiddenByAgentId: params.senderId, hiddenAt: nowIso }
+        : {}),
+      ...(params.autoLikeComment ? { isLikedByPage: true, likedByAgentId: params.senderId } : {}),
+    };
+    await this.msgRepository.save(commentMsg);
+
+    return {
+      conversationId: params.conversationId,
+      commentMessageId: commentMsg.id,
+      linkedInboxConversationId: inboxConv.id,
+      privateReplySentAt: nowIso,
+      privateReplyByAgentId: params.senderId,
+      isHiddenOnPlatform: Boolean(commentMsg.metadata.isHiddenOnPlatform),
+      isLikedByPage: Boolean(commentMsg.metadata.isLikedByPage),
+    };
   }
 }

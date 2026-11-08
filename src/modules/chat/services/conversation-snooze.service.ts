@@ -4,7 +4,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { ConversationSupportStatusEnum } from 'src/common/enum/permission.enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
-import { DatabaseEvolutionService } from 'src/config/databases/database-evolution.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { SnoozeConversationDto } from 'src/dto/chat/omnichannel-inbox.dto';
 import { ConversationEntity } from 'src/entity/conversation.entity';
@@ -21,7 +20,6 @@ export class ConversationSnoozeService {
     private readonly conversationRepo: Repository<ConversationEntity>,
     private readonly accountabilityService: AccountabilityTimelineService,
     private readonly realtimeEmitter: RealtimeEmitterService,
-    private readonly databaseEvolutionService: DatabaseEvolutionService,
   ) {}
 
   /**
@@ -59,30 +57,19 @@ export class ConversationSnoozeService {
       note: conv.snoozeNote || `Hẹn nhắc lại lúc ${wakeAt.toISOString()}`,
     });
 
-    const payload = {
-      conversationId: conv.id,
-      shopId: conv.shopId,
-      supportStatus: conv.supportStatus,
-      snoozedUntilAt: wakeAt.toISOString(),
-      snoozeNote: conv.snoozeNote,
-      snoozedByUserId: params.actorUserId,
-    };
-
     this.realtimeEmitter.emitToConversation(
       SOCKET_CONFIG.namespaces.CHAT,
       conv.id,
       SOCKET_CONFIG.events.OMNICHANNEL_INBOX.CONVERSATION_SNOOZED,
-      payload,
+      {
+        conversationId: conv.id,
+        shopId: conv.shopId,
+        supportStatus: conv.supportStatus,
+        snoozedUntilAt: wakeAt.toISOString(),
+        snoozeNote: conv.snoozeNote,
+        snoozedByUserId: params.actorUserId,
+      },
     );
-
-    if (conv.assignedAgentId) {
-      this.realtimeEmitter.emitToUser(
-        SOCKET_CONFIG.namespaces.CHAT,
-        conv.assignedAgentId,
-        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.CONVERSATION_SNOOZED,
-        payload,
-      );
-    }
 
     return saved;
   }
@@ -98,37 +85,15 @@ export class ConversationSnoozeService {
       throw new NotFoundException('CONVERSATION_NOT_FOUND');
     }
 
-    const now = new Date();
-    const noteSnapshot = conv.snoozeNote;
     conv.supportStatus = ConversationSupportStatusEnum.WAITING_AGENT_REPLY;
     conv.snoozedUntilAt = null;
-    conv.snoozeNote = null;
-    conv.isGhostedByAgent = false;
-    conv.firstSeenAt = null;
     const saved = await this.conversationRepo.save(conv);
 
     await this.accountabilityService.appendMilestone({
       conversationId: conv.id,
       eventCode: 'CONVERSATION_UNSNOOZED',
       actorUserId: params.actorUserId,
-      note: noteSnapshot || 'Hủy hẹn giờ Snooze thủ công',
     });
-
-    const wakeupPayload = {
-      conversationId: conv.id,
-      shopId: conv.shopId,
-      customerName: conv.name || 'Khách hàng',
-      snoozeNote: noteSnapshot,
-      assignedAgentId: conv.assignedAgentId || params.actorUserId,
-      wokenAt: now.toISOString(),
-    };
-
-    this.realtimeEmitter.emitToConversation(
-      SOCKET_CONFIG.namespaces.CHAT,
-      conv.id,
-      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.SNOOZE_WAKEUP,
-      wakeupPayload,
-    );
 
     return saved;
   }
@@ -138,10 +103,6 @@ export class ConversationSnoozeService {
    */
   @Cron(CronExpression.EVERY_30_SECONDS)
   async wakeUpDueSnoozedConversations(): Promise<void> {
-    if (!this.databaseEvolutionService.isReady()) {
-      return;
-    }
-
     try {
       const now = new Date();
       const dueConvs = await this.conversationRepo.find({
@@ -160,17 +121,8 @@ export class ConversationSnoozeService {
 
         conv.supportStatus = ConversationSupportStatusEnum.WAITING_AGENT_REPLY;
         conv.snoozedUntilAt = null;
-        conv.isGhostedByAgent = false;
-        conv.firstSeenAt = null;
         conv.lastMessageAt = now;
         await this.conversationRepo.save(conv);
-
-        await this.accountabilityService.appendMilestone({
-          conversationId: conv.id,
-          eventCode: 'CONVERSATION_UNSNOOZED',
-          actorUserId: targetAgent || null,
-          note: noteSnapshot || 'Đến giờ hẹn chăm sóc lại khách hàng (Snooze Wakeup)',
-        });
 
         const wakeupPayload = {
           conversationId: conv.id,

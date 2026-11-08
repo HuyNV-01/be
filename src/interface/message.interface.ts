@@ -53,6 +53,11 @@ export interface MessageTranslationMeta {
   translatedAt: string;
 }
 
+export type CommentReplyModeType =
+  | 'REPLY_COMMENT_ONLY'
+  | 'SEND_PRIVATE_REPLY_ONLY'
+  | 'REPLY_COMMENT_AND_PRIVATE_INBOX';
+
 export interface MessageMetadata {
   fileName?: string;
   fileSize?: number;
@@ -70,6 +75,11 @@ export interface MessageMetadata {
   pinnedAt?: string;
   replyToMessageId?: string;
   replyPreview?: MessageReplyPreview;
+  forwardedFrom?: {
+    messageId: string;
+    senderId: string;
+    senderName: string;
+  };
   reactions?: Record<string, string[]>;
   attachments?: MessageAttachmentMeta[];
   callInfo?: MessageCallInfoMeta;
@@ -86,6 +96,21 @@ export interface MessageMetadata {
   translation?: MessageTranslationMeta;
   externalCustomerName?: string;
   marketplaceOrder?: Record<string, any>;
+  // Universal Comment Response & Anti-Competitor Shielding (F03.3 & F03.4)
+  externalCommentId?: string;
+  externalPostId?: string;
+  isHiddenOnPlatform?: boolean;
+  hiddenByAgentId?: string;
+  hiddenAt?: string;
+  isLikedByPage?: boolean;
+  likedByAgentId?: string;
+  isDeletedOnPlatform?: boolean;
+  deletedOnPlatformAt?: string;
+  originalTextBeforePlatformEdit?: string;
+  privateReplySentAt?: string;
+  privateReplyByAgentId?: string;
+  linkedInboxConversationId?: string;
+  commentReplyMode?: CommentReplyModeType;
 }
 
 export interface MessagePollOptionMeta {

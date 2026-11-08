@@ -106,6 +106,9 @@ export const SOCKET_CONFIG = {
       AI_COPILOT_DRAFT_READY: 'inbox:ai_copilot_draft_ready',
       MASKED_PSTN_CALL_INITIATE: 'inbox:masked_pstn_call_initiate',
       MASKED_PSTN_CALL_STATUS: 'inbox:masked_pstn_call_status',
+      COMMENT_VISIBILITY_UPDATED: 'inbox:comment_visibility_updated',
+      COMMENT_LIKE_UPDATED: 'inbox:comment_like_updated',
+      COMMENT_PRIVATE_REPLY_SENT: 'inbox:comment_private_reply_sent',
     },
   },
 } as const;
