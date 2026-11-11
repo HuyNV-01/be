@@ -3,6 +3,22 @@ import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
 
+export interface ChannelPlatformSaasConfig {
+  apiVersion?: string | null;
+  appId?: string | null;
+  webhookCallbackUrl?: string | null;
+  subscribedFields?: string[];
+  tokenKind?: 'PAGE_TOKEN' | 'USER_TOKEN' | 'OA_TOKEN' | 'SHOP_TOKEN' | 'SANDBOX_TOKEN';
+  authenticatedUserId?: string | null;
+  authenticatedUserName?: string | null;
+  pageCategory?: string | null;
+  pageTasks?: string[];
+  requireAppSecretProof?: boolean;
+  autoHidePhoneComments?: boolean;
+  autoHideKeywordList?: string[];
+  syncEchoMessagesFromNativeApp?: boolean;
+}
+
 @Entity('channel_integrations')
 @Index('uq_channel_ext_page', ['shopId', 'channelType', 'externalPageId'], { unique: true })
 @Index('idx_channel_webhook_lookup', ['channelType', 'externalPageId'])
@@ -32,6 +48,15 @@ export class ChannelIntegrationEntity extends BaseModel {
   @Column({ name: 'avatar_url', type: 'varchar', length: 500, nullable: true, default: null })
   avatarUrl: string | null;
 
+  @Column({ name: 'api_version', type: 'varchar', length: 24, nullable: true, default: 'v27.1' })
+  apiVersion: string | null;
+
+  @Column({ name: 'app_id', type: 'varchar', length: 128, nullable: true, default: null })
+  appId: string | null;
+
+  @Column({ name: 'app_secret_encrypted', type: 'text', nullable: true, default: null })
+  appSecretEncrypted: string | null;
+
   @Column({ name: 'access_token_encrypted', type: 'text' })
   accessTokenEncrypted: string;
 
@@ -40,6 +65,9 @@ export class ChannelIntegrationEntity extends BaseModel {
 
   @Column({ name: 'webhook_verify_secret_encrypted', type: 'text', nullable: true, default: null })
   webhookVerifySecretEncrypted: string | null;
+
+  @Column({ name: 'platform_config_json', type: 'json', nullable: true, default: null })
+  platformConfigJson: ChannelPlatformSaasConfig | null;
 
   @Column({ name: 'meta_dataset_id', type: 'varchar', length: 128, nullable: true, default: null })
   metaDatasetId: string | null;

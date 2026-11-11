@@ -55,6 +55,19 @@ const envVarsSchema = joi
     WEBRTC_TURN_URLS: joi.string().optional().allow(''),
     WEBRTC_TURN_SECRET: joi.string().optional().allow(''),
     WEBRTC_TURN_TTL: joi.number().default(86400),
+
+    META_GRAPH_API_VERSION: joi.string().optional().default('v27.1'),
+    META_APP_ID: joi.string().optional().allow(''),
+    META_APP_SECRET: joi.string().optional().allow(''),
+    META_WEBHOOK_VERIFY_TOKEN: joi.string().optional().allow(''),
+    ZALO_OA_API_VERSION: joi.string().optional().default('v3.0'),
+    ZALO_APP_ID: joi.string().optional().allow(''),
+    ZALO_APP_SECRET: joi.string().optional().allow(''),
+    ZALO_WEBHOOK_VERIFY_TOKEN: joi.string().optional().allow(''),
+    TIKTOK_SHOP_APP_KEY: joi.string().optional().allow(''),
+    TIKTOK_SHOP_APP_SECRET: joi.string().optional().allow(''),
+    SHOPEE_PARTNER_ID: joi.string().optional().allow(''),
+    SHOPEE_PARTNER_KEY: joi.string().optional().allow(''),
   })
   .unknown(true)
   .required();
@@ -133,5 +146,20 @@ export const envs = {
       .filter(Boolean),
     turnSecret: envVars.WEBRTC_TURN_SECRET || envVars.JWT_SECRET,
     turnTtl: Number(envVars.WEBRTC_TURN_TTL || 86400),
+  },
+
+  omnichannelSaas: {
+    metaGraphApiVersion: envVars.META_GRAPH_API_VERSION || 'v27.1',
+    metaAppId: envVars.META_APP_ID || '',
+    metaAppSecret: envVars.META_APP_SECRET || '',
+    metaWebhookVerifyToken: envVars.META_WEBHOOK_VERIFY_TOKEN || 'pancake_seller_os_verify_token',
+    zaloOaApiVersion: envVars.ZALO_OA_API_VERSION || 'v3.0',
+    zaloAppId: envVars.ZALO_APP_ID || '',
+    zaloAppSecret: envVars.ZALO_APP_SECRET || '',
+    zaloWebhookVerifyToken: envVars.ZALO_WEBHOOK_VERIFY_TOKEN || 'pancake_zalo_verify_token',
+    tiktokShopAppKey: envVars.TIKTOK_SHOP_APP_KEY || '',
+    tiktokShopAppSecret: envVars.TIKTOK_SHOP_APP_SECRET || '',
+    shopeePartnerId: envVars.SHOPEE_PARTNER_ID || '',
+    shopeePartnerKey: envVars.SHOPEE_PARTNER_KEY || '',
   },
 };

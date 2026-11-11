@@ -52,4 +52,18 @@ export type EnvConfig = {
   WEBRTC_TURN_URLS?: string;
   WEBRTC_TURN_SECRET?: string;
   WEBRTC_TURN_TTL?: number;
+
+  // Cấu hình SaaS mặc định cho các kênh mạng xã hội & sàn TMĐT
+  META_GRAPH_API_VERSION?: string;
+  META_APP_ID?: string;
+  META_APP_SECRET?: string;
+  META_WEBHOOK_VERIFY_TOKEN?: string;
+  ZALO_OA_API_VERSION?: string;
+  ZALO_APP_ID?: string;
+  ZALO_APP_SECRET?: string;
+  ZALO_WEBHOOK_VERIFY_TOKEN?: string;
+  TIKTOK_SHOP_APP_KEY?: string;
+  TIKTOK_SHOP_APP_SECRET?: string;
+  SHOPEE_PARTNER_ID?: string;
+  SHOPEE_PARTNER_KEY?: string;
 };

@@ -8,6 +8,7 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -15,8 +16,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
+import type { Response } from 'express';
 import Redis from 'ioredis';
 import { ChannelTypeEnum, PermissionCodeEnum } from 'src/common/enum/permission.enum';
+import { envs } from 'src/config/envs/envs';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import { ChannelWebhookLogEntity } from 'src/entity/channel-webhook-log.entity';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
@@ -42,23 +45,52 @@ export class OmnibusWebhookController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Xác thực Webhook Challenge (hub.challenge / challenge) cho Facebook, Instagram, Zalo OA, TikTok Shop',
+      'Xác thực Webhook Challenge (hub.challenge / hub.verify_token / challenge) chuẩn Meta Graph API, Zalo OA, TikTok Shop, Shopee',
   })
-  verifyWebhookSubscription(
-    @Param('channelType') _channelTypeParam: string,
+  async verifyWebhookSubscription(
+    @Param('channelType') channelTypeParam: string,
     @Query('hub.mode') hubMode?: string,
+    @Query('hub.verify_token') hubVerifyToken?: string,
     @Query('hub.challenge') hubChallenge?: string,
     @Query('challenge') challenge?: string,
-  ): string | { verified: true; mode: string } {
-    if (hubChallenge) {
-      return hubChallenge;
+    @Query('shopId') shopId?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ): Promise<string | { verified: boolean; mode: string; channelType: string }> {
+    const channelType = channelTypeParam.toUpperCase() as ChannelTypeEnum;
+
+    if (hubVerifyToken) {
+      const isValidVerifyToken = await this.channelsService.verifyWebhookChallengeToken({
+        channelType,
+        verifyToken: hubVerifyToken,
+        shopId,
+      });
+
+      if (!isValidVerifyToken) {
+        if (res) {
+          res.status(HttpStatus.FORBIDDEN);
+        }
+        return 'WEBHOOK_VERIFY_TOKEN_MISMATCH';
+      }
     }
-    if (challenge) {
-      return challenge;
+
+    if (hubChallenge !== undefined && hubChallenge !== '') {
+      if (res) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      }
+      return String(hubChallenge);
     }
+
+    if (challenge !== undefined && challenge !== '') {
+      if (res) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      }
+      return String(challenge);
+    }
+
     return {
       verified: true,
       mode: hubMode || 'ACTIVE',
+      channelType,
     };
   }
 
@@ -66,7 +98,7 @@ export class OmnibusWebhookController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Cổng nhận Webhook hợp nhất cho FB, IG, Zalo OA, TikTok Shop, Shopee, Lazada (Khử trùng Redis SETNX)',
+      'Cổng nhận Webhook hợp nhất cho FB, IG, Zalo OA, TikTok Shop, Shopee, Lazada (Khử trùng Redis SETNX, hỗ trợ batch entry[])',
   })
   async handleIncomingWebhook(
     @Param('channelType') channelTypeParam: string,
@@ -83,8 +115,13 @@ export class OmnibusWebhookController {
       .slice(0, 40);
     const idempotencyKey = `${channelType}:${rawHash}`;
 
-    const dedupeRedisKey = `webhook:dedupe:${idempotencyKey}`;
-    const isFirstSeen = await this.redis.set(dedupeRedisKey, '1', 'EX', 86400, 'NX');
+    let isFirstSeen: string | null = 'OK';
+    try {
+      const dedupeRedisKey = `webhook:dedupe:${idempotencyKey}`;
+      isFirstSeen = await this.redis.set(dedupeRedisKey, '1', 'EX', 86400, 'NX');
+    } catch {
+      isFirstSeen = 'OK';
+    }
 
     const preResolvedChannel = await this.channelsService
       .resolveChannelByWebhookPayload(channelType, payload || {})
@@ -95,7 +132,13 @@ export class OmnibusWebhookController {
       channelIntegrationId: preResolvedChannel?.id || null,
       channelType,
       idempotencyKey,
-      eventType: String(payload?.object || payload?.event || payload?.type || 'MESSAGE_INBOUND'),
+      eventType: String(
+        payload?.object ||
+          payload?.event_name ||
+          payload?.event ||
+          payload?.type ||
+          'MESSAGE_INBOUND',
+      ),
       headersJson: headers || {},
       rawPayloadJson: payload || {},
       processingStatus: isFirstSeen ? 'RECEIVED' : 'DUPLICATE_SKIPPED',

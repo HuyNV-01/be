@@ -89,16 +89,15 @@ export interface MessageMetadata {
   mentionAll?: boolean;
   expiresAt?: string;
   disappearingTtl?: number;
-  // Sprint 2 Omnichannel Seller OS metadata extensions
   isInternalNote?: boolean;
   quickReplyShortcutUsed?: string;
   productCards?: MessageProductCardMeta[];
   translation?: MessageTranslationMeta;
   externalCustomerName?: string;
   marketplaceOrder?: Record<string, any>;
-  // Universal Comment Response & Anti-Competitor Shielding (F03.3 & F03.4)
   externalCommentId?: string;
   externalPostId?: string;
+  parentCommentId?: string | null;
   isHiddenOnPlatform?: boolean;
   hiddenByAgentId?: string;
   hiddenAt?: string;
@@ -106,11 +105,17 @@ export interface MessageMetadata {
   likedByAgentId?: string;
   isDeletedOnPlatform?: boolean;
   deletedOnPlatformAt?: string;
+  deletedByActor?: 'CUSTOMER' | 'AGENT';
+  deletedByAgentId?: string | null;
   originalTextBeforePlatformEdit?: string;
   privateReplySentAt?: string;
   privateReplyByAgentId?: string;
   linkedInboxConversationId?: string;
   commentReplyMode?: CommentReplyModeType;
+  autoHideCommentOnReply?: boolean;
+  platformDeliveryStatus?: 'DISPATCHED' | 'SIMULATED_SANDBOX' | 'FAILED';
+  platformExternalId?: string | null;
+  platformErrorMessage?: string | null;
 }
 
 export interface MessagePollOptionMeta {

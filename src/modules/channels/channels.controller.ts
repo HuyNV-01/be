@@ -18,8 +18,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import {
+  BatchConnectChannelsDto,
   ConnectChannelOAuthDto,
   MergedInboxQueryDto,
+  ResolveChannelTokenMetadataDto,
   UpdateChannelIntegrationDto,
   WebhookLogQueryDto,
 } from 'src/dto/channels/channels.dto';
@@ -66,6 +68,42 @@ export class ChannelsController {
     };
   }
 
+  @Get('saas-webhook-config')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Lấy thông tin cấu hình SaaS Webhook (Callback URL, Verify Token, Subscribed Fields) cho từng nền tảng',
+  })
+  async getSaasWebhookConfiguration(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.channelsService.getSaasWebhookConfiguration(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched SaaS webhook configuration successfully',
+      data,
+    };
+  }
+
+  @Post('resolve-token-metadata')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Tự động tra cứu chính xác Tên Trang, Avatar, Page ID, phân biệt Page Token vs User Token từ Access Token',
+  })
+  async resolveChannelTokenMetadata(
+    @Param('shopId') shopId: string,
+    @Body() dto: ResolveChannelTokenMetadataDto,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.resolveChannelMetadataFromToken(shopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Resolved channel profile metadata from access token successfully',
+      data,
+    };
+  }
+
   @Post('connect-oauth')
   @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
   @HttpCode(HttpStatus.CREATED)
@@ -83,6 +121,51 @@ export class ChannelsController {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
       message: 'Connected channel integration and encrypted tokens successfully',
+      data,
+    };
+  }
+
+  @Post('connect-batch')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      'F01.2: Kết nối hàng loạt nhiều Fanpage / Instagram cùng lúc từ danh sách trang của User Access Token (Chuẩn Pancake v2)',
+  })
+  async batchConnectChannels(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Body() dto: BatchConnectChannelsDto,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.batchConnectChannels(
+      shopId,
+      dto.channels,
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.CREATED,
+      code: HttpStatus.CREATED,
+      message: 'Batch connected channel integrations successfully',
+      data,
+    };
+  }
+
+  @Post(':channelId/sync-webhook')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Đồng bộ lại đăng ký Webhook (subscribed_apps) trên nền tảng và kiểm tra trạng thái nhận sự kiện thực tế',
+  })
+  async syncAndVerifyChannelWebhook(
+    @Param('shopId') shopId: string,
+    @Param('channelId') channelId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.syncAndVerifyChannelWebhook(shopId, channelId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Synced and verified channel webhook subscription successfully',
       data,
     };
   }

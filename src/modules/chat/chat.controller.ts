@@ -914,11 +914,6 @@ export class ChatController {
     };
   }
 
-  // ============================================================================
-  // SPRINT 2 — OMNICHANNEL INBOX 18-CRITERIA FILTER, INTERNAL NOTE, SNOOZE,
-  // COLLISION LOCK, QUICK REPLIES, MASKED VOIP & REAL-TIME TRANSLATION
-  // ============================================================================
-
   @ApiOperation({
     summary:
       'F03.1 & F03.2: Truy vấn Hộp thư bán hàng đa kênh 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT',
@@ -1348,6 +1343,14 @@ export class ChatController {
       SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
       data,
     );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
+        data,
+      );
+    });
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
@@ -1381,10 +1384,58 @@ export class ChatController {
       SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_LIKE_UPDATED,
       data,
     );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_LIKE_UPDATED,
+        data,
+      );
+    });
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Xóa bình luận trên nền tảng gốc (DELETE /{comment_id}) nhưng bảo toàn bản ghi trong DB để lưu vết kiểm toán',
+  })
+  @Delete('conversations/:id/messages/:messageId/comment-platform')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async deleteCommentOnPlatform(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const data = await this.chatService.deleteCommentOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_DELETED_ON_PLATFORM,
+      data,
+    );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_DELETED_ON_PLATFORM,
+        data,
+      );
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
       data,
     };
   }
@@ -1417,6 +1468,14 @@ export class ChatController {
       SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_PRIVATE_REPLY_SENT,
       data,
     );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_PRIVATE_REPLY_SENT,
+        data,
+      );
+    });
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,

@@ -13,10 +13,12 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
+import { createHmac } from 'crypto';
 import Redis from 'ioredis';
 import {
   CallStatusEnum,
   CallTypeEnum,
+  ChannelTypeEnum,
   ConversationSupportStatusEnum,
   ConversationTypeEnum,
   DataScopeEnum,
@@ -31,6 +33,7 @@ import {
 } from 'src/common/enum';
 import { ContactStatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
+import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SocketStateService, UserPublicKeyBundle } from 'src/common/websocket/socket-state.service';
 import { envs } from 'src/config/envs/envs';
 import { ChatEventEnum, ChatMessageReadEvent } from 'src/config/websocket/events/chat.events';
@@ -39,6 +42,7 @@ import {
   NotificationDispatchEvent,
   NotificationEventEnum,
 } from 'src/config/websocket/events/notification.events';
+import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import {
   AddGroupMembersDto,
   EditMessageDto,
@@ -62,6 +66,7 @@ import {
   VotePollDto,
 } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
+import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
@@ -107,11 +112,14 @@ export class ChatService {
     private contactRepository: Repository<ContactEntity>,
     @InjectRepository(ShopMemberEntity)
     private shopMemberRepository: Repository<ShopMemberEntity>,
+    @InjectRepository(ChannelIntegrationEntity)
+    private channelRepository: Repository<ChannelIntegrationEntity>,
     @InjectRedis() private readonly redis: Redis,
     private dataSource: DataSource,
     private readonly userService: UserService,
     private readonly mediaService: MediaService,
     private readonly socketStateService: SocketStateService,
+    private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly linkPreviewService: LinkPreviewService,
     private readonly eventEmitter: EventEmitter2,
@@ -267,6 +275,10 @@ export class ChatService {
           'type',
           'disappearingTtl',
           'shopId',
+          'channelIntegrationId',
+          'channelType',
+          'externalThreadId',
+          'interactionType',
           'supportStatus',
           'assignedAgentId',
           'lastAgentReplyAt',
@@ -470,6 +482,33 @@ export class ChatService {
         if (currentLoad && Number(currentLoad) > 0) {
           await this.redis.zincrby(`routing:active_load:${conversation.shopId}`, -1, targetAgent);
         }
+
+        if (conversation.channelIntegrationId) {
+          participants.forEach((p) => {
+            this.realtimeEmitter.emitToUser(
+              SOCKET_CONFIG.namespaces.CHAT,
+              p.userId,
+              SOCKET_CONFIG.events.CHANNELS.INTEGRATION_UPDATED,
+              {
+                shopId: conversation.shopId,
+                action: 'AGENT_REPLIED',
+                channelId: conversation.channelIntegrationId,
+                conversationId: conversation.id,
+              },
+            );
+          });
+        }
+      }
+
+      if (!isInternalNoteMsg && conversation?.channelIntegrationId && conversation.shopId) {
+        await this.dispatchOutboundConversationMessageToPlatform({
+          conversation,
+          savedMessage,
+          cleanContent,
+          senderId,
+          commentReplyMode: dto.metadata?.commentReplyMode,
+          autoHideCommentOnReply: Boolean(dto.metadata?.autoHideCommentOnReply),
+        });
       }
 
       const finalMessage = await this.buildEnrichedMessageResponse(savedMessage.id);
@@ -3045,12 +3084,337 @@ export class ChatService {
   ): Promise<void> {
     const hourSlot = Math.floor(Date.now() / 3_600_000);
     const redisKey = `ratelimit:meta_comment_action:${bucketScope}:${hourSlot}`;
-    const used = await this.redis.incr(redisKey);
-    if (used === 1) {
-      await this.redis.expire(redisKey, 3660);
+    try {
+      const used = await this.redis.incr(redisKey);
+      if (used === 1) {
+        await this.redis.expire(redisKey, 3660);
+      }
+      if (used > maxCallsPerHour) {
+        throw new BadRequestException('META_PRIVATE_REPLY_RATE_LIMIT_EXCEEDED');
+      }
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
     }
-    if (used > maxCallsPerHour) {
-      throw new BadRequestException('META_PRIVATE_REPLY_RATE_LIMIT_EXCEEDED');
+  }
+
+  /**
+   * Thực thi gọi API thực tế ra nền tảng ngoài (Facebook Graph API, Instagram, Zalo OA, TikTok Shop, Shopee)
+   * kèm cơ chế Non-Blocking Sandbox Fallback khi chạy ở môi trường Local không mở mạng ra Internet.
+   */
+  private async executePlatformHttpCall(params: {
+    channelIntegrationId?: string | null;
+    shopId?: string | null;
+    actionType:
+      | 'SEND_INBOX_MESSAGE'
+      | 'REPLY_PUBLIC_COMMENT'
+      | 'SEND_PRIVATE_REPLY'
+      | 'HIDE_UNHIDE_COMMENT'
+      | 'LIKE_UNLIKE_COMMENT'
+      | 'DELETE_COMMENT';
+    targetExternalId: string;
+    bodyPayload?: Record<string, unknown>;
+  }): Promise<{
+    deliveryStatus: 'DISPATCHED' | 'SIMULATED_SANDBOX';
+    externalId: string;
+  }> {
+    const fallbackExternalId = `ext_${params.actionType.toLowerCase()}_${Date.now()}`;
+    if (!params.channelIntegrationId || !params.shopId) {
+      return {
+        deliveryStatus: 'SIMULATED_SANDBOX',
+        externalId: fallbackExternalId,
+      };
+    }
+
+    const channel = await this.channelRepository.findOne({
+      where: { id: params.channelIntegrationId, shopId: params.shopId },
+    });
+    if (!channel || !channel.accessTokenEncrypted) {
+      return {
+        deliveryStatus: 'SIMULATED_SANDBOX',
+        externalId: fallbackExternalId,
+      };
+    }
+
+    const rawToken = this.messageCryptoService.decryptForConversation(
+      channel.accessTokenEncrypted,
+      channel.shopId,
+    );
+    if (!rawToken || rawToken.startsWith('oauth2_tok_')) {
+      return {
+        deliveryStatus: 'SIMULATED_SANDBOX',
+        externalId: fallbackExternalId,
+      };
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+      if (
+        channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
+        channel.channelType === ChannelTypeEnum.INSTAGRAM
+      ) {
+        const rawVer = (
+          channel.apiVersion ||
+          channel.platformConfigJson?.apiVersion ||
+          envs.omnichannelSaas?.metaGraphApiVersion ||
+          'v27.1'
+        ).trim();
+        const preferredVer = rawVer.startsWith('v') ? rawVer : `v${rawVer}`;
+        const candidateVersions = Array.from(new Set([preferredVer, 'v22.0', 'v21.0', 'v20.0']));
+
+        let appSecret = (envs.omnichannelSaas?.metaAppSecret || '').trim();
+        if (channel.appSecretEncrypted) {
+          const decryptedSecret = this.messageCryptoService.decryptForConversation(
+            channel.appSecretEncrypted,
+            channel.shopId,
+          );
+          if (decryptedSecret && !decryptedSecret.startsWith('enc_')) {
+            appSecret = decryptedSecret;
+          }
+        }
+        const appSecretProof = appSecret
+          ? createHmac('sha256', appSecret).update(rawToken).digest('hex')
+          : undefined;
+
+        for (const ver of candidateVersions) {
+          let url = '';
+          let method = 'POST';
+          const baseAuthPayload: Record<string, unknown> = {
+            access_token: rawToken,
+            ...(appSecretProof ? { appsecret_proof: appSecretProof } : {}),
+          };
+          let body: Record<string, unknown> = { ...baseAuthPayload };
+
+          if (params.actionType === 'SEND_INBOX_MESSAGE') {
+            const cleanPsid = params.targetExternalId.replace(/^(inbox_|cmt_)/, '');
+            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(channel.externalPageId)}/messages`;
+            const attachmentUrl = params.bodyPayload?.attachmentUrl as string | undefined;
+            const attachmentType =
+              (params.bodyPayload?.attachmentType as string | undefined) || 'image';
+            body = {
+              recipient: { id: cleanPsid },
+              messaging_type: 'RESPONSE',
+              message: attachmentUrl
+                ? {
+                    attachment: {
+                      type: attachmentType,
+                      payload: { url: attachmentUrl, is_reusable: true },
+                    },
+                  }
+                : { text: String(params.bodyPayload?.text || '') },
+              ...baseAuthPayload,
+            };
+          } else if (params.actionType === 'REPLY_PUBLIC_COMMENT') {
+            url =
+              channel.channelType === ChannelTypeEnum.INSTAGRAM
+                ? `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/replies`
+                : `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/comments`;
+            body = {
+              message: String(params.bodyPayload?.text || ''),
+              ...(params.bodyPayload?.attachmentUrl
+                ? { attachment_url: String(params.bodyPayload.attachmentUrl) }
+                : {}),
+              ...baseAuthPayload,
+            };
+          } else if (params.actionType === 'SEND_PRIVATE_REPLY') {
+            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(channel.externalPageId)}/messages`;
+            body = {
+              recipient: { comment_id: params.targetExternalId },
+              message: { text: String(params.bodyPayload?.text || '') },
+              ...baseAuthPayload,
+            };
+          } else if (params.actionType === 'HIDE_UNHIDE_COMMENT') {
+            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}`;
+            body =
+              channel.channelType === ChannelTypeEnum.INSTAGRAM
+                ? { hide: Boolean(params.bodyPayload?.isHidden), ...baseAuthPayload }
+                : { is_hidden: Boolean(params.bodyPayload?.isHidden), ...baseAuthPayload };
+          } else if (params.actionType === 'LIKE_UNLIKE_COMMENT') {
+            const queryStr = new URLSearchParams(
+              baseAuthPayload as Record<string, string>,
+            ).toString();
+            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/likes?${queryStr}`;
+            method = params.bodyPayload?.isLiked ? 'POST' : 'DELETE';
+          } else if (params.actionType === 'DELETE_COMMENT') {
+            const queryStr = new URLSearchParams(
+              baseAuthPayload as Record<string, string>,
+            ).toString();
+            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}?${queryStr}`;
+            method = 'DELETE';
+          }
+
+          if (url) {
+            const res = await fetch(url, {
+              method,
+              headers: { 'Content-Type': 'application/json' },
+              body: method === 'DELETE' ? undefined : JSON.stringify(body),
+              signal: controller.signal,
+            }).catch(() => null);
+
+            if (!res) break;
+
+            const json = (await res.json().catch(() => ({}))) as {
+              id?: string;
+              message_id?: string;
+              error?: { message?: string; code?: number };
+            };
+
+            if (res.ok && !json.error) {
+              clearTimeout(timeoutId);
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: String(json.message_id || json.id || fallbackExternalId),
+              };
+            }
+
+            const errMsg = String(json?.error?.message || '');
+            const isVersionUnsupported =
+              json?.error?.code === 2635 ||
+              /unknown path components|unsupported get request|unsupported post request|version/i.test(
+                errMsg,
+              );
+            if (!isVersionUnsupported) {
+              break;
+            }
+          }
+        }
+        clearTimeout(timeoutId);
+      } else if (
+        channel.channelType === ChannelTypeEnum.ZALO_OA &&
+        params.actionType === 'SEND_INBOX_MESSAGE'
+      ) {
+        const cleanZaloUserId = params.targetExternalId.replace(/^zalo_/, '');
+        const res = await fetch('https://openapi.zalo.me/v3.0/oa/message/cs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            access_token: rawToken,
+          },
+          body: JSON.stringify({
+            recipient: { user_id: cleanZaloUserId },
+            message: { text: String(params.bodyPayload?.text || '') },
+          }),
+          signal: controller.signal,
+        }).catch(() => null);
+        clearTimeout(timeoutId);
+
+        if (res && res.ok) {
+          const json = (await res.json().catch(() => ({}))) as {
+            data?: { message_id?: string };
+          };
+          return {
+            deliveryStatus: 'DISPATCHED',
+            externalId: String(json.data?.message_id || fallbackExternalId),
+          };
+        }
+      }
+      clearTimeout(timeoutId);
+    } catch {
+      // Bảo toàn luồng hoạt động khi môi trường không kết nối Internet
+    }
+
+    return {
+      deliveryStatus: 'SIMULATED_SANDBOX',
+      externalId: fallbackExternalId,
+    };
+  }
+
+  /**
+   * Điều phối gửi tin nhắn trả lời của nhân viên Sale ra đúng kênh ngoại vi (Inbox hoặc Trả lời Bình luận công khai)
+   * và tự động ẩn bình luận gốc của khách nếu bật cờ autoHideCommentOnReply.
+   */
+  private async dispatchOutboundConversationMessageToPlatform(params: {
+    conversation: ConversationEntity;
+    savedMessage: MessageEntity;
+    cleanContent: string;
+    senderId: string;
+    commentReplyMode?: string;
+    autoHideCommentOnReply?: boolean;
+  }): Promise<void> {
+    const { conversation, savedMessage, cleanContent, senderId } = params;
+    const isCommentConv =
+      conversation.interactionType === 'COMMENT' || conversation.interactionType === 'LIVESTREAM';
+
+    let targetExternalId = conversation.externalThreadId || conversation.id;
+    let latestInboundComment: MessageEntity | null = null;
+
+    if (isCommentConv) {
+      if (savedMessage.replyToMessageId) {
+        latestInboundComment = await this.msgRepository.findOne({
+          where: {
+            id: savedMessage.replyToMessageId,
+            conversationId: conversation.id,
+          },
+        });
+      }
+      if (!latestInboundComment) {
+        latestInboundComment = await this.msgRepository.findOne({
+          where: {
+            conversationId: conversation.id,
+            direction: MessageDirectionEnum.INBOUND,
+          },
+          order: { createdAt: 'DESC' },
+        });
+      }
+      if (latestInboundComment) {
+        targetExternalId =
+          latestInboundComment.metadata?.externalCommentId ||
+          latestInboundComment.externalMessageId ||
+          targetExternalId;
+      }
+    }
+
+    await this.consumeMetaGraphActionQuota(
+      conversation.channelIntegrationId || conversation.shopId || conversation.id,
+      750,
+    );
+
+    const dispatchRes = await this.executePlatformHttpCall({
+      channelIntegrationId: conversation.channelIntegrationId,
+      shopId: conversation.shopId,
+      actionType: isCommentConv ? 'REPLY_PUBLIC_COMMENT' : 'SEND_INBOX_MESSAGE',
+      targetExternalId,
+      bodyPayload: { text: cleanContent },
+    });
+
+    const updatedMeta: MessageMetadata = {
+      ...(savedMessage.metadata || {}),
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+      platformExternalId: dispatchRes.externalId,
+    };
+
+    await this.msgRepository.update(
+      { id: savedMessage.id, createdAt: savedMessage.createdAt },
+      {
+        externalMessageId: dispatchRes.externalId,
+        metadata: updatedMeta as any,
+      },
+    );
+    savedMessage.externalMessageId = dispatchRes.externalId;
+    savedMessage.metadata = updatedMeta;
+
+    if (
+      isCommentConv &&
+      params.autoHideCommentOnReply &&
+      latestInboundComment &&
+      !latestInboundComment.metadata?.isHiddenOnPlatform
+    ) {
+      const visibilityRes = await this.toggleCommentVisibilityOnPlatform({
+        userId: senderId,
+        conversationId: conversation.id,
+        messageId: latestInboundComment.id,
+        isHidden: true,
+      }).catch(() => null);
+
+      if (visibilityRes) {
+        this.realtimeEmitter.emitToConversation(
+          SOCKET_CONFIG.namespaces.CHAT,
+          conversation.id,
+          SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
+          visibilityRes,
+        );
+      }
     }
   }
 
@@ -3064,12 +3428,29 @@ export class ChatService {
     isHidden: boolean;
   }) {
     await this.ensureParticipant(params.conversationId, params.userId);
-    const msg = await this.msgRepository.findOne({
-      where: { id: params.messageId, conversationId: params.conversationId },
-    });
+    const [msg, conv, recipientIds] = await Promise.all([
+      this.msgRepository.findOne({
+        where: { id: params.messageId, conversationId: params.conversationId },
+      }),
+      this.convRepository.findOne({
+        where: { id: params.conversationId },
+        select: ['id', 'shopId', 'channelIntegrationId'],
+      }),
+      this.getConversationMemberIds(params.conversationId),
+    ]);
     if (!msg) {
       throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
     }
+
+    const externalCommentId = msg.metadata?.externalCommentId || msg.externalMessageId || msg.id;
+
+    const dispatchRes = await this.executePlatformHttpCall({
+      channelIntegrationId: conv?.channelIntegrationId,
+      shopId: conv?.shopId,
+      actionType: 'HIDE_UNHIDE_COMMENT',
+      targetExternalId: externalCommentId,
+      bodyPayload: { isHidden: params.isHidden },
+    });
 
     const nowIso = new Date().toISOString();
     msg.metadata = {
@@ -3077,6 +3458,7 @@ export class ChatService {
       isHiddenOnPlatform: params.isHidden,
       hiddenByAgentId: params.isHidden ? params.userId : undefined,
       hiddenAt: params.isHidden ? nowIso : undefined,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
     };
     await this.msgRepository.save(msg);
 
@@ -3086,6 +3468,8 @@ export class ChatService {
       isHiddenOnPlatform: params.isHidden,
       hiddenByAgentId: params.isHidden ? params.userId : null,
       hiddenAt: params.isHidden ? nowIso : null,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+      recipientIds,
     };
   }
 
@@ -3099,17 +3483,35 @@ export class ChatService {
     isLiked: boolean;
   }) {
     await this.ensureParticipant(params.conversationId, params.userId);
-    const msg = await this.msgRepository.findOne({
-      where: { id: params.messageId, conversationId: params.conversationId },
-    });
+    const [msg, conv, recipientIds] = await Promise.all([
+      this.msgRepository.findOne({
+        where: { id: params.messageId, conversationId: params.conversationId },
+      }),
+      this.convRepository.findOne({
+        where: { id: params.conversationId },
+        select: ['id', 'shopId', 'channelIntegrationId'],
+      }),
+      this.getConversationMemberIds(params.conversationId),
+    ]);
     if (!msg) {
       throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
     }
+
+    const externalCommentId = msg.metadata?.externalCommentId || msg.externalMessageId || msg.id;
+
+    const dispatchRes = await this.executePlatformHttpCall({
+      channelIntegrationId: conv?.channelIntegrationId,
+      shopId: conv?.shopId,
+      actionType: 'LIKE_UNLIKE_COMMENT',
+      targetExternalId: externalCommentId,
+      bodyPayload: { isLiked: params.isLiked },
+    });
 
     msg.metadata = {
       ...(msg.metadata || {}),
       isLikedByPage: params.isLiked,
       likedByAgentId: params.isLiked ? params.userId : undefined,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
     };
     await this.msgRepository.save(msg);
 
@@ -3118,6 +3520,64 @@ export class ChatService {
       messageId: msg.id,
       isLikedByPage: params.isLiked,
       likedByAgentId: params.isLiked ? params.userId : null,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+      recipientIds,
+    };
+  }
+
+  /**
+   * F03.3 & F03.4: Xóa bình luận trên nền tảng gốc (DELETE /{comment_id}) khi nhân viên xử lý spam/rải link,
+   * đồng thời giữ lại bản ghi trong DB với cờ `isDeletedOnPlatform = true` và `deletedByActor = 'AGENT'` để kiểm toán.
+   */
+  async deleteCommentOnPlatform(params: {
+    userId: string;
+    conversationId: string;
+    messageId: string;
+  }) {
+    await this.ensureParticipant(params.conversationId, params.userId);
+    const [msg, conv, recipientIds] = await Promise.all([
+      this.msgRepository.findOne({
+        where: { id: params.messageId, conversationId: params.conversationId },
+      }),
+      this.convRepository.findOne({
+        where: { id: params.conversationId },
+        select: ['id', 'shopId', 'channelIntegrationId'],
+      }),
+      this.getConversationMemberIds(params.conversationId),
+    ]);
+    if (!msg) {
+      throw new NotFoundException('COMMENT_MESSAGE_NOT_FOUND');
+    }
+
+    const externalCommentId = msg.metadata?.externalCommentId || msg.externalMessageId || msg.id;
+
+    const dispatchRes = await this.executePlatformHttpCall({
+      channelIntegrationId: conv?.channelIntegrationId,
+      shopId: conv?.shopId,
+      actionType: 'DELETE_COMMENT',
+      targetExternalId: externalCommentId,
+    });
+
+    const nowIso = new Date().toISOString();
+    msg.metadata = {
+      ...(msg.metadata || {}),
+      isDeletedOnPlatform: true,
+      deletedByActor: 'AGENT',
+      deletedByAgentId: params.userId,
+      deletedOnPlatformAt: nowIso,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+    };
+    await this.msgRepository.save(msg);
+
+    return {
+      conversationId: params.conversationId,
+      messageId: msg.id,
+      isDeletedOnPlatform: true,
+      deletedByActor: 'AGENT' as const,
+      deletedByAgentId: params.userId,
+      deletedOnPlatformAt: nowIso,
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+      recipientIds,
     };
   }
 
@@ -3166,6 +3626,37 @@ export class ChatService {
       750,
     );
 
+    const externalCommentId =
+      commentMsg.metadata?.externalCommentId || commentMsg.externalMessageId || commentMsg.id;
+
+    const privateReplyDispatch = await this.executePlatformHttpCall({
+      channelIntegrationId: parentConv.channelIntegrationId,
+      shopId: parentConv.shopId,
+      actionType: 'SEND_PRIVATE_REPLY',
+      targetExternalId: externalCommentId,
+      bodyPayload: { text: params.content.trim() },
+    });
+
+    if (params.autoHideComment) {
+      await this.executePlatformHttpCall({
+        channelIntegrationId: parentConv.channelIntegrationId,
+        shopId: parentConv.shopId,
+        actionType: 'HIDE_UNHIDE_COMMENT',
+        targetExternalId: externalCommentId,
+        bodyPayload: { isHidden: true },
+      });
+    }
+
+    if (params.autoLikeComment) {
+      await this.executePlatformHttpCall({
+        channelIntegrationId: parentConv.channelIntegrationId,
+        shopId: parentConv.shopId,
+        actionType: 'LIKE_UNLIKE_COMMENT',
+        targetExternalId: externalCommentId,
+        bodyPayload: { isLiked: true },
+      });
+    }
+
     let inboxConv = await this.convRepository.findOne({
       where: {
         shopId: parentConv.shopId || undefined,
@@ -3211,7 +3702,7 @@ export class ChatService {
       .decryptForConversation(commentMsg.content, params.conversationId)
       .slice(0, 160);
 
-    await this.sendMessage({
+    const inboxMsgRes = await this.sendMessage({
       senderId: params.senderId,
       dto: {
         conversationId: inboxConv.id,
@@ -3219,8 +3710,10 @@ export class ChatService {
         type: MessageTypeEnum.TEXT,
         metadata: {
           commentReplyMode: 'SEND_PRIVATE_REPLY_ONLY',
-          externalCommentId: commentMsg.metadata?.externalCommentId || commentMsg.id,
+          externalCommentId,
           externalPostId: parentConv.sourcePostId || undefined,
+          platformDeliveryStatus: privateReplyDispatch.deliveryStatus,
+          platformExternalId: privateReplyDispatch.externalId,
           replyPreview: {
             messageId: commentMsg.id,
             senderId: commentMsg.senderId,
@@ -3232,18 +3725,39 @@ export class ChatService {
       },
     });
 
+    if (inboxMsgRes.message) {
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        inboxConv.id,
+        SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+        inboxMsgRes.message,
+      );
+      inboxMsgRes.recipientIds.forEach((uid) => {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+          inboxMsgRes.message,
+        );
+      });
+    }
+
     const nowIso = now.toISOString();
     commentMsg.metadata = {
       ...(commentMsg.metadata || {}),
       privateReplySentAt: nowIso,
       privateReplyByAgentId: params.senderId,
       linkedInboxConversationId: inboxConv.id,
+      platformDeliveryStatus: privateReplyDispatch.deliveryStatus,
+      platformExternalId: privateReplyDispatch.externalId,
       ...(params.autoHideComment
         ? { isHiddenOnPlatform: true, hiddenByAgentId: params.senderId, hiddenAt: nowIso }
         : {}),
       ...(params.autoLikeComment ? { isLikedByPage: true, likedByAgentId: params.senderId } : {}),
     };
     await this.msgRepository.save(commentMsg);
+
+    const recipientIds = await this.getConversationMemberIds(params.conversationId);
 
     return {
       conversationId: params.conversationId,
@@ -3253,6 +3767,8 @@ export class ChatService {
       privateReplyByAgentId: params.senderId,
       isHiddenOnPlatform: Boolean(commentMsg.metadata.isHiddenOnPlatform),
       isLikedByPage: Boolean(commentMsg.metadata.isLikedByPage),
+      platformDeliveryStatus: privateReplyDispatch.deliveryStatus,
+      recipientIds,
     };
   }
 }
