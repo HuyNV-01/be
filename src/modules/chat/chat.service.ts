@@ -30,6 +30,7 @@ import {
   NotificationResourceTypeEnum,
   NotificationTypeEnum,
   ShopRoleEnum,
+  WebhookIntegrationStatusEnum,
 } from 'src/common/enum';
 import { ContactStatusEnum } from 'src/common/enum';
 import { AdvancedQueryHelper } from 'src/common/helper/query.helper';
@@ -74,6 +75,7 @@ import { FileEntity } from 'src/entity/file.entity';
 import { MediaEntity } from 'src/entity/media.entity';
 import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
+import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { UserEntity } from 'src/entity/user.entity';
 import { IBaseQuery } from 'src/interface';
 import {
@@ -3338,6 +3340,280 @@ export class ChatService {
    *    hoặc khi `appSecret` trong cấu hình khác với ứng dụng phát hành Token (khắc phục lỗi OAuthException #100 Invalid appsecret_proof).
    * 4. Tự động fallback sang `/me/messages`, `HUMAN_AGENT` Message Tag (7 ngày) hoặc `comment_id` Private Reply khi cần.
    */
+  /**
+   * Tự động khôi phục & vĩnh viễn hóa Page Access Token ngay trong luồng gửi tin nhắn (`Self-Healing Outbound Token Recovery`):
+   * Khi người bán gửi tin nhắn tới người mua nhưng Page Access Token bị hết hạn (OAuthException 190 / Zalo -216),
+   * phương thức này tự động:
+   * 1. Đổi qua `fb_exchange_token` (nếu có `appId` + `appSecret`).
+   * 2. Hoặc dùng `userLongLivedTokenEncrypted` / `refreshTokenEncrypted` đã lưu để gọi `GET /{externalPageId}?fields=access_token`
+   *    và `GET /me/accounts` nhằm rút trích **Never-Expiring Page Access Token** mới.
+   * 3. Hoặc khôi phục chéo từ Fanpage anh em cùng cửa hàng (`Sibling Channel Recovery`).
+   * 4. Lưu Page Access Token mới vào DB và trả về ngay cho `executePlatformHttpCall` để gửi lại tin nhắn tức thì.
+   */
+  private async recoverExpiredChannelPageTokenInline(
+    channel: ChannelIntegrationEntity,
+    currentAppSecret: string,
+    apiVersion: string,
+  ): Promise<string | null> {
+    try {
+      let appId = (
+        channel.appId ||
+        channel.platformConfigJson?.appId ||
+        envs.omnichannelSaas?.metaAppId ||
+        ''
+      ).trim();
+      let appSecret = currentAppSecret.trim();
+
+      if ((!appId || !appSecret) && channel.shopId) {
+        const shop = await this.dataSource
+          .getRepository(ShopWorkspaceEntity)
+          .findOne({ where: { id: channel.shopId }, select: ['id', 'saasAppProfilesJson'] })
+          .catch(() => null);
+        const profiles = Array.isArray(shop?.saasAppProfilesJson) ? shop.saasAppProfilesJson : [];
+        const matchedProf =
+          (channel.saasAppProfileId
+            ? profiles.find((p) => p.id === channel.saasAppProfileId)
+            : null) ||
+          profiles.find(
+            (p) => p.channelType === channel.channelType && p.isDefault && p.isActive !== false,
+          ) ||
+          profiles.find((p) => p.channelType === channel.channelType && p.isActive !== false) ||
+          null;
+        if (matchedProf) {
+          if (!appId && matchedProf.appId) appId = matchedProf.appId.trim();
+          if (!appSecret && matchedProf.appSecretEncrypted) {
+            appSecret = this.messageCryptoService
+              .decryptForConversation(matchedProf.appSecretEncrypted, channel.shopId)
+              .trim();
+          }
+        }
+      }
+
+      if (channel.channelType === ChannelTypeEnum.ZALO_OA) {
+        const zaloRefresh = channel.refreshTokenEncrypted
+          ? this.messageCryptoService
+              .decryptForConversation(channel.refreshTokenEncrypted, channel.shopId)
+              .trim()
+          : '';
+        const zaloAppId = appId || envs.omnichannelSaas?.zaloAppId || '';
+        const zaloSecret = appSecret || envs.omnichannelSaas?.zaloAppSecret || '';
+        if (!zaloRefresh || !zaloAppId || !zaloSecret) return null;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const body = new URLSearchParams({
+          refresh_token: zaloRefresh,
+          app_id: zaloAppId,
+          grant_type: 'refresh_token',
+        });
+        const res = await fetch('https://oauth.zaloapp.com/v4/oa/access_token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            secret_key: zaloSecret,
+          },
+          body: body.toString(),
+          signal: controller.signal,
+        }).catch(() => null);
+        clearTimeout(timeoutId);
+        if (!res || !res.ok) return null;
+        const json = (await res.json().catch(() => ({}))) as {
+          access_token?: string;
+          refresh_token?: string;
+          expires_in?: number;
+        };
+        if (!json.access_token) return null;
+        const nextAccess = String(json.access_token).trim();
+        const nextRefresh = json.refresh_token ? String(json.refresh_token).trim() : zaloRefresh;
+        channel.accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
+          nextAccess,
+          channel.shopId,
+        ).ciphertext;
+        channel.refreshTokenEncrypted = this.messageCryptoService.encryptForConversation(
+          nextRefresh,
+          channel.shopId,
+        ).ciphertext;
+        channel.tokenExpiresAt = new Date(Date.now() + Number(json.expires_in || 90000) * 1000);
+        channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
+        channel.lastErrorMessage = null;
+        await this.channelRepository.save(channel);
+        return nextAccess;
+      }
+
+      // Nhánh Facebook Fanpage / Instagram Business
+      const storedUserTok = channel.platformConfigJson?.userLongLivedTokenEncrypted
+        ? this.messageCryptoService
+            .decryptForConversation(
+              channel.platformConfigJson.userLongLivedTokenEncrypted,
+              channel.shopId,
+            )
+            .trim()
+        : '';
+      const storedRefreshTok = channel.refreshTokenEncrypted
+        ? this.messageCryptoService
+            .decryptForConversation(channel.refreshTokenEncrypted, channel.shopId)
+            .trim()
+        : '';
+      const currentPageTok = channel.accessTokenEncrypted
+        ? this.messageCryptoService
+            .decryptForConversation(channel.accessTokenEncrypted, channel.shopId)
+            .trim()
+        : '';
+
+      const siblingChannels = await this.channelRepository.find({
+        where: {
+          shopId: channel.shopId,
+          channelType: In([ChannelTypeEnum.FACEBOOK_PAGE, ChannelTypeEnum.INSTAGRAM]),
+          isActive: true,
+        },
+        take: 10,
+      });
+
+      const siblingTokens: string[] = [];
+      for (const sib of siblingChannels) {
+        if (sib.id === channel.id) continue;
+        if (sib.platformConfigJson?.userLongLivedTokenEncrypted) {
+          siblingTokens.push(
+            this.messageCryptoService
+              .decryptForConversation(
+                sib.platformConfigJson.userLongLivedTokenEncrypted,
+                sib.shopId,
+              )
+              .trim(),
+          );
+        }
+        if (sib.refreshTokenEncrypted) {
+          siblingTokens.push(
+            this.messageCryptoService
+              .decryptForConversation(sib.refreshTokenEncrypted, sib.shopId)
+              .trim(),
+          );
+        }
+      }
+
+      const candidateSourceTokens = Array.from(
+        new Set(
+          [storedUserTok, storedRefreshTok, currentPageTok, ...siblingTokens].filter(
+            (t) => Boolean(t) && !/^(oauth2_|rft_|sandbox_)/i.test(t),
+          ),
+        ),
+      );
+
+      const exchangeLongLived = async (tok: string): Promise<string> => {
+        if (!appId || !appSecret) return tok;
+        const qs = new URLSearchParams({
+          grant_type: 'fb_exchange_token',
+          client_id: appId,
+          client_secret: appSecret,
+          fb_exchange_token: tok,
+        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4500);
+        const res = await fetch(
+          `https://graph.facebook.com/${apiVersion}/oauth/access_token?${qs.toString()}`,
+          { signal: controller.signal },
+        ).catch(() => null);
+        clearTimeout(timeoutId);
+        if (!res || !res.ok) return tok;
+        const json = (await res.json().catch(() => ({}))) as { access_token?: string };
+        return json.access_token ? String(json.access_token).trim() : tok;
+      };
+
+      const tryDerivePageToken = async (srcTok: string): Promise<string | null> => {
+        const exchangedTok = await exchangeLongLived(srcTok);
+        const proof = appSecret
+          ? createHmac('sha256', appSecret).update(exchangedTok).digest('hex')
+          : null;
+
+        // 1. Gọi trực tiếp /{externalPageId}?fields=id,access_token
+        const directQs = new URLSearchParams({
+          fields: 'id,access_token',
+          access_token: exchangedTok,
+          ...(proof ? { appsecret_proof: proof } : {}),
+        });
+        const controller1 = new AbortController();
+        const t1 = setTimeout(() => controller1.abort(), 4500);
+        const directRes = await fetch(
+          `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(channel.externalPageId)}?${directQs.toString()}`,
+          { signal: controller1.signal },
+        ).catch(() => null);
+        clearTimeout(t1);
+        if (directRes && directRes.ok) {
+          const directJson = (await directRes.json().catch(() => ({}))) as {
+            id?: string;
+            access_token?: string;
+          };
+          if (directJson.access_token && String(directJson.id) === channel.externalPageId) {
+            return String(directJson.access_token).trim();
+          }
+        }
+
+        // 2. Gọi /me/accounts để trích xuất đúng Never-Expiring Page Token của externalPageId
+        const accQs = new URLSearchParams({
+          fields: 'id,name,access_token,instagram_business_account{id}',
+          limit: '100',
+          access_token: exchangedTok,
+          ...(proof ? { appsecret_proof: proof } : {}),
+        });
+        const controller2 = new AbortController();
+        const t2 = setTimeout(() => controller2.abort(), 4500);
+        const accRes = await fetch(
+          `https://graph.facebook.com/${apiVersion}/me/accounts?${accQs.toString()}`,
+          { signal: controller2.signal },
+        ).catch(() => null);
+        clearTimeout(t2);
+        if (accRes && accRes.ok) {
+          const accJson = (await accRes.json().catch(() => ({}))) as {
+            data?: Array<{
+              id: string;
+              access_token?: string;
+              instagram_business_account?: { id: string };
+            }>;
+          };
+          const matched = (accJson.data || []).find(
+            (item) =>
+              String(item.id) === channel.externalPageId ||
+              String(item.instagram_business_account?.id || '') === channel.externalPageId,
+          );
+          if (matched?.access_token) {
+            return String(matched.access_token).trim();
+          }
+        }
+
+        return exchangedTok !== srcTok ? exchangedTok : null;
+      };
+
+      for (const candidate of candidateSourceTokens) {
+        const derivedPageTok = await tryDerivePageToken(candidate);
+        if (derivedPageTok) {
+          const nowIso = new Date().toISOString();
+          channel.accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
+            derivedPageTok,
+            channel.shopId,
+          ).ciphertext;
+          channel.tokenExpiresAt = null;
+          channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
+          channel.lastErrorMessage = null;
+          channel.platformConfigJson = {
+            ...(channel.platformConfigJson || {}),
+            isNeverExpiringPageToken: true,
+            lastTokenRefreshedAt: nowIso,
+            autoRefreshPageTokenEnabled: true,
+            tokenRecoverySource: 'FB_EXCHANGE_NEVER_EXPIRING',
+          };
+          await this.channelRepository.save(channel);
+          this.logger.log(
+            `[ChatService] Self-healed Page Access Token inline for channel "${channel.pageName}" (${channel.externalPageId}) during outbound send.`,
+          );
+          return derivedPageTok;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Inline Page Token recovery failed: ${String(err)}`);
+    }
+    return null;
+  }
+
   private async executePlatformHttpCall(params: {
     channelIntegrationId?: string | null;
     shopId?: string | null;
@@ -3373,7 +3649,7 @@ export class ChatService {
       };
     }
 
-    const rawToken = this.messageCryptoService
+    let rawToken = this.messageCryptoService
       .decryptForConversation(channel.accessTokenEncrypted, channel.shopId)
       .trim()
       .replace(/^Bearer\s+/i, '');
@@ -3412,9 +3688,10 @@ export class ChatService {
             appSecret = decryptedSecret.trim();
           }
         }
-        const appSecretProof = appSecret
+        let appSecretProof = appSecret
           ? createHmac('sha256', appSecret).update(rawToken).digest('hex')
           : undefined;
+        let hasAttemptedTokenAutoHeal = false;
 
         const cleanTargetId = params.targetExternalId.replace(/^(inbox_|zalo_)/, '').trim();
 
@@ -3506,7 +3783,9 @@ export class ChatService {
             return firstAttempt;
           }
 
-          // Nếu Token được lấy từ Graph API Explorer hoặc App Secret không khớp với Token,
+          let latestAttempt = firstAttempt;
+
+          // 1. Nếu Token được lấy từ Graph API Explorer hoặc App Secret không khớp với Token,
           // tự động thử lại ngay lập tức không đính kèm appsecret_proof
           if (
             appSecretProof &&
@@ -3521,10 +3800,54 @@ export class ChatService {
             if (retryNoProof.ok) {
               return retryNoProof;
             }
-            return retryNoProof;
+            latestAttempt = retryNoProof;
           }
 
-          return firstAttempt;
+          // 2. Cơ chế Self-Healing Outbound Retry khi Page Access Token hết hạn (OAuthException code 190 / subcode 463, 467, 460):
+          // Tự động lấy lại Never-Expiring Page Access Token từ Long-Lived User Token / fb_exchange_token / kênh anh em cùng Shop
+          // và gửi lại tin nhắn cho người mua ngay trong cùng 1 request mà không làm gián đoạn việc nhắn tin của người bán!
+          const isTokenExpiredError =
+            latestAttempt.errorCode === 190 ||
+            latestAttempt.errorSubcode === 463 ||
+            latestAttempt.errorSubcode === 467 ||
+            latestAttempt.errorSubcode === 460 ||
+            /access token|session has expired|validating access token|token has expired/i.test(
+              latestAttempt.errorMessage || '',
+            );
+
+          if (isTokenExpiredError && !hasAttemptedTokenAutoHeal) {
+            hasAttemptedTokenAutoHeal = true;
+            const healedToken = await this.recoverExpiredChannelPageTokenInline(
+              channel,
+              appSecret,
+              reqConfig.ver,
+            );
+            if (healedToken && healedToken !== rawToken) {
+              rawToken = healedToken;
+              appSecretProof = appSecret
+                ? createHmac('sha256', appSecret).update(rawToken).digest('hex')
+                : undefined;
+
+              const retryAfterHeal = await executeSingleGraphRequest({
+                ...reqConfig,
+                includeProof: Boolean(appSecretProof),
+              });
+              if (retryAfterHeal.ok) {
+                return retryAfterHeal;
+              }
+              if (appSecretProof) {
+                const retryAfterHealNoProof = await executeSingleGraphRequest({
+                  ...reqConfig,
+                  includeProof: false,
+                });
+                if (retryAfterHealNoProof.ok) {
+                  return retryAfterHealNoProof;
+                }
+              }
+            }
+          }
+
+          return latestAttempt;
         };
 
         for (const ver of candidateVersions) {
@@ -3811,30 +4134,67 @@ export class ChatService {
         params.actionType === 'SEND_INBOX_MESSAGE'
       ) {
         const cleanZaloUserId = params.targetExternalId.replace(/^zalo_/, '').trim();
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch('https://openapi.zalo.me/v3.0/oa/message/cs', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            access_token: rawToken,
-          },
-          body: JSON.stringify({
-            recipient: { user_id: cleanZaloUserId },
-            message: { text: String(params.bodyPayload?.text || '') },
-          }),
-          signal: controller.signal,
-        }).catch(() => null);
-        clearTimeout(timeoutId);
+        const sendZaloRequest = async (tokenToUse: string) => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          try {
+            const res = await fetch('https://openapi.zalo.me/v3.0/oa/message/cs', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                access_token: tokenToUse,
+              },
+              body: JSON.stringify({
+                recipient: { user_id: cleanZaloUserId },
+                message: { text: String(params.bodyPayload?.text || '') },
+              }),
+              signal: controller.signal,
+            }).catch(() => null);
+            clearTimeout(timeoutId);
+            if (!res) return { ok: false, errorCode: -1, messageId: null };
+            const json = (await res.json().catch(() => ({}))) as {
+              error?: number;
+              message?: string;
+              data?: { message_id?: string };
+            };
+            if (res.ok && (!json.error || json.error === 0)) {
+              return {
+                ok: true,
+                errorCode: 0,
+                messageId: String(json.data?.message_id || fallbackExternalId),
+              };
+            }
+            return { ok: false, errorCode: Number(json.error ?? -1), messageId: null };
+          } catch {
+            clearTimeout(timeoutId);
+            return { ok: false, errorCode: -1, messageId: null };
+          }
+        };
 
-        if (res && res.ok) {
-          const json = (await res.json().catch(() => ({}))) as {
-            data?: { message_id?: string };
-          };
+        const firstZaloRes = await sendZaloRequest(rawToken);
+        if (firstZaloRes.ok && firstZaloRes.messageId) {
           return {
             deliveryStatus: 'DISPATCHED',
-            externalId: String(json.data?.message_id || fallbackExternalId),
+            externalId: firstZaloRes.messageId,
           };
+        }
+
+        // Nếu Zalo OA Access Token hết hạn (-216 hoặc -124), tự động dùng Refresh Token xoay vòng và gửi lại ngay lập tức
+        if (firstZaloRes.errorCode === -216 || firstZaloRes.errorCode === -124) {
+          const healedZaloToken = await this.recoverExpiredChannelPageTokenInline(
+            channel,
+            '',
+            'v3.0',
+          );
+          if (healedZaloToken && healedZaloToken !== rawToken) {
+            const retryZaloRes = await sendZaloRequest(healedZaloToken);
+            if (retryZaloRes.ok && retryZaloRes.messageId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: retryZaloRes.messageId,
+              };
+            }
+          }
         }
       }
     } catch {

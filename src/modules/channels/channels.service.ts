@@ -50,6 +50,7 @@ import { NotificationsService } from 'src/modules/notifications/notifications.se
 import { In, Repository } from 'typeorm';
 
 import { ConversationRoutingEngine } from './routing/conversation-routing.engine';
+import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
 
 export interface NormalizedOmnichannelEvent {
@@ -76,6 +77,7 @@ export interface NormalizedOmnichannelEvent {
 
 export interface ResolvedChannelTokenCandidatePage {
   externalPageId: string;
+  isNeverExpiringPageToken?: boolean;
   pageName: string;
   pageShortCode: string;
   avatarUrl: string | null;
@@ -117,6 +119,8 @@ export interface ResolvedChannelTokenMetadataResult {
   avatarUrl: string | null;
   category: string | null;
   resolvedPageAccessToken: string;
+  resolvedUserAccessToken?: string | null;
+  isNeverExpiringPageToken?: boolean;
   subscribedFields: string[];
   candidatePages: ResolvedChannelTokenCandidatePage[];
   webhookCallbackUrl: string;
@@ -282,6 +286,7 @@ export class ChannelsService {
     @InjectRedis() private readonly redis: Redis,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly routingEngine: ConversationRoutingEngine,
+    private readonly tokenDoctorService: ChannelTokenDoctorService,
     private readonly marketplaceBridge: MarketplaceBridgeService,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
@@ -1513,14 +1518,35 @@ export class ChannelsService {
       dto.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
       dto.channelType === ChannelTypeEnum.INSTAGRAM
     ) {
+      // Tự động đổi Short-Lived Token (1-2h) sang Long-Lived Token (60 ngày) qua fb_exchange_token trước khi lấy danh sách Page
+      // Khi gọi /me/accounts bằng Long-Lived User Token, Meta Graph API sẽ cấp Never-Expiring Page Access Token (expires_at = 0)
+      let workingToken = cleanToken;
+      let exchangedLongLivedUserToken: string | null = null;
+      let wasAutoExchanged = false;
+
+      if (dto.autoExchangeNeverExpiringToken !== false && resolvedAppId && resolvedAppSecret) {
+        const exchangeAttempt = await this.tokenDoctorService.exchangeMetaLongLivedToken({
+          apiVersion: resolvedApiVersion,
+          appId: resolvedAppId,
+          rawAppSecret: resolvedAppSecret,
+          inputToken: cleanToken,
+        });
+        if (exchangeAttempt.wasExchanged && exchangeAttempt.exchangedToken) {
+          workingToken = exchangeAttempt.exchangedToken;
+          exchangedLongLivedUserToken = exchangeAttempt.exchangedToken;
+          wasAutoExchanged = true;
+        }
+      }
+
       let debuggedTokenType: 'PAGE' | 'USER' | null = null;
+      let debuggedIsNeverExpiring = false;
       let debuggedProfileId: string | null = null;
       let debuggedAppId: string | null = resolvedAppId;
       let debuggedExpiresAt: string | null = null;
       let debuggedScopes: string[] = [];
 
       if (resolvedAppId && resolvedAppSecret) {
-        const debugUrl = `https://graph.facebook.com/${resolvedApiVersion}/debug_token?input_token=${encodeURIComponent(cleanToken)}&access_token=${encodeURIComponent(`${resolvedAppId}|${resolvedAppSecret}`)}`;
+        const debugUrl = `https://graph.facebook.com/${resolvedApiVersion}/debug_token?input_token=${encodeURIComponent(workingToken)}&access_token=${encodeURIComponent(`${resolvedAppId}|${resolvedAppSecret}`)}`;
         const debugRes = await fetch(debugUrl).catch(() => null);
         if (debugRes && debugRes.ok) {
           const debugJson = (await debugRes.json().catch(() => ({}))) as {
@@ -1543,7 +1569,10 @@ export class ChannelsService {
           if (debugJson?.data?.app_id) {
             debuggedAppId = String(debugJson.data.app_id);
           }
-          if (debugJson?.data?.expires_at && debugJson.data.expires_at > 0) {
+          if (debugJson?.data?.expires_at === 0) {
+            debuggedIsNeverExpiring = true;
+            debuggedExpiresAt = null;
+          } else if (debugJson?.data?.expires_at && debugJson.data.expires_at > 0) {
             debuggedExpiresAt = new Date(debugJson.data.expires_at * 1000).toISOString();
           }
           if (Array.isArray(debugJson?.data?.scopes)) {
@@ -1570,7 +1599,7 @@ export class ChannelsService {
           fields: 'id,name,picture.type(large)',
           metadata: '1',
         },
-        accessToken: cleanToken,
+        accessToken: workingToken,
         appSecret: resolvedAppSecret,
       });
 
@@ -1601,10 +1630,10 @@ export class ChannelsService {
             queryParams: {
               fields:
                 dto.channelType === ChannelTypeEnum.INSTAGRAM
-                  ? 'id,name,category,picture.type(large),instagram_business_account{id,name,username,profile_picture_url}'
-                  : 'id,name,category,picture.type(large)',
+                  ? 'id,name,category,access_token,picture.type(large),instagram_business_account{id,name,username,profile_picture_url}'
+                  : 'id,name,category,access_token,picture.type(large)',
             },
-            accessToken: cleanToken,
+            accessToken: workingToken,
             appSecret: resolvedAppSecret,
           });
 
@@ -1668,13 +1697,18 @@ export class ChannelsService {
           const resolvedCategory = (detail as any)?.category || 'Facebook Fanpage';
           const shortCode = this.buildSmartShortCode(dto.channelType, resolvedPageName, pageId);
 
+          const resolvedPermanentPageToken = String((detail as any)?.access_token || workingToken);
+          const isPermanentPageToken = Boolean(
+            debuggedIsNeverExpiring || wasAutoExchanged || !debuggedExpiresAt,
+          );
           const singlePageCandidate: ResolvedChannelTokenCandidatePage = {
             externalPageId: pageId,
             pageName: resolvedPageName,
             pageShortCode: shortCode,
             avatarUrl: resolvedAvatar,
             category: resolvedCategory,
-            pageAccessToken: cleanToken,
+            pageAccessToken: resolvedPermanentPageToken,
+            isNeverExpiringPageToken: isPermanentPageToken,
             subscribedFields,
           };
 
@@ -1686,7 +1720,7 @@ export class ChannelsService {
             apiVersionUsed: meCall.usedVersion,
             appId: debuggedAppId,
             appIdDetected: debuggedAppId,
-            tokenExpiresAt: debuggedExpiresAt,
+            tokenExpiresAt: isPermanentPageToken ? null : debuggedExpiresAt,
             scopesGranted: debuggedScopes,
             tokenKind: 'PAGE_TOKEN',
             authenticatedUserId: null,
@@ -1697,7 +1731,9 @@ export class ChannelsService {
             pageShortCode: shortCode,
             avatarUrl: resolvedAvatar,
             category: resolvedCategory,
-            resolvedPageAccessToken: cleanToken,
+            resolvedPageAccessToken: resolvedPermanentPageToken,
+            resolvedUserAccessToken: exchangedLongLivedUserToken,
+            isNeverExpiringPageToken: isPermanentPageToken,
             subscribedFields,
             candidatePages: [singlePageCandidate],
             webhookCallbackUrl,
@@ -1724,7 +1760,7 @@ export class ChannelsService {
             fields: 'id,name,category,access_token,picture.type(large),tasks',
             limit: '100',
           },
-          accessToken: cleanToken,
+          accessToken: workingToken,
           appSecret: resolvedAppSecret,
         });
 
@@ -1802,7 +1838,7 @@ export class ChannelsService {
 
           const candidatePages: ResolvedChannelTokenCandidatePage[] = rawPages.map((item) => {
             const extId = String(item.id);
-            const pToken = item.access_token || cleanToken;
+            const pToken = item.access_token || workingToken;
             return {
               externalPageId: extId,
               pageName: item.name,
@@ -1811,6 +1847,7 @@ export class ChannelsService {
                 item.picture?.data?.url || `https://graph.facebook.com/${extId}/picture?type=large`,
               category: item.category || 'Facebook Fanpage',
               pageAccessToken: pToken,
+              isNeverExpiringPageToken: true,
               tasks: item.tasks || [],
               subscribedFields,
             };
@@ -1847,7 +1884,9 @@ export class ChannelsService {
             category: matchedCandidate ? matchedCandidate.category || null : null,
             resolvedPageAccessToken: matchedCandidate
               ? matchedCandidate.pageAccessToken
-              : cleanToken,
+              : workingToken,
+            resolvedUserAccessToken: workingToken,
+            isNeverExpiringPageToken: true,
             subscribedFields,
             candidatePages,
             webhookCallbackUrl,
@@ -2286,7 +2325,30 @@ export class ChannelsService {
       }
     }
 
-    const effectivePageAccessToken = autoResolvedMeta?.resolvedPageAccessToken || inputAccessToken;
+    const preliminaryPageId = (dto.externalPageId || autoResolvedMeta?.externalPageId || '').trim();
+
+    const rawUserTokenCandidate =
+      dto.userAccessToken?.trim() ||
+      autoResolvedMeta?.resolvedUserAccessToken ||
+      (autoResolvedMeta?.tokenKind === 'USER_TOKEN' ? inputAccessToken : null);
+
+    const permanentExchange =
+      dto.autoExchangeNeverExpiringToken !== false && preliminaryPageId
+        ? await this.tokenDoctorService.exchangeForNeverExpiringPageAccessToken({
+            channelType: dto.channelType,
+            externalPageId: preliminaryPageId,
+            rawInputToken: autoResolvedMeta?.resolvedPageAccessToken || inputAccessToken,
+            rawUserToken: rawUserTokenCandidate,
+            apiVersion: normalizedApiVersion,
+            appId: resolvedAppId,
+            rawAppSecret,
+          })
+        : null;
+
+    const effectivePageAccessToken =
+      permanentExchange?.effectivePageAccessToken ||
+      autoResolvedMeta?.resolvedPageAccessToken ||
+      inputAccessToken;
 
     const resolvedExternalPageId = (
       dto.externalPageId ||
@@ -2322,8 +2384,13 @@ export class ChannelsService {
       autoResolvedMeta?.avatarUrl ||
       `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(resolvedShortCode)}`;
 
+    const effectiveLongLivedUserToken =
+      permanentExchange?.longLivedUserAccessToken || rawUserTokenCandidate || null;
+
     const rawRefreshToken =
-      dto.refreshToken?.trim() || (dto.oauthCode ? `oauth2_rft_${dto.oauthCode.trim()}` : null);
+      dto.refreshToken?.trim() ||
+      effectiveLongLivedUserToken ||
+      (dto.oauthCode ? `oauth2_rft_${dto.oauthCode.trim()}` : null);
 
     let channel = await this.channelRepo.findOne({
       where: {
@@ -2372,12 +2439,26 @@ export class ChannelsService {
           .ciphertext
       : null;
 
+    const isNeverExpiringPageToken = Boolean(
+      permanentExchange?.isNeverExpiringPageToken ??
+        autoResolvedMeta?.isNeverExpiringPageToken ??
+        (dto.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
+          dto.channelType === ChannelTypeEnum.INSTAGRAM),
+    );
+
     const defaultExpiry = dto.tokenExpiresAt
       ? new Date(dto.tokenExpiresAt)
-      : new Date(Date.now() + 60 * 86400 * 1000);
+      : isNeverExpiringPageToken
+        ? null
+        : permanentExchange?.tokenExpiresAt || new Date(Date.now() + 60 * 86400 * 1000);
 
     const desiredSubscribedFields = effectiveSaas.subscribedFields;
     const nowIso = new Date().toISOString();
+
+    const userLongLivedTokenEncrypted = effectiveLongLivedUserToken
+      ? this.messageCryptoService.encryptForConversation(effectiveLongLivedUserToken, shopId)
+          .ciphertext
+      : null;
 
     const platformConfigJson: ChannelPlatformSaasConfig = {
       saasAppProfileId: effectiveSaas.saasProfile?.id || null,
@@ -2396,6 +2477,14 @@ export class ChannelsService {
         dto.syncEchoMessagesFromNativeApp ?? effectiveSaas.syncEchoMessagesFromNativeApp,
       webhookAutoInjected: true,
       webhookInjectedAt: nowIso,
+      isNeverExpiringPageToken,
+      userLongLivedTokenEncrypted,
+      userTokenExpiresAt: permanentExchange?.userTokenExpiresAt
+        ? permanentExchange.userTokenExpiresAt.toISOString()
+        : null,
+      lastTokenRefreshedAt: nowIso,
+      autoRefreshPageTokenEnabled: true,
+      tokenRecoverySource: permanentExchange?.recoverySource || 'DIRECT_PAGE_TOKEN',
     };
 
     if (channel) {
@@ -2554,6 +2643,7 @@ export class ChannelsService {
               pageShortCode: p.pageShortCode,
               avatarUrl: p.avatarUrl,
               accessToken: p.pageAccessToken,
+              userAccessToken: dto.userAccessToken,
             }))
           : [];
 
@@ -2622,14 +2712,45 @@ export class ChannelsService {
         externalPageId: channel.externalPageId,
       }).catch(() => null);
 
-      const effectivePageToken = autoMeta?.resolvedPageAccessToken || cleanToken;
+      const exchangedPermanent =
+        await this.tokenDoctorService.exchangeForNeverExpiringPageAccessToken({
+          channelType: channel.channelType,
+          externalPageId: channel.externalPageId,
+          rawInputToken: autoMeta?.resolvedPageAccessToken || cleanToken,
+          rawUserToken:
+            dto.userAccessToken?.trim() || autoMeta?.resolvedUserAccessToken || undefined,
+          apiVersion: channel.apiVersion || 'v27.1',
+          appId: channel.appId,
+          rawAppSecret,
+        });
+
+      const effectivePageToken = exchangedPermanent.effectivePageAccessToken;
       channel.accessTokenEncrypted = this.messageCryptoService.encryptForConversation(
         effectivePageToken,
         shopId,
       ).ciphertext;
+      if (exchangedPermanent.longLivedUserAccessToken) {
+        const encUser = this.messageCryptoService.encryptForConversation(
+          exchangedPermanent.longLivedUserAccessToken,
+          shopId,
+        ).ciphertext;
+        channel.refreshTokenEncrypted = encUser;
+        channel.platformConfigJson = {
+          ...(channel.platformConfigJson || {}),
+          userLongLivedTokenEncrypted: encUser,
+        };
+      }
       channel.webhookStatus = WebhookIntegrationStatusEnum.HEALTHY;
-      channel.tokenExpiresAt = new Date(Date.now() + 60 * 86400 * 1000);
+      channel.tokenExpiresAt = exchangedPermanent.isNeverExpiringPageToken
+        ? null
+        : exchangedPermanent.tokenExpiresAt;
       channel.lastErrorMessage = null;
+      channel.platformConfigJson = {
+        ...(channel.platformConfigJson || {}),
+        isNeverExpiringPageToken: exchangedPermanent.isNeverExpiringPageToken,
+        lastTokenRefreshedAt: new Date().toISOString(),
+        tokenRecoverySource: exchangedPermanent.recoverySource,
+      };
 
       if (!dto.pageName && autoMeta?.pageName) {
         channel.pageName = autoMeta.pageName.slice(0, 250);
@@ -2756,6 +2877,8 @@ export class ChannelsService {
         webhookCallbackUrl: string;
         webhookVerifyToken: string;
         hasAppSecretConfigured: boolean;
+        isNeverExpiringPageToken: boolean;
+        hasRefreshOrUserToken: boolean;
       }
     >
   > {
@@ -2798,6 +2921,12 @@ export class ChannelsService {
           ch.platformConfigJson?.webhookCallbackUrl || this.buildWebhookCallbackUrl(ch.channelType),
         webhookVerifyToken: verifyToken,
         hasAppSecretConfigured: Boolean(ch.appSecretEncrypted),
+        isNeverExpiringPageToken: Boolean(
+          ch.platformConfigJson?.isNeverExpiringPageToken || !ch.tokenExpiresAt,
+        ),
+        hasRefreshOrUserToken: Boolean(
+          ch.refreshTokenEncrypted || ch.platformConfigJson?.userLongLivedTokenEncrypted,
+        ),
       });
     });
   }
@@ -3023,6 +3152,21 @@ export class ChannelsService {
         accessToken: rawPageToken,
         appSecret: rawAppSecret,
       });
+
+      if (
+        !profileCall.ok &&
+        (profileCall.errorCode === 190 ||
+          /access token|session has expired|validating access token/i.test(
+            profileCall.errorMessage || '',
+          ))
+      ) {
+        // Chủ động tự phục hồi Page Access Token ngay lúc nhận tin nhắn của người mua
+        // để khi người bán bấm gửi tin trả lời thì Page Token đã sống 100%!
+        void this.tokenDoctorService.autoHealChannelPageAccessToken(
+          channel,
+          'INBOUND_BUYER_MESSAGE_PREEMPTIVE_HEAL',
+        );
+      }
 
       if (profileCall.ok && profileCall.data) {
         const fullName =

@@ -3,6 +3,14 @@ import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
 
+export type PageTokenRecoverySourceType =
+  | 'FB_EXCHANGE_NEVER_EXPIRING'
+  | 'USER_LONG_LIVED_ACCOUNT_DERIVATION'
+  | 'SIBLING_CHANNEL_USER_TOKEN'
+  | 'ZALO_OA_REFRESH_TOKEN'
+  | 'DIRECT_PAGE_TOKEN'
+  | 'SANDBOX';
+
 export interface ChannelPlatformSaasConfig {
   saasAppProfileId?: string | null;
   saasAppProfileName?: string | null;
@@ -22,6 +30,12 @@ export interface ChannelPlatformSaasConfig {
   webhookAutoInjected?: boolean;
   webhookInjectedAt?: string | null;
   subscribedAppsVerifiedOnPlatform?: boolean;
+  isNeverExpiringPageToken?: boolean;
+  userLongLivedTokenEncrypted?: string | null;
+  userTokenExpiresAt?: string | null;
+  lastTokenRefreshedAt?: string | null;
+  autoRefreshPageTokenEnabled?: boolean;
+  tokenRecoverySource?: PageTokenRecoverySourceType | null;
 }
 
 @Entity('channel_integrations')

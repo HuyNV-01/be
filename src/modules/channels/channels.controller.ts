@@ -187,7 +187,7 @@ export class ChannelsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'F01.2: Tự động tra cứu chính xác Tên Trang, Avatar, Page ID, phân biệt Page Token vs User Token chỉ với Access Token (Tự động kế thừa Hồ sơ SaaS)',
+      'F01.2: Tự động tra cứu chính xác Tên Trang, Avatar, Page ID, phân biệt Page Token vs User Token và tự động đổi sang Never-Expiring Page Access Token',
   })
   async resolveChannelTokenMetadata(
     @Param('shopId') shopId: string,
@@ -207,7 +207,7 @@ export class ChannelsController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary:
-      'F01.2: Kết nối mới hoặc làm mới OAuth2 Token cho Fanpage, Instagram, Zalo OA, TikTok Shop, Shopee, Lazada và tự động tiêm Webhook',
+      'F01.2: Kết nối mới hoặc làm mới OAuth2 Token cho Fanpage, Instagram, Zalo OA, TikTok Shop, Shopee, Lazada kèm tự động vĩnh viễn hóa Page Token & tiêm Webhook',
   })
   async connectChannelOAuth(
     @Request() req: { user: { id: string } },
@@ -240,6 +240,31 @@ export class ChannelsController {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
       message: 'Batch connected channel integrations and auto-injected webhooks successfully',
+      data,
+    };
+  }
+
+  @Post(':channelId/refresh-page-token')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2 & Công cụ T02: Tự động lấy lại và vĩnh viễn hóa Page Access Token (Never-Expiring Page Token) cho kênh bán hàng để không bao giờ bị hết hạn khi nhắn tin',
+  })
+  async refreshChannelPageToken(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('channelId') channelId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.tokenDoctorService.refreshSingleChannelPageToken(
+      shopId,
+      channelId,
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Refreshed and upgraded channel Page Access Token successfully',
       data,
     };
   }

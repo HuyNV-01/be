@@ -50,7 +50,7 @@ export class CreateSaasAppProfileDto {
 
   @ApiPropertyOptional({
     description:
-      'App Secret / Partner Key dùng để ký HMAC-SHA256 appsecret_proof và xác thực chữ ký Webhook',
+      'App Secret / Partner Key dùng để ký HMAC-SHA256 appsecret_proof, đổi Never-Expiring Page Token (fb_exchange_token) và xác thực chữ ký Webhook',
     example: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
   })
   @IsOptional()
@@ -187,7 +187,7 @@ export class ResolveChannelTokenMetadataDto {
 
   @ApiProperty({
     description:
-      'Access Token của Fanpage / User / Zalo OA / TikTok Shop / Shopee để tự động kiểm tra và lấy đúng thông tin Trang, Avatar, ID',
+      'Access Token của Fanpage / User / Zalo OA / TikTok Shop / Shopee để tự động kiểm tra, đổi Never-Expiring Page Token và lấy đúng thông tin Trang, Avatar, ID',
     example: 'EAAGm0PX4ZCpsBA...',
   })
   @IsString()
@@ -226,7 +226,7 @@ export class ResolveChannelTokenMetadataDto {
 
   @ApiPropertyOptional({
     description:
-      'App Secret / Partner Key để tạo appsecret_proof (HMAC-SHA256) và gọi /debug_token xác thực chính xác Page ID',
+      'App Secret / Partner Key để tạo appsecret_proof (HMAC-SHA256), đổi fb_exchange_token vĩnh viễn và gọi /debug_token xác thực chính xác Page ID',
     example: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
   })
   @IsOptional()
@@ -243,6 +243,15 @@ export class ResolveChannelTokenMetadataDto {
   @IsString()
   @MaxLength(128)
   externalPageId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tự động đổi Short-Lived Token sang Long-Lived User Token (60 ngày) và rút trích Never-Expiring Page Access Token (expires_at = 0)',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  autoExchangeNeverExpiringToken?: boolean;
 
   @ApiPropertyOptional({
     description:
@@ -334,6 +343,15 @@ export class ConnectChannelOAuthDto {
   @IsNotEmpty()
   accessToken?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'User Access Token gốc (hoặc Long-Lived User Token) để hệ thống mã hóa lưu trữ phục vụ tự động cấp lại Page Access Token vĩnh viễn khi cần',
+    example: 'EAAGm0PX4ZCpsBA_USER...',
+  })
+  @IsOptional()
+  @IsString()
+  userAccessToken?: string;
+
   @ApiPropertyOptional({ example: 'rft_8829103948...' })
   @IsOptional()
   @IsString()
@@ -359,6 +377,15 @@ export class ConnectChannelOAuthDto {
   @IsOptional()
   @IsBoolean()
   syncEchoMessagesFromNativeApp?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Tự động nâng cấp lên Never-Expiring Page Access Token (expires_at = 0) và tự động cấp lại khi gửi tin nhắn',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  autoExchangeNeverExpiringToken?: boolean;
 
   @ApiPropertyOptional({ example: '9981726354123' })
   @IsOptional()
@@ -408,6 +435,11 @@ export class BatchPageCandidateItemDto {
   @IsString()
   @IsNotEmpty()
   pageAccessToken: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isNeverExpiringPageToken?: boolean;
 }
 
 export class BatchConnectChannelsDto {
@@ -446,6 +478,11 @@ export class BatchConnectChannelsDto {
   @IsString()
   @MaxLength(512)
   appSecret?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  userAccessToken?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -518,6 +555,11 @@ export class UpdateChannelIntegrationDto {
   @IsString()
   accessToken?: string;
 
+  @ApiPropertyOptional({ example: 'EAAGm0PX4ZCpsBA_USER...' })
+  @IsOptional()
+  @IsString()
+  userAccessToken?: string;
+
   @ApiPropertyOptional({ example: 'rft_new_token...' })
   @IsOptional()
   @IsString()
@@ -543,6 +585,11 @@ export class UpdateChannelIntegrationDto {
   @IsOptional()
   @IsBoolean()
   syncEchoMessagesFromNativeApp?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoExchangeNeverExpiringToken?: boolean;
 
   @ApiPropertyOptional({ example: '9981726354123' })
   @IsOptional()
@@ -585,6 +632,7 @@ export class MergedInboxQueryDto extends DBaseQuery {
     description: 'Danh sách channelIntegrationId cần gộp (phân cách bởi dấu phẩy hoặc mảng)',
   })
   @IsOptional()
+  @IsString()
   channelIds?: string | string[];
 
   @ApiPropertyOptional({ example: 'WAITING_AGENT_REPLY' })
