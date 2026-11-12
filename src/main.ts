@@ -11,6 +11,11 @@ import { AppModule } from './app.module';
 import { RedisIoAdapter } from './common/websocket/redis-io.adapter';
 import { envs } from './config/envs';
 import { SWAGGER_CONFIG } from './config/swagger/swagger';
+import {
+  TUNNEL_ALLOWED_HEADERS,
+  createDynamicCorsOriginValidator,
+  createTunnelGatewayMiddleware,
+} from './config/tunnel';
 import { DEFAULT_PORT } from './constants';
 import { HTTP_RESPONSE } from './constants/http-response';
 
@@ -20,6 +25,12 @@ async function bootstrap(): Promise<void> {
   });
 
   app.set('trust proxy', 1);
+
+  app.use(
+    createTunnelGatewayMiddleware({
+      autoDetectFromHeaders: envs.tunnel.autoDetectLocalAgent,
+    }),
+  );
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -34,8 +45,17 @@ async function bootstrap(): Promise<void> {
   SwaggerModule.setup(SWAGGER_CONFIG.path, app, documentFactory);
 
   const corsOptions: CorsOptions = {
-    origin: envs.feUrl,
+    origin: createDynamicCorsOriginValidator({
+      feUrl: envs.feUrl,
+      appUrl: envs.appUrl,
+      publicWebhookBaseUrl: envs.tunnel.publicWebhookBaseUrl,
+      publicFrontendUrl: envs.tunnel.publicFrontendUrl,
+      extraAllowedOrigins: envs.tunnel.extraAllowedOrigins,
+      allowedDomainSuffixes: envs.tunnel.allowedDomainSuffixes,
+      allowWildcardTunnelOrigin: envs.tunnel.allowWildcardTunnelOrigin,
+    }),
     credentials: true,
+    allowedHeaders: TUNNEL_ALLOWED_HEADERS,
   };
 
   app.enableCors(corsOptions);

@@ -2,6 +2,13 @@
 import 'dotenv/config';
 import * as joi from 'joi';
 import { FileProviderEnum } from 'src/common/enum';
+import {
+  DEFAULT_TUNNEL_DOMAIN_SUFFIXES,
+  normalizePublicBaseUrl,
+  resolveProviderFromUrl,
+  tunnelOriginRegistry,
+} from 'src/config/tunnel/tunnel.config';
+import { ITunnelGatewayConfig, TunnelProviderEnum } from 'src/config/tunnel/tunnel.interface';
 import { EnvConfig } from 'src/types/envs';
 
 const envVarsSchema = joi
@@ -68,6 +75,22 @@ const envVarsSchema = joi
     TIKTOK_SHOP_APP_SECRET: joi.string().optional().allow(''),
     SHOPEE_PARTNER_ID: joi.string().optional().allow(''),
     SHOPEE_PARTNER_KEY: joi.string().optional().allow(''),
+
+    PUBLIC_TUNNEL_PROVIDER: joi
+      .string()
+      .valid(...Object.values(TunnelProviderEnum))
+      .optional()
+      .allow(''),
+    PUBLIC_TUNNEL_ENABLED: joi.boolean().optional(),
+    PUBLIC_WEBHOOK_BASE_URL: joi.string().optional().allow(''),
+    PUBLIC_FRONTEND_URL: joi.string().optional().allow(''),
+    NGROK_DOMAIN: joi.string().optional().allow(''),
+    NGROK_AUTHTOKEN: joi.string().optional().allow(''),
+    NGROK_INSPECT_URL: joi.string().optional().allow('').default('http://127.0.0.1:4040'),
+    PUBLIC_TUNNEL_AUTO_DETECT: joi.boolean().optional().default(true),
+    PUBLIC_TUNNEL_ALLOW_WILDCARD_ORIGIN: joi.boolean().optional().default(true),
+    CORS_ALLOWED_ORIGINS: joi.string().optional().allow(''),
+    CORS_ALLOWED_DOMAIN_SUFFIXES: joi.string().optional().allow(''),
   })
   .unknown(true)
   .required();
@@ -80,13 +103,77 @@ if (error) {
   throw new Error(`Config validation error: ${error.message}`);
 }
 
+const localAppUrl = normalizePublicBaseUrl(envVars.APP_URL) || envVars.APP_URL;
+const localFeUrl = normalizePublicBaseUrl(envVars.FE_URL) || envVars.FE_URL;
+
+const isTunnelExplicitlyDisabled = envVars.PUBLIC_TUNNEL_ENABLED === false;
+const resolvedNgrokDomainUrl = isTunnelExplicitlyDisabled
+  ? null
+  : normalizePublicBaseUrl(envVars.NGROK_DOMAIN);
+const resolvedPublicWebhookBaseUrl = isTunnelExplicitlyDisabled
+  ? null
+  : normalizePublicBaseUrl(envVars.PUBLIC_WEBHOOK_BASE_URL) || resolvedNgrokDomainUrl || null;
+const resolvedPublicFrontendUrl = isTunnelExplicitlyDisabled
+  ? null
+  : normalizePublicBaseUrl(envVars.PUBLIC_FRONTEND_URL) || null;
+
+const resolvedTunnelProvider = resolveProviderFromUrl(
+  resolvedPublicWebhookBaseUrl,
+  envVars.PUBLIC_TUNNEL_PROVIDER,
+);
+
+const extraAllowedOrigins = [
+  localAppUrl,
+  localFeUrl,
+  ...(envVars.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((item) => normalizePublicBaseUrl(item))
+    .filter((item): item is string => Boolean(item)),
+];
+
+const allowedDomainSuffixes = (envVars.CORS_ALLOWED_DOMAIN_SUFFIXES || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const tunnelGatewayConfig: ITunnelGatewayConfig = {
+  provider: resolvedTunnelProvider,
+  enabled:
+    envVars.PUBLIC_TUNNEL_ENABLED ??
+    Boolean(resolvedPublicWebhookBaseUrl || resolvedTunnelProvider !== TunnelProviderEnum.NONE),
+  publicWebhookBaseUrl: resolvedPublicWebhookBaseUrl,
+  publicFrontendUrl: resolvedPublicFrontendUrl,
+  ngrokDomain: envVars.NGROK_DOMAIN?.trim() || null,
+  ngrokAuthtoken: envVars.NGROK_AUTHTOKEN?.trim() || null,
+  ngrokInspectUrl: (envVars.NGROK_INSPECT_URL || 'http://127.0.0.1:4040').replace(/\/+$/, ''),
+  autoDetectLocalAgent: isTunnelExplicitlyDisabled
+    ? false
+    : (envVars.PUBLIC_TUNNEL_AUTO_DETECT ?? true),
+  allowWildcardTunnelOrigin: envVars.PUBLIC_TUNNEL_ALLOW_WILDCARD_ORIGIN ?? true,
+  extraAllowedOrigins,
+  allowedDomainSuffixes:
+    allowedDomainSuffixes.length > 0 ? allowedDomainSuffixes : DEFAULT_TUNNEL_DOMAIN_SUFFIXES,
+};
+
+if (resolvedPublicWebhookBaseUrl) {
+  tunnelOriginRegistry.setActivePublicBaseUrl(resolvedPublicWebhookBaseUrl);
+}
+if (resolvedPublicFrontendUrl) {
+  tunnelOriginRegistry.setActiveFrontendUrl(resolvedPublicFrontendUrl);
+}
+
+const effectiveAppUrl = resolvedPublicWebhookBaseUrl || localAppUrl;
+const effectiveFeUrl = resolvedPublicFrontendUrl || localFeUrl;
+
 export const envs = {
   nodeEnv: envVars.NODE_ENV || 'development',
   isProduction:
     (envVars.NODE_ENV || '').toLowerCase() === 'production' ||
-    envVars.FE_URL.startsWith('https://'),
-  appUrl: envVars.APP_URL,
-  feUrl: envVars.FE_URL,
+    effectiveFeUrl.startsWith('https://'),
+  appUrl: effectiveAppUrl,
+  feUrl: effectiveFeUrl,
+  localAppUrl,
+  localFeUrl,
   port: envVars.PORT,
   database: envVars.MYSQL_DB_NAME,
   user: envVars.MYSQL_USERNAME,
@@ -123,7 +210,7 @@ export const envs = {
       envVars.AWS_PUBLIC_ENDPOINT ||
       envVars.STORAGE_ENDPOINT ||
       envVars.AWS_ENDPOINT ||
-      envVars.APP_URL,
+      effectiveAppUrl,
     accessKey: envVars.STORAGE_ACCESS_KEY || envVars.AWS_ACCESS_KEY_ID || 'seaweedadmin',
     secretKey: envVars.STORAGE_SECRET_KEY || envVars.AWS_SECRET_ACCESS_KEY || 'seaweedsecret123',
     forcePathStyle: envVars.STORAGE_FORCE_PATH_STYLE ?? true,
@@ -162,4 +249,6 @@ export const envs = {
     shopeePartnerId: envVars.SHOPEE_PARTNER_ID || '',
     shopeePartnerKey: envVars.SHOPEE_PARTNER_KEY || '',
   },
+
+  tunnel: tunnelGatewayConfig,
 };

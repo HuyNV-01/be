@@ -66,4 +66,16 @@ export type EnvConfig = {
   TIKTOK_SHOP_APP_SECRET?: string;
   SHOPEE_PARTNER_ID?: string;
   SHOPEE_PARTNER_KEY?: string;
+
+  PUBLIC_TUNNEL_PROVIDER?: string;
+  PUBLIC_TUNNEL_ENABLED?: boolean;
+  PUBLIC_WEBHOOK_BASE_URL?: string;
+  PUBLIC_FRONTEND_URL?: string;
+  NGROK_DOMAIN?: string;
+  NGROK_AUTHTOKEN?: string;
+  NGROK_INSPECT_URL?: string;
+  PUBLIC_TUNNEL_AUTO_DETECT?: boolean;
+  PUBLIC_TUNNEL_ALLOW_WILDCARD_ORIGIN?: boolean;
+  CORS_ALLOWED_ORIGINS?: string;
+  CORS_ALLOWED_DOMAIN_SUFFIXES?: string;
 };

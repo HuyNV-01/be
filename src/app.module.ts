@@ -14,6 +14,7 @@ import { DatabaseModule } from './config/databases/database.module';
 import { envs } from './config/envs';
 import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
+import { TunnelGatewayModule } from './config/tunnel/tunnel.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ChannelsModule } from './modules/channels/channels.module';
 import { ChatModule } from './modules/chat/chat.module';
@@ -54,6 +55,7 @@ import { parseExpiresIn } from './utils';
       wildcard: true,
       delimiter: '.',
     }),
+    TunnelGatewayModule,
     DatabaseModule,
     StorageModule,
     FilesModule,

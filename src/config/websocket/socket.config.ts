@@ -1,9 +1,19 @@
 import { envs } from '../envs/envs';
+import { TUNNEL_ALLOWED_HEADERS, createDynamicCorsOriginValidator } from '../tunnel/tunnel.config';
 
 export const SOCKET_CONFIG = {
   cors: {
-    origin: [envs.feUrl],
+    origin: createDynamicCorsOriginValidator({
+      feUrl: envs.feUrl,
+      appUrl: envs.appUrl,
+      publicWebhookBaseUrl: envs.tunnel.publicWebhookBaseUrl,
+      publicFrontendUrl: envs.tunnel.publicFrontendUrl,
+      extraAllowedOrigins: envs.tunnel.extraAllowedOrigins,
+      allowedDomainSuffixes: envs.tunnel.allowedDomainSuffixes,
+      allowWildcardTunnelOrigin: envs.tunnel.allowWildcardTunnelOrigin,
+    }),
     credentials: true,
+    allowedHeaders: TUNNEL_ALLOWED_HEADERS,
   },
   pingInterval: 25000,
   pingTimeout: 20000,

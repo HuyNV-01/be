@@ -1,0 +1,15 @@
+version: '3'
+
+# ============================================================================
+# FILE CẤU HÌNH MẪU NGROK V3 (docker/ngrok/ngrok.yml)
+# Cho phép mở đồng thời cả cổng Backend (nhận Webhook) và Frontend (nếu cần)
+# ============================================================================
+agent:
+  web_addr: 0.0.0.0:4040
+
+endpoints:
+  - name: pancake-backend-webhook
+    url: ${NGROK_DOMAIN}
+    upstream:
+      url: http://localhost:3000
+      protocol: http1

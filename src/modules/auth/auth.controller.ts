@@ -7,9 +7,9 @@ import {
   HttpCode,
   HttpStatus,
   Logger,
+  Optional,
   Post,
   Query,
-  Req,
   Request,
   Res,
   UseGuards,
@@ -18,6 +18,7 @@ import { ApiBearerAuth, ApiBody, ApiOperation, ApiQuery, ApiResponse } from '@ne
 
 import express from 'express';
 import { envs } from 'src/config/envs';
+import { PublicTunnelService } from 'src/config/tunnel/public-tunnel.service';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import { ForgotPasswordDto } from 'src/dto/auth/forgot-password.dto';
 import { LoginDto } from 'src/dto/auth/login.dto';
@@ -35,25 +36,63 @@ import { LocalAuthGuard } from './guards/local-auth.guard';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    @Optional() private readonly publicTunnelService?: PublicTunnelService,
+  ) {}
   private readonly logger = new Logger(AuthController.name, {
     timestamp: true,
   });
 
-  private getClearRefreshCookieOptions(): express.CookieOptions {
+  private isHttpsTunnelOrCrossSiteRequest(req?: express.Request): boolean {
+    if (!req) return false;
+    const forwardedProto = (req.headers?.['x-forwarded-proto'] as string | undefined)
+      ?.split(',')[0]
+      ?.trim()
+      ?.toLowerCase();
+    const isHttps = Boolean(req.secure || forwardedProto === 'https');
+    if (!isHttps) return false;
+
+    const origin = req.headers?.origin;
+    const host = (req.headers?.['x-forwarded-host'] as string | undefined) || req.headers?.host;
+    if (origin && host) {
+      try {
+        const originHost = new URL(origin).host.toLowerCase();
+        const targetHost = host.split(',')[0].trim().toLowerCase();
+        if (originHost !== targetHost) {
+          return true;
+        }
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private getClearRefreshCookieOptions(req?: express.Request): express.CookieOptions {
+    const isCrossSiteHttps = this.isHttpsTunnelOrCrossSiteRequest(req);
+    const isSecure = isCrossSiteHttps || envs.isProduction;
+
     return {
       httpOnly: true,
-      secure: envs.isProduction,
-      sameSite: envs.isProduction ? 'strict' : 'lax',
+      secure: isSecure,
+      sameSite: isCrossSiteHttps ? 'none' : envs.isProduction ? 'strict' : 'lax',
       path: '/api/auth/refresh',
     };
   }
 
-  private getRefreshCookieOptions(): express.CookieOptions {
+  private getRefreshCookieOptions(req?: express.Request): express.CookieOptions {
     return {
-      ...this.getClearRefreshCookieOptions(),
+      ...this.getClearRefreshCookieOptions(req),
       maxAge: parseExpiresInMs(envs.jwtRefreshExpiresIn),
     };
+  }
+
+  private resolveFrontendRedirectBaseUrl(): string {
+    return (this.publicTunnelService?.getEffectiveFrontendUrlSync() || envs.feUrl).replace(
+      /\/+$/,
+      '',
+    );
   }
 
   private extractClientIp(req: express.Request): string {
@@ -144,7 +183,7 @@ export class AuthController {
       id: req.user.id,
       ipAddress,
     });
-    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions());
+    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions(req));
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.AUTH.LOGIN_SUCCESS.message,
@@ -170,12 +209,12 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   async logout(
-    @Request() req: { user: { id: string } },
+    @Request() req: express.Request & { user: { id: string } },
     @Res({ passthrough: true }) res: express.Response,
   ) {
     const userId = req.user.id;
     await this.authService.logout({ userId });
-    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions());
+    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions(req));
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.AUTH.LOGOUT_SUCCESS.message,
@@ -205,7 +244,7 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refreshTokens(
-    @Request() req: { user: { id: string; refreshToken: string } },
+    @Request() req: express.Request & { user: { id: string; refreshToken: string } },
     @Res({ passthrough: true }) res: express.Response,
   ) {
     const userId = req.user.id;
@@ -214,7 +253,7 @@ export class AuthController {
       userId,
       refreshToken,
     });
-    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions());
+    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions(req));
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.AUTH.REFRESH_TOKEN_SUCCESS.message,
@@ -232,12 +271,13 @@ export class AuthController {
   @Get('activate')
   async activateAccount(@Query('token') token: string, @Res() res: express.Response) {
     const label = '[activateAccount]';
+    const feBaseUrl = this.resolveFrontendRedirectBaseUrl();
     try {
       await this.authService.activateAccount(token);
-      return res.redirect(`${envs.feUrl}/login?activated=true`);
+      return res.redirect(`${feBaseUrl}/login?activated=true`);
     } catch (error) {
       this.logger.error(`${label} error -> ${error}`);
-      return res.redirect(`${envs.feUrl}/login?activated=failed`);
+      return res.redirect(`${feBaseUrl}/login?activated=failed`);
     }
   }
 
@@ -342,8 +382,8 @@ export class AuthController {
       ipAddress,
     });
 
-    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions());
-    return res.redirect(`${envs.feUrl}?token=${result.accessToken}`);
+    res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions(req));
+    return res.redirect(`${this.resolveFrontendRedirectBaseUrl()}?token=${result.accessToken}`);
   }
 
   @UseGuards(JwtAuthGuard)
