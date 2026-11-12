@@ -28,6 +28,7 @@ export interface ExtractedCommerceEntitiesPayload {
 @Index(['conversationId', 'isPinned'])
 @Index(['conversationId', 'senderId', 'clientTempId'])
 @Index('idx_msg_shop_conv_created', ['shopId', 'conversationId', 'createdAt'])
+@Index('idx_msg_shop_ext_id', ['shopId', 'externalMessageId'])
 export class MessageEntity extends BaseModel {
   @Column({ type: 'text', nullable: true })
   content: string;
@@ -53,7 +54,7 @@ export class MessageEntity extends BaseModel {
   @JoinColumn({ name: 'conversationId' })
   conversation: ConversationEntity;
 
-  @Column({ type: 'varchar', length: 36 })
+  @Column({ type: 'varchar', length: 64 })
   @Index()
   senderId: string;
 
@@ -116,7 +117,7 @@ export class MessageEntity extends BaseModel {
   @Column({
     name: 'external_message_id',
     type: 'varchar',
-    length: 128,
+    length: 191,
     nullable: true,
     default: null,
   })

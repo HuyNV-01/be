@@ -24,13 +24,12 @@ export class MessageTagAssignmentEntity extends BaseModel {
 
   @Column({
     name: 'message_snippet_preview',
-    type: 'varchar',
-    length: 500,
+    type: 'text',
     nullable: true,
     default: null,
   })
   messageSnippetPreview: string | null;
 
-  @Column({ name: 'note_text', type: 'varchar', length: 300, nullable: true, default: null })
+  @Column({ name: 'note_text', type: 'text', nullable: true, default: null })
   noteText: string | null;
 }

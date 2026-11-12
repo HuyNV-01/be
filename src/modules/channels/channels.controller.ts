@@ -20,9 +20,11 @@ import { DBaseRes } from 'src/dto/base-res.dto';
 import {
   BatchConnectChannelsDto,
   ConnectChannelOAuthDto,
+  CreateSaasAppProfileDto,
   MergedInboxQueryDto,
   ResolveChannelTokenMetadataDto,
   UpdateChannelIntegrationDto,
+  UpdateSaasAppProfileDto,
   WebhookLogQueryDto,
 } from 'src/dto/channels/channels.dto';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
@@ -37,7 +39,7 @@ import { ChannelsService } from './channels.service';
 import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
 
-@ApiTags('Sprint 1 — Omnichannel Integrations, Multi-Page Merge & Token Doctor')
+@ApiTags('Sprint 1 — Omnichannel Integrations, Multi-Profile SaaS Config & Token Doctor')
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard, ShopPermissionGuard)
 @UseInterceptors(FieldLevelSecurityInterceptor)
@@ -72,7 +74,7 @@ export class ChannelsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'F01.2: Lấy thông tin cấu hình SaaS Webhook (Callback URL, Verify Token, Subscribed Fields) cho từng nền tảng',
+      'F01.2: Lấy thông tin cấu hình SaaS Webhook chuẩn (Callback URL, Verify Token, Subscribed Fields) và danh sách Hồ sơ SaaS của shop',
   })
   async getSaasWebhookConfiguration(@Param('shopId') shopId: string): Promise<DBaseRes> {
     const data = await this.channelsService.getSaasWebhookConfiguration(shopId);
@@ -84,12 +86,108 @@ export class ChannelsController {
     };
   }
 
+  @Get('saas-profiles')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Lấy danh sách toàn bộ Hồ sơ Cấu hình Ứng dụng SaaS (Multi-Profile SaaS App Configurations) của cửa hàng',
+  })
+  async listSaasAppProfiles(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.channelsService.listSaasAppProfiles(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched SaaS app profiles successfully',
+      data,
+    };
+  }
+
+  @Post('saas-profiles')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      'F01.2: Tạo mới Hồ sơ Cấu hình Ứng dụng SaaS (Hỗ trợ nhiều cấu hình SaaS trên cùng 1 nền tảng & tự động đăng ký App Webhook)',
+  })
+  async createSaasAppProfile(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateSaasAppProfileDto,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.createSaasAppProfile(shopId, dto);
+    return {
+      status: HttpStatus.CREATED,
+      code: HttpStatus.CREATED,
+      message: 'Created SaaS app profile and registered webhook subscription successfully',
+      data,
+    };
+  }
+
+  @Patch('saas-profiles/:profileId')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Cập nhật Hồ sơ Cấu hình Ứng dụng SaaS và tự động đồng bộ xuống các kênh đang liên kết',
+  })
+  async updateSaasAppProfile(
+    @Param('shopId') shopId: string,
+    @Param('profileId') profileId: string,
+    @Body() dto: UpdateSaasAppProfileDto,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.updateSaasAppProfile(shopId, profileId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated SaaS app profile successfully',
+      data,
+    };
+  }
+
+  @Delete('saas-profiles/:profileId')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'F01.2: Xóa Hồ sơ Cấu hình Ứng dụng SaaS',
+  })
+  async deleteSaasAppProfile(
+    @Param('shopId') shopId: string,
+    @Param('profileId') profileId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.deleteSaasAppProfile(shopId, profileId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Deleted SaaS app profile successfully',
+      data,
+    };
+  }
+
+  @Post('saas-profiles/:profileId/inject-all-webhooks')
+  @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2: Tự động tiêm và xác minh lại Webhook (subscribed_apps) cho toàn bộ kênh đang dùng Hồ sơ SaaS này',
+  })
+  async injectWebhooksForSaasProfile(
+    @Param('shopId') shopId: string,
+    @Param('profileId') profileId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.injectWebhooksForSaasProfile(shopId, profileId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Auto-injected webhooks for all bound channels successfully',
+      data,
+    };
+  }
+
   @Post('resolve-token-metadata')
   @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'F01.2: Tự động tra cứu chính xác Tên Trang, Avatar, Page ID, phân biệt Page Token vs User Token từ Access Token',
+      'F01.2: Tự động tra cứu chính xác Tên Trang, Avatar, Page ID, phân biệt Page Token vs User Token chỉ với Access Token (Tự động kế thừa Hồ sơ SaaS)',
   })
   async resolveChannelTokenMetadata(
     @Param('shopId') shopId: string,
@@ -109,7 +207,7 @@ export class ChannelsController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary:
-      'F01.2: Kết nối mới hoặc làm mới OAuth2 Token cho Fanpage, Instagram, Zalo OA, TikTok Shop, Shopee, Lazada',
+      'F01.2: Kết nối mới hoặc làm mới OAuth2 Token cho Fanpage, Instagram, Zalo OA, TikTok Shop, Shopee, Lazada và tự động tiêm Webhook',
   })
   async connectChannelOAuth(
     @Request() req: { user: { id: string } },
@@ -120,7 +218,7 @@ export class ChannelsController {
     return {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
-      message: 'Connected channel integration and encrypted tokens successfully',
+      message: 'Connected channel integration and auto-injected webhook successfully',
       data,
     };
   }
@@ -130,22 +228,18 @@ export class ChannelsController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary:
-      'F01.2: Kết nối hàng loạt nhiều Fanpage / Instagram cùng lúc từ danh sách trang của User Access Token (Chuẩn Pancake v2)',
+      'F01.2: Kết nối hàng loạt nhiều Fanpage / Instagram cùng lúc từ danh sách trang của User Access Token và tự động tiêm Webhook cho từng trang',
   })
   async batchConnectChannels(
     @Request() req: { user: { id: string } },
     @Param('shopId') shopId: string,
     @Body() dto: BatchConnectChannelsDto,
   ): Promise<DBaseRes> {
-    const data = await this.channelsService.batchConnectChannels(
-      shopId,
-      dto.channels,
-      req.user?.id,
-    );
+    const data = await this.channelsService.batchConnectChannels(shopId, dto, req.user?.id);
     return {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
-      message: 'Batch connected channel integrations successfully',
+      message: 'Batch connected channel integrations and auto-injected webhooks successfully',
       data,
     };
   }
@@ -174,7 +268,8 @@ export class ChannelsController {
   @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'F01.2: Cập nhật thông tin kênh tích hợp hoặc cấu hình Meta CAPI Dataset',
+    summary:
+      'F01.2: Cập nhật thông tin kênh tích hợp, chuyển đổi Hồ sơ SaaS hoặc cấu hình Meta CAPI Dataset',
   })
   async updateChannelIntegration(
     @Param('shopId') shopId: string,

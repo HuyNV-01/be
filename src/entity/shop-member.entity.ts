@@ -103,8 +103,7 @@ export class ShopMemberEntity extends BaseModel {
 
   @Column({
     name: 'requested_join_note',
-    type: 'varchar',
-    length: 300,
+    type: 'text',
     nullable: true,
     default: null,
   })

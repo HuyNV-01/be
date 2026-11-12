@@ -75,7 +75,7 @@ export class CallSessionEntity extends BaseModel {
   @Column({ name: 'duration_seconds', type: 'int', default: 0 })
   durationSeconds: number;
 
-  @Column({ name: 'end_reason', type: 'varchar', length: 64, nullable: true })
+  @Column({ name: 'end_reason', type: 'varchar', length: 255, nullable: true })
   endReason: string | null;
 
   @Column({
@@ -131,10 +131,10 @@ export class CallSessionEntity extends BaseModel {
   @Column({ name: 'recording_file_id', type: 'varchar', length: 36, nullable: true, default: null })
   recordingFileId: string | null;
 
+  // Chuyển sang kiểu text để lưu đường dẫn Presigned S3 / SIP Recording URL dài không giới hạn
   @Column({
     name: 'recording_file_url',
-    type: 'varchar',
-    length: 500,
+    type: 'text',
     nullable: true,
     default: null,
   })
@@ -149,6 +149,6 @@ export class CallSessionEntity extends BaseModel {
   })
   callDispositionTag: string | null;
 
-  @Column({ name: 'call_notes', type: 'varchar', length: 500, nullable: true, default: null })
+  @Column({ name: 'call_notes', type: 'text', nullable: true, default: null })
   callNotes: string | null;
 }

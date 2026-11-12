@@ -18,6 +18,168 @@ import {
 import { ChannelTypeEnum } from 'src/common/enum/permission.enum';
 import { DBaseQuery } from 'src/dto/base-query.dto';
 
+export class CreateSaasAppProfileDto {
+  @ApiProperty({
+    description: 'Tên định danh Hồ sơ Ứng dụng SaaS (VD: Meta App BM Chính - Thời Trang Nữ)',
+    example: 'Meta App BM Chính — Thời Trang Nữ',
+  })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(150)
+  name: string;
+
+  @ApiProperty({ enum: ChannelTypeEnum, example: ChannelTypeEnum.FACEBOOK_PAGE })
+  @IsEnum(ChannelTypeEnum)
+  channelType: ChannelTypeEnum;
+
+  @ApiPropertyOptional({ example: 'v27.1', default: 'v27.1' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  apiVersion?: string;
+
+  @ApiProperty({
+    description:
+      'App ID / Partner ID trên nền tảng (Meta App ID, Zalo App ID, TikTok App Key, Shopee Partner ID)',
+    example: '1517776481860111',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  appId: string;
+
+  @ApiPropertyOptional({
+    description:
+      'App Secret / Partner Key dùng để ký HMAC-SHA256 appsecret_proof và xác thực chữ ký Webhook',
+    example: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  appSecret?: string;
+
+  @ApiPropertyOptional({
+    description: 'Chuỗi Verify Token dùng để xác thực Webhook Challenge tự động',
+    example: 'pancake_seller_os_verify_2026',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  webhookVerifyToken?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  subscribedFields?: string[];
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  autoHidePhoneComments?: boolean;
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  syncEchoMessagesFromNativeApp?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Tự động tiêm (Auto-Inject) đăng ký Webhook ngay khi nhập Access Token kết nối kênh',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  autoInjectWebhookOnConnect?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Đặt làm cấu hình SaaS mặc định cho nền tảng này (Khi kết nối kênh chỉ cần dán Access Token)',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Tự động gọi API đăng ký Webhook cấp App (POST /{appId}/subscriptions) ngay khi lưu',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  autoRegisterAppWebhookOnPlatform?: boolean;
+}
+
+export class UpdateSaasAppProfileDto {
+  @ApiPropertyOptional({ example: 'Meta App BM Chính — Thời Trang Nữ' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(150)
+  name?: string;
+
+  @ApiPropertyOptional({ example: 'v27.1' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  apiVersion?: string;
+
+  @ApiPropertyOptional({ example: '1517776481860111' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  appId?: string;
+
+  @ApiPropertyOptional({ example: 'a1b2c3d4e5f60718293a4b5c6d7e8f90' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  appSecret?: string;
+
+  @ApiPropertyOptional({ example: 'pancake_seller_os_verify_2026' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  webhookVerifyToken?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  subscribedFields?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoHidePhoneComments?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  syncEchoMessagesFromNativeApp?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoInjectWebhookOnConnect?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  propagateToBoundChannels?: boolean;
+}
+
 export class ResolveChannelTokenMetadataDto {
   @ApiProperty({ enum: ChannelTypeEnum, example: ChannelTypeEnum.FACEBOOK_PAGE })
   @IsEnum(ChannelTypeEnum)
@@ -31,6 +193,16 @@ export class ResolveChannelTokenMetadataDto {
   @IsString()
   @IsNotEmpty()
   accessToken: string;
+
+  @ApiPropertyOptional({
+    description:
+      'ID Hồ sơ Cấu hình SaaS (Nếu bỏ trống, hệ thống tự động lấy Hồ sơ SaaS mặc định của nền tảng)',
+    example: 'saas_prof_fb_01',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  saasAppProfileId?: string;
 
   @ApiPropertyOptional({
     description:
@@ -59,7 +231,7 @@ export class ResolveChannelTokenMetadataDto {
   })
   @IsOptional()
   @IsString()
-  @MaxLength(256)
+  @MaxLength(512)
   appSecret?: string;
 
   @ApiPropertyOptional({
@@ -87,6 +259,16 @@ export class ConnectChannelOAuthDto {
   @IsEnum(ChannelTypeEnum)
   channelType: ChannelTypeEnum;
 
+  @ApiPropertyOptional({
+    description:
+      'ID Hồ sơ Cấu hình SaaS áp dụng cho kênh này (Tự động lấy hồ sơ mặc định nếu bỏ trống)',
+    example: 'saas_prof_fb_01',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  saasAppProfileId?: string;
+
   @ApiPropertyOptional({ example: '108294819201948' })
   @IsOptional()
   @IsString()
@@ -103,20 +285,21 @@ export class ConnectChannelOAuthDto {
   @IsOptional()
   @IsString()
   @MinLength(2)
-  @MaxLength(200)
+  @MaxLength(255)
   pageName?: string;
 
   @ApiPropertyOptional({ example: 'FB-MILANO-01' })
   @IsOptional()
   @IsString()
   @MinLength(2)
-  @MaxLength(24)
+  @MaxLength(32)
   pageShortCode?: string;
 
-  @ApiPropertyOptional({ example: 'https://cdn.shop.vn/avatar.png' })
+  // Cho phép URL ảnh đại diện CDN dài tới 4096 ký tự để không bị chặn bởi bộ kiểm tra DTO
+  @ApiPropertyOptional({ example: 'https://scontent.fhan2-1.fna.fbcdn.net/v/t39.30808-1/...' })
   @IsOptional()
   @IsString()
-  @MaxLength(500)
+  @MaxLength(4096)
   avatarUrl?: string;
 
   @ApiPropertyOptional({ example: 'v27.1' })
@@ -134,7 +317,7 @@ export class ConnectChannelOAuthDto {
   @ApiPropertyOptional({ example: 'a1b2c3d4e5f6...' })
   @IsOptional()
   @IsString()
-  @MaxLength(256)
+  @MaxLength(512)
   appSecret?: string;
 
   @ApiPropertyOptional({
@@ -199,31 +382,117 @@ export class ConnectChannelOAuthDto {
   allowSandboxSimulation?: boolean;
 }
 
+export class BatchPageCandidateItemDto {
+  @ApiProperty({ example: '108294819201948' })
+  @IsString()
+  @IsNotEmpty()
+  externalPageId: string;
+
+  @ApiProperty({ example: 'Thời Trang Milano — Fanpage 01' })
+  @IsString()
+  @IsNotEmpty()
+  pageName: string;
+
+  @ApiPropertyOptional({ example: 'FB-MILANO-01' })
+  @IsOptional()
+  @IsString()
+  pageShortCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(4096)
+  avatarUrl?: string;
+
+  @ApiProperty({ example: 'EAAGm0PX4ZCpsBA...' })
+  @IsString()
+  @IsNotEmpty()
+  pageAccessToken: string;
+}
+
 export class BatchConnectChannelsDto {
-  @ApiProperty({ type: [ConnectChannelOAuthDto] })
+  @ApiPropertyOptional({ type: [ConnectChannelOAuthDto] })
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ConnectChannelOAuthDto)
-  channels: ConnectChannelOAuthDto[];
+  channels?: ConnectChannelOAuthDto[];
+
+  @ApiPropertyOptional({ enum: ChannelTypeEnum })
+  @IsOptional()
+  @IsEnum(ChannelTypeEnum)
+  channelType?: ChannelTypeEnum;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  saasAppProfileId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  apiVersion?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  appId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  appSecret?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  webhookVerifySecret?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  metaDatasetId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  capiAccessToken?: string;
+
+  @ApiPropertyOptional({ type: [BatchPageCandidateItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => BatchPageCandidateItemDto)
+  pages?: BatchPageCandidateItemDto[];
 }
 
 export class UpdateChannelIntegrationDto {
+  @ApiPropertyOptional({ example: 'saas_prof_fb_01' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  saasAppProfileId?: string;
+
   @ApiPropertyOptional({ example: 'Thời Trang Milano — Fanpage Chính' })
   @IsOptional()
   @IsString()
-  @MaxLength(200)
+  @MaxLength(255)
   pageName?: string;
 
   @ApiPropertyOptional({ example: 'FB-MILANO-01' })
   @IsOptional()
   @IsString()
-  @MaxLength(24)
+  @MaxLength(32)
   pageShortCode?: string;
 
-  @ApiPropertyOptional({ example: 'https://cdn.shop.vn/avatar.png' })
+  @ApiPropertyOptional({ example: 'https://scontent.fhan2-1.fna.fbcdn.net/...' })
   @IsOptional()
   @IsString()
-  @MaxLength(500)
+  @MaxLength(4096)
   avatarUrl?: string;
 
   @ApiPropertyOptional({ example: 'v27.1' })
@@ -241,7 +510,7 @@ export class UpdateChannelIntegrationDto {
   @ApiPropertyOptional({ example: 'a1b2c3d4e5f6...' })
   @IsOptional()
   @IsString()
-  @MaxLength(256)
+  @MaxLength(512)
   appSecret?: string;
 
   @ApiPropertyOptional({ example: 'EAAGm0PX4ZCpsBA_NEW...' })

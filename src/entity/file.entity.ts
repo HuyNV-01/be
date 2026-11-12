@@ -15,7 +15,7 @@ const bigintNumberTransformer: ValueTransformer = {
 
 @Entity('files')
 export class FileEntity extends BaseModel {
-  @Column({ name: 'original_name', type: 'varchar', length: 255 })
+  @Column({ name: 'original_name', type: 'varchar', length: 500 })
   originalName: string;
 
   @Column({ name: 'file_name', type: 'varchar', length: 255, unique: true })
@@ -33,7 +33,7 @@ export class FileEntity extends BaseModel {
   @Column({ type: 'varchar', length: 255 })
   bucket: string;
 
-  @Column({ type: 'varchar', length: 255 })
+  @Column({ type: 'text' })
   path: string;
 
   @Column({ type: 'text' })

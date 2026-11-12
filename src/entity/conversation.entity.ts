@@ -54,16 +54,18 @@ export class ConversationEntity extends BaseModel {
   @Column({ type: 'varchar', length: 255, nullable: true })
   name: string;
 
-  @Column({ type: 'varchar', length: 255, nullable: true })
+  // Chuyển từ varchar(255) sang text vì ảnh đại diện khách hàng lấy từ Graph API / Zalo OA / CDN
+  // có chứa query string chữ ký bảo mật thường dài 400 - 1.500+ ký tự, tránh lỗi tràn cột khi lưu.
+  @Column({ type: 'text', nullable: true })
   avatar: string;
 
-  @Column({ name: 'direct_key', type: 'varchar', length: 80, nullable: true, unique: true })
+  @Column({ name: 'direct_key', type: 'varchar', length: 120, nullable: true, unique: true })
   directKey: string | null;
 
   @Column({ type: 'text', nullable: true })
   lastMessage: string;
 
-  @Column({ type: 'varchar', length: 36, nullable: true })
+  @Column({ type: 'varchar', length: 64, nullable: true })
   lastMessageSenderId: string;
 
   @Column({ type: 'varchar', length: 64, nullable: true })
@@ -102,7 +104,7 @@ export class ConversationEntity extends BaseModel {
   @Column({
     name: 'external_thread_id',
     type: 'varchar',
-    length: 128,
+    length: 191,
     nullable: true,
     default: null,
   })
@@ -177,13 +179,14 @@ export class ConversationEntity extends BaseModel {
   @Column({ name: 'has_order_created', type: 'boolean', default: false })
   hasOrderCreated: boolean;
 
-  @Column({ name: 'source_post_id', type: 'varchar', length: 128, nullable: true, default: null })
+  @Column({ name: 'source_post_id', type: 'varchar', length: 255, nullable: true, default: null })
   sourcePostId: string | null;
 
-  @Column({ name: 'source_ad_id', type: 'varchar', length: 128, nullable: true, default: null })
+  @Column({ name: 'source_ad_id', type: 'varchar', length: 255, nullable: true, default: null })
   sourceAdId: string | null;
 
-  @Column({ name: 'ctwa_click_id', type: 'varchar', length: 255, nullable: true, default: null })
+  // Chuyển sang kiểu text vì mã ctwa_clid từ quảng cáo Click-to-Messenger là chuỗi token mã hóa dài > 255 ký tự
+  @Column({ name: 'ctwa_click_id', type: 'text', nullable: true, default: null })
   ctwaClickId: string | null;
 
   @Column({ name: 'active_tag_ids_json', type: 'json', nullable: true })
@@ -192,7 +195,7 @@ export class ConversationEntity extends BaseModel {
   @Column({ name: 'snoozed_until_at', type: 'datetime', nullable: true, default: null })
   snoozedUntilAt: Date | null;
 
-  @Column({ name: 'snooze_note', type: 'varchar', length: 500, nullable: true, default: null })
+  @Column({ name: 'snooze_note', type: 'text', nullable: true, default: null })
   snoozeNote: string | null;
 
   @Column({

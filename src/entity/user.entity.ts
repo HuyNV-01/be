@@ -39,13 +39,12 @@ export class UserEntity extends BaseModel {
   @Column({ name: 'password', type: 'varchar', length: 255, select: false })
   password: string;
 
-  @Column({ name: 'name', type: 'varchar', length: 100 })
+  @Column({ name: 'name', type: 'varchar', length: 150 })
   name: string;
 
   @Column({
     name: 'bio',
-    type: 'varchar',
-    length: 500,
+    type: 'text',
     default: null,
     nullable: true,
   })

@@ -1,4 +1,4 @@
-import { RoutingStrategyEnum } from 'src/common/enum/permission.enum';
+import { ChannelTypeEnum, RoutingStrategyEnum } from 'src/common/enum/permission.enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -15,6 +15,34 @@ export interface MarketplaceSyncConfig {
   pushAvailableStockToShopeeTikTok: boolean;
 }
 
+/**
+ * Hồ sơ cấu hình Ứng dụng SaaS (SaasAppProfileItem):
+ * Cho phép 1 cửa hàng cấu hình nhiều Ứng dụng SaaS cho cùng 1 nền tảng (VD: Nhiều Meta App ID / BM khác nhau
+ * để cách ly Rate-Limit và dự phòng rủi ro, hoặc nhiều Zalo OA App / TikTok Partner App).
+ * Khi kết nối Fanpage/Kênh mới, người dùng chỉ cần chọn Hồ sơ SaaS (hoặc dùng hồ sơ mặc định) và dán Access Token,
+ * hệ thống sẽ tự động lấy thông tin trang và tự động tiêm (Auto-Inject) Webhook.
+ */
+export interface SaasAppProfileItem {
+  id: string;
+  name: string;
+  channelType: ChannelTypeEnum;
+  apiVersion: string;
+  appId: string;
+  appSecretEncrypted: string | null;
+  webhookVerifyTokenEncrypted: string | null;
+  webhookCallbackUrl: string;
+  subscribedFields: string[];
+  autoHidePhoneComments: boolean;
+  syncEchoMessagesFromNativeApp: boolean;
+  autoInjectWebhookOnConnect: boolean;
+  isDefault: boolean;
+  isActive: boolean;
+  appWebhookRegistered?: boolean;
+  lastVerifiedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 @Entity('shop_workspaces')
 @Index('idx_shop_workspace_code', ['code'], { unique: true })
 @Index('uq_shop_workspace_join_code', ['joinCode'], { unique: true })
@@ -26,10 +54,11 @@ export class ShopWorkspaceEntity extends BaseModel {
   @Column({ name: 'join_code', type: 'varchar', length: 16, unique: true })
   joinCode: string;
 
-  @Column({ name: 'name', type: 'varchar', length: 150 })
+  @Column({ name: 'name', type: 'varchar', length: 255 })
   name: string;
 
-  @Column({ name: 'logo_url', type: 'varchar', length: 500, nullable: true, default: null })
+  // Mở rộng sang kiểu text để lưu đường dẫn URL Logo dài (Presigned S3 / CDN URL) không bị tràn ký tự
+  @Column({ name: 'logo_url', type: 'text', nullable: true, default: null })
   logoUrl: string | null;
 
   @Column({ name: 'owner_id', type: 'varchar', length: 36 })
@@ -69,4 +98,7 @@ export class ShopWorkspaceEntity extends BaseModel {
 
   @Column({ name: 'marketplace_sync_config_json', type: 'json' })
   marketplaceSyncConfigJson: MarketplaceSyncConfig;
+
+  @Column({ name: 'saas_app_profiles_json', type: 'json', nullable: true, default: null })
+  saasAppProfilesJson: SaasAppProfileItem[] | null;
 }

@@ -3394,6 +3394,19 @@ export class ChatService {
     savedMessage.externalMessageId = dispatchRes.externalId;
     savedMessage.metadata = updatedMeta;
 
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversation.id,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.OUTBOUND_DELIVERY_STATUS,
+      {
+        conversationId: conversation.id,
+        messageId: savedMessage.id,
+        platformDeliveryStatus: dispatchRes.deliveryStatus,
+        platformExternalId: dispatchRes.externalId,
+        timestamp: new Date().toISOString(),
+      },
+    );
+
     if (
       isCommentConv &&
       params.autoHideCommentOnReply &&

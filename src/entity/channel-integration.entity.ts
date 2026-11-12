@@ -4,6 +4,8 @@ import { Column, Entity, Index } from 'typeorm';
 import { BaseModel } from './base-model';
 
 export interface ChannelPlatformSaasConfig {
+  saasAppProfileId?: string | null;
+  saasAppProfileName?: string | null;
   apiVersion?: string | null;
   appId?: string | null;
   webhookCallbackUrl?: string | null;
@@ -17,11 +19,15 @@ export interface ChannelPlatformSaasConfig {
   autoHidePhoneComments?: boolean;
   autoHideKeywordList?: string[];
   syncEchoMessagesFromNativeApp?: boolean;
+  webhookAutoInjected?: boolean;
+  webhookInjectedAt?: string | null;
+  subscribedAppsVerifiedOnPlatform?: boolean;
 }
 
 @Entity('channel_integrations')
 @Index('uq_channel_ext_page', ['shopId', 'channelType', 'externalPageId'], { unique: true })
 @Index('idx_channel_webhook_lookup', ['channelType', 'externalPageId'])
+@Index('idx_channel_shop_saas_profile', ['shopId', 'saasAppProfileId'])
 export class ChannelIntegrationEntity extends BaseModel {
   @Column({ name: 'shop_id', type: 'varchar', length: 36 })
   shopId: string;
@@ -33,19 +39,30 @@ export class ChannelIntegrationEntity extends BaseModel {
   })
   channelType: ChannelTypeEnum;
 
+  @Column({
+    name: 'saas_app_profile_id',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  saasAppProfileId: string | null;
+
   @Column({ name: 'external_page_id', type: 'varchar', length: 128 })
   externalPageId: string;
 
   @Column({ name: 'external_shop_id', type: 'varchar', length: 128, nullable: true, default: null })
   externalShopId: string | null;
 
-  @Column({ name: 'page_name', type: 'varchar', length: 200 })
+  @Column({ name: 'page_name', type: 'varchar', length: 255 })
   pageName: string;
 
-  @Column({ name: 'page_short_code', type: 'varchar', length: 24 })
+  @Column({ name: 'page_short_code', type: 'varchar', length: 32 })
   pageShortCode: string;
 
-  @Column({ name: 'avatar_url', type: 'varchar', length: 500, nullable: true, default: null })
+  // Chuyển từ varchar(500) sang text vì URL ảnh đại diện từ Facebook Graph API (scontent.fbcdn.net)
+  // hoặc Zalo OA kèm chuỗi chữ ký bảo mật thường dài từ 600 đến > 1.800 ký tự.
+  @Column({ name: 'avatar_url', type: 'text', nullable: true, default: null })
   avatarUrl: string | null;
 
   @Column({ name: 'api_version', type: 'varchar', length: 24, nullable: true, default: 'v27.1' })
@@ -89,10 +106,10 @@ export class ChannelIntegrationEntity extends BaseModel {
   @Column({ name: 'last_webhook_received_at', type: 'datetime', nullable: true, default: null })
   lastWebhookReceivedAt: Date | null;
 
+  // Chuyển sang kiểu text để lưu trọn vẹn thông báo lỗi chi tiết từ Graph API / Sàn TMĐT mà không bị tràn cột
   @Column({
     name: 'last_error_message',
-    type: 'varchar',
-    length: 500,
+    type: 'text',
     nullable: true,
     default: null,
   })

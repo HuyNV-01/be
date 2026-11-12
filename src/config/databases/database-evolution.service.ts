@@ -17,16 +17,16 @@ interface DbColumnInfoRow {
   columnType: string;
   isNullable: string;
   columnDefault: string | null;
+  characterMaximumLength?: number | string | null;
 }
 
 /**
  * DatabaseEvolutionService (100% Zero-Config, Self-Healing Schema & Metadata-Driven Backfill):
  * 1. Thực thi ngay tại `onModuleInit()` (trước khi `ScheduleModule` kích hoạt các `@Cron` job):
  *    - Tự động tạo các bảng Entity mới chưa tồn tại trong MySQL (`message_tag_assignments`, `quick_reply_templates`, ...).
- *    - Tự động phát hiện và `ALTER TABLE ... ADD COLUMN` cho toàn bộ các cột mới trong Entity mà DB chưa có
- *      (ví dụ: `conversations.interaction_type`, `conversations.is_ghosted_by_agent`, `conversations.is_sla_breached`,
- *       `conversations.snooze_note`, `conversations.snoozed_by_user_id`, `conversations.accountability_timeline_json`,
- *       `conversations.customer_preferred_lang`, `conversations.auto_translate_enabled`, `call_sessions.*`, `messages.*`).
+ *    - Tự động phát hiện và `ALTER TABLE ... ADD COLUMN` cho toàn bộ các cột mới trong Entity mà DB chưa có.
+ *    - Tự động nâng cấp kiểu dữ liệu cột (`varchar(255)` / `varchar(500)` -> `text` / `longtext` hoặc mở rộng độ dài `varchar`)
+ *      trên các bảng đã tồn tại để ngăn chặn triệt để lỗi tràn ký tự (`ER_DATA_TOO_LONG`) khi lưu URL ảnh đại diện CDN dài.
  *    - Tự động mở rộng tập giá trị `ENUM(...)` nếu Entity bổ sung thêm enum value mới.
  *    - Tự động tạo các Index còn thiếu trên bảng.
  * 2. Thực thi chuẩn hoá & điền dữ liệu thiếu (Backfill) cho các bản ghi cũ mà không làm mất dữ liệu lịch sử.
@@ -85,8 +85,8 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
   }
 
   /**
-   * Bước 1: Tự động kiểm tra và bổ sung các Bảng mới, Cột mới, Enum mới và Index mới
-   * từ `this.dataSource.entityMetadatas` vào MySQL một cách an toàn (Non-destructive).
+   * Bước 1: Tự động kiểm tra và bổ sung các Bảng mới, Cột mới, Nâng cấp độ dài/kiểu cột (`varchar` -> `text`),
+   * Enum mới và Index mới từ `this.dataSource.entityMetadatas` vào MySQL một cách an toàn (Non-destructive).
    */
   public async synchronizeMissingTablesColumnsAndEnums(): Promise<void> {
     const queryRunner = this.dataSource.createQueryRunner();
@@ -143,7 +143,8 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
         DATA_TYPE AS dataType,
         COLUMN_TYPE AS columnType,
         IS_NULLABLE AS isNullable,
-        COLUMN_DEFAULT AS columnDefault
+        COLUMN_DEFAULT AS columnDefault,
+        CHARACTER_MAXIMUM_LENGTH AS characterMaximumLength
       FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = ?
@@ -173,6 +174,76 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
         if (missingEnumVal) {
           await this.modifyEnumColumnSql(queryRunner, tableName, col);
         }
+        continue;
+      }
+
+      await this.upgradeColumnTypeOrLengthIfNeeded(queryRunner, tableName, col, existingCol);
+    }
+  }
+
+  /**
+   * Tự động phát hiện và nâng cấp cột kiểu chuỗi đang bị giới hạn độ dài trong DB cũ
+   * (VD: `avatar_url varchar(500)` hoặc `avatar varchar(255)` -> `text`),
+   * hoặc mở rộng cột `varchar(N_old)` sang `varchar(N_new)` lớn hơn mà không làm mất dữ liệu.
+   */
+  private async upgradeColumnTypeOrLengthIfNeeded(
+    queryRunner: QueryRunner,
+    tableName: string,
+    col: ColumnMetadata,
+    existingCol: DbColumnInfoRow,
+  ): Promise<void> {
+    if (col.isPrimary) {
+      return;
+    }
+
+    const desiredRawType = typeof col.type === 'string' ? col.type.toLowerCase() : 'varchar';
+    const currentDataType = (existingCol.dataType || '').toLowerCase();
+    const dbColName = col.databaseName;
+
+    // Trường hợp 1: Entity yêu cầu kiểu text / mediumtext / longtext nhưng DB hiện tại đang là varchar hoặc tinytext
+    const isDesiredText =
+      desiredRawType === 'text' || desiredRawType === 'mediumtext' || desiredRawType === 'longtext';
+    if (isDesiredText && (currentDataType === 'varchar' || currentDataType === 'tinytext')) {
+      try {
+        const colDefSql = this.buildMySqlColumnDefinition(col);
+        await queryRunner.query(
+          `ALTER TABLE \`${tableName}\` MODIFY COLUMN \`${dbColName}\` ${colDefSql}`,
+        );
+        this.logger.log(
+          `[DatabaseEvolution] Upgraded column "${tableName}.${dbColName}" from ${existingCol.columnType} to ${desiredRawType.toUpperCase()} to prevent string truncation.`,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[DatabaseEvolution] Could not widen column "${tableName}.${dbColName}" to TEXT: ${msg}`,
+        );
+      }
+      return;
+    }
+
+    // Trường hợp 2: Entity yêu cầu varchar(L_new) lớn hơn độ dài hiện tại trong DB
+    if (
+      (desiredRawType === 'varchar' || desiredRawType === 'character varying') &&
+      currentDataType === 'varchar' &&
+      col.length
+    ) {
+      const desiredLen = Number(col.length);
+      const currentLen = Number(existingCol.characterMaximumLength || 0);
+      if (desiredLen > 0 && currentLen > 0 && desiredLen > currentLen) {
+        try {
+          const colDefSql = this.buildMySqlColumnDefinition(col);
+          await queryRunner.query(
+            `ALTER TABLE \`${tableName}\` MODIFY COLUMN \`${dbColName}\` ${colDefSql}`,
+          );
+          this.logger.log(
+            `[DatabaseEvolution] Widened column "${tableName}.${dbColName}" from varchar(${currentLen}) to varchar(${desiredLen}).`,
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `[DatabaseEvolution] Could not widen varchar column "${tableName}.${dbColName}": ${msg}`,
+          );
+        }
       }
     }
   }
@@ -193,11 +264,9 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
       );
     } catch (err: any) {
       const errno = err?.errno || err?.driverError?.errno;
-      // 1060 = ER_DUP_FIELDNAME (Cột đã tồn tại)
       if (errno === 1060) {
         return;
       }
-      // Fallback sang queryRunner.addColumn nếu cần
       try {
         await queryRunner.addColumn(tableName, new TableColumn(this.buildTableColumnOptions(col)));
         this.logger.log(
@@ -265,8 +334,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
       sqlType = `enum(${enumVals})`;
     }
 
-    // Trong MySQL, cột JSON và TEXT không hỗ trợ DEFAULT trực tiếp dạng chuỗi trên một số phiên bản,
-    // nên nếu thêm cột JSON/TEXT mới vào bảng đã có dữ liệu, ta cho phép NULL trước rồi backfill
     if (rawType === 'json' || rawType === 'text' || rawType === 'longtext') {
       return `${sqlType} NULL`;
     }
@@ -285,7 +352,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     } else if (isNullable) {
       defaultClause = ' DEFAULT NULL';
     } else {
-      // Nếu cột NOT NULL mà không có staticDefault, cấp giá trị default an toàn để ALTER TABLE không lỗi trên bảng đã có dòng
       if (sqlType.startsWith('varchar')) {
         defaultClause = " DEFAULT ''";
       } else if (sqlType.includes('int') || sqlType.startsWith('decimal')) {
@@ -301,7 +367,7 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
   private buildTableColumnOptions(col: ColumnMetadata) {
     const rawType = typeof col.type === 'string' ? col.type.toLowerCase() : 'varchar';
     const staticDefault = this.resolveStaticDefaultValue(col);
-    const isJsonOrText = rawType === 'json' || rawType === 'text';
+    const isJsonOrText = rawType === 'json' || rawType === 'text' || rawType === 'longtext';
 
     let formattedDefault: any = undefined;
     if (!isJsonOrText && staticDefault !== undefined && staticDefault !== null) {
@@ -356,7 +422,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
       const colNames = idx.columns.map((c) => c.databaseName).filter(Boolean);
       if (colNames.length === 0) continue;
 
-      // Bảng phân vùng theo created_at không cho phép tạo UNIQUE INDEX nếu không chứa cột created_at
       const canBeUnique =
         Boolean(idx.isUnique) && (!isPartitioned || colNames.includes('created_at'));
 
@@ -376,13 +441,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     }
   }
 
-  /**
-   * Bước 2: Tự động duyệt qua tất cả các Entity đã đăng ký trong hệ thống để Backfill dữ liệu:
-   * 1. Tự động điền giá trị `default` cho các cột mới thêm trên các dòng dữ liệu cũ đang bị NULL.
-   * 2. Tự động chuẩn hoá giá trị các cột dạng `enum` nếu dữ liệu cũ bị rỗng hoặc lệch tập giá trị hợp lệ.
-   * 3. Tự động khởi tạo giá trị mặc định an toàn (`[]` hoặc `{}`) cho các cột kiểu `json` đang bị NULL trên dữ liệu cũ.
-   * 4. Tự động chạy bộ biến đổi dữ liệu (`column.transformer`) của Entity trên các bản ghi cũ chưa được chuẩn hoá.
-   */
   public async autoSynchronizeAllEntitiesData(): Promise<void> {
     const queryRunner = this.dataSource.createQueryRunner();
 
