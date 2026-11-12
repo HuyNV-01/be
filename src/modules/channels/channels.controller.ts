@@ -244,6 +244,54 @@ export class ChannelsController {
     };
   }
 
+  @Post('sync-all-posts-comments')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Đồng bộ tức thì toàn bộ bài viết thường (Organic Posts chưa chạy quảng cáo) và bình luận mới từ tất cả kênh Fanpage/Instagram đang kết nối của cửa hàng',
+  })
+  async syncAllShopPublishedPostsAndComments(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.syncAllShopPublishedPostsAndComments(
+      shopId,
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Synced organic published posts and comments across all shop channels successfully',
+      data,
+    };
+  }
+
+  @Post(':channelId/sync-posts-comments')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Quét và đồng bộ tức thì bình luận từ các bài viết trên trang (published_posts & feed) kể cả bài viết chưa chạy quảng cáo',
+  })
+  async syncChannelPublishedPostsAndComments(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('channelId') channelId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.syncChannelPublishedPostsAndComments(
+      shopId,
+      channelId,
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Synced channel published posts and comments successfully',
+      data,
+    };
+  }
+
   @Post(':channelId/sync-webhook')
   @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
   @HttpCode(HttpStatus.OK)

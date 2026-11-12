@@ -94,6 +94,9 @@ export interface MessageMetadata {
   productCards?: MessageProductCardMeta[];
   translation?: MessageTranslationMeta;
   externalCustomerName?: string;
+  externalCustomerAvatar?: string | null;
+  externalCustomerPsid?: string | null;
+  skipPlatformDispatch?: boolean;
   marketplaceOrder?: Record<string, any>;
   externalCommentId?: string;
   externalPostId?: string;
@@ -115,6 +118,8 @@ export interface MessageMetadata {
   autoHideCommentOnReply?: boolean;
   platformDeliveryStatus?: 'DISPATCHED' | 'SIMULATED_SANDBOX' | 'FAILED';
   platformExternalId?: string | null;
+  platformEditedExternalId?: string | null;
+  platformEditSyncedAt?: string;
   platformErrorMessage?: string | null;
 }
 

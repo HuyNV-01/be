@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
@@ -9,6 +10,7 @@ import {
   ChannelTypeEnum,
   ConversationSupportStatusEnum,
   ConversationTypeEnum,
+  DataScopeEnum,
   GroupRoleEnum,
   MembershipStatusEnum,
   MessageStatusEnum,
@@ -244,7 +246,15 @@ export class ChannelsService {
   // Bộ nhớ đệm L1 giúp chịu tải cao khi hàng nghìn sự kiện Webhook đổ về cùng lúc
   private readonly shopActiveMembersCache = new Map<
     string,
-    { members: Array<{ userId: string; role: ShopRoleEnum }>; expiresAt: number }
+    {
+      members: Array<{
+        userId: string;
+        role: ShopRoleEnum;
+        dataScope?: DataScopeEnum;
+        allowedChannelIdsJson?: string[] | null;
+      }>;
+      expiresAt: number;
+    }
   >();
   private readonly convParticipantsCache = new Map<
     string,
@@ -252,6 +262,7 @@ export class ChannelsService {
   >();
   private readonly inMemoryThreadLocks = new Map<string, Promise<unknown>>();
   private readonly coalescedChannelUpdateTimers = new Map<string, NodeJS.Timeout>();
+  private isPollingOrganicComments = false;
 
   constructor(
     @InjectRepository(ChannelIntegrationEntity)
@@ -1103,9 +1114,14 @@ export class ChannelsService {
    * Đọc danh sách thành viên đang hoạt động của Shop qua bộ nhớ đệm L1 (TTL 30s)
    * để tránh truy vấn DB lặp lại hàng nghìn lần khi có bão tin nhắn Webhook đổ về.
    */
-  private async getCachedShopActiveMembers(
-    shopId: string,
-  ): Promise<Array<{ userId: string; role: ShopRoleEnum }>> {
+  private async getCachedShopActiveMembers(shopId: string): Promise<
+    Array<{
+      userId: string;
+      role: ShopRoleEnum;
+      dataScope?: DataScopeEnum;
+      allowedChannelIdsJson?: string[] | null;
+    }>
+  > {
     const cached = this.shopActiveMembersCache.get(shopId);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.members;
@@ -1116,7 +1132,7 @@ export class ChannelsService {
         shopId,
         membershipStatus: MembershipStatusEnum.ACTIVE,
       },
-      select: ['userId', 'role'],
+      select: ['userId', 'role', 'dataScope', 'allowedChannelIdsJson'],
     });
 
     this.shopActiveMembersCache.set(shopId, {
@@ -2923,17 +2939,38 @@ export class ChannelsService {
   }
 
   /**
+   * Tạo URL ảnh đại diện định danh theo tên khách hàng khi nền tảng ngoại vi (Meta PSID / Zalo OA)
+   * ẩn `profile_pic` theo chính sách quyền riêng tư, giúp bong bóng chat luôn hiển thị avatar khách rõ ràng.
+   */
+  public buildFallbackCustomerAvatarUrl(
+    customerName: string,
+    seedFallback?: string | null,
+  ): string {
+    const cleanSeed = (customerName || seedFallback || 'Khách hàng').trim();
+    return `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(cleanSeed)}&backgroundType=gradientLinear`;
+  }
+
+  /**
    * Tự động lấy Tên thật & Ảnh đại diện của khách hàng từ PSID (Facebook/Instagram) hoặc user_id (Zalo OA)
-   * khi Webhook chỉ gửi ID người gửi mà không kèm tên. Lưu cache Redis 24h để chịu tải cao.
+   * kể cả khi sự kiện bình luận bài viết (`feed`) đã có sẵn tên nhưng thiếu `profile_pic`.
+   * Lưu cache Redis 24h để chịu tải cao.
    */
   private async enrichCustomerProfileByPsid(params: {
     channel: ChannelIntegrationEntity;
     externalCustomerPsid: string | null;
     fallbackName: string;
-  }): Promise<{ name: string; avatarUrl: string | null }> {
-    const { channel, externalCustomerPsid, fallbackName } = params;
-    if (!externalCustomerPsid || !fallbackName.includes('#')) {
-      return { name: fallbackName, avatarUrl: null };
+    initialAvatarUrl?: string | null;
+  }): Promise<{ name: string; avatarUrl: string }> {
+    const { channel, externalCustomerPsid, fallbackName, initialAvatarUrl } = params;
+    const defaultAvatar =
+      initialAvatarUrl || this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid);
+
+    if (!externalCustomerPsid) {
+      return { name: fallbackName, avatarUrl: defaultAvatar };
+    }
+
+    if (initialAvatarUrl && !fallbackName.includes('#')) {
+      return { name: fallbackName, avatarUrl: initialAvatarUrl };
     }
 
     const cacheKey = `psid_profile:${channel.id}:${externalCustomerPsid}`;
@@ -2941,7 +2978,11 @@ export class ChannelsService {
       const cached = await this.redis.get(cacheKey);
       if (cached) {
         const parsed = JSON.parse(cached) as { name: string; avatarUrl: string | null };
-        if (parsed?.name) return parsed;
+        if (parsed?.name && parsed?.avatarUrl) {
+          const bestName =
+            !fallbackName.includes('#') && parsed.name.includes('#') ? fallbackName : parsed.name;
+          return { name: bestName, avatarUrl: parsed.avatarUrl };
+        }
       }
     } catch {
       // Bỏ qua nếu Redis offline
@@ -2951,8 +2992,12 @@ export class ChannelsService {
       channel.accessTokenEncrypted,
       channel.shopId,
     );
-    if (!rawPageToken || rawPageToken.startsWith('oauth2_tok_')) {
-      return { name: fallbackName, avatarUrl: null };
+    if (
+      !rawPageToken ||
+      rawPageToken.startsWith('oauth2_tok_') ||
+      rawPageToken.startsWith('sandbox_')
+    ) {
+      return { name: fallbackName, avatarUrl: defaultAvatar };
     }
 
     const rawAppSecret = channel.appSecretEncrypted
@@ -2968,11 +3013,12 @@ export class ChannelsService {
         first_name?: string;
         last_name?: string;
         profile_pic?: string;
+        picture?: { data?: { url?: string } };
       }>({
         apiVersion: channel.apiVersion || 'v27.1',
         path: externalCustomerPsid,
         queryParams: {
-          fields: 'name,first_name,last_name,profile_pic',
+          fields: 'name,first_name,last_name,profile_pic,picture.type(large)',
         },
         accessToken: rawPageToken,
         appSecret: rawAppSecret,
@@ -2983,14 +3029,24 @@ export class ChannelsService {
           profileCall.data.name ||
           [profileCall.data.first_name, profileCall.data.last_name].filter(Boolean).join(' ') ||
           fallbackName;
-        const avatarUrl = profileCall.data.profile_pic || null;
+        const avatarUrl =
+          profileCall.data.picture?.data?.url ||
+          profileCall.data.profile_pic ||
+          initialAvatarUrl ||
+          this.buildFallbackCustomerAvatarUrl(fullName, externalCustomerPsid);
         const resolved = { name: fullName, avatarUrl };
         await this.redis.set(cacheKey, JSON.stringify(resolved), 'EX', 86400).catch(() => null);
         return resolved;
       }
     }
 
-    return { name: fallbackName, avatarUrl: null };
+    const fallbackResolved = {
+      name: fallbackName,
+      avatarUrl:
+        initialAvatarUrl || this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid),
+    };
+    await this.redis.set(cacheKey, JSON.stringify(fallbackResolved), 'EX', 3600).catch(() => null);
+    return fallbackResolved;
   }
 
   /**
@@ -3056,12 +3112,19 @@ export class ChannelsService {
                   ? 'edited'
                   : 'add';
 
+            const commenterAvatar =
+              changeVal.from?.picture?.data?.url ||
+              changeVal.from?.profile_pic ||
+              changeVal.sender_avatar ||
+              null;
+
             events.push({
               externalPageId: entryPageId,
               externalThreadId: `cmt_${postId}_${commenterId}`,
               externalCustomerPsid: commenterId,
               externalMessageId: commentId,
               customerName: commenterName,
+              customerAvatarUrl: commenterAvatar ? String(commenterAvatar) : null,
               messageText: String(
                 changeVal.message ||
                   changeVal.text ||
@@ -3169,6 +3232,8 @@ export class ChannelsService {
             customerName: String(
               msgItem.sender?.name || `Khách ${channelType} #${customerPsid.slice(-4)}`,
             ),
+            customerAvatarUrl:
+              msgItem.sender?.profile_pic || msgItem.sender?.picture?.data?.url || null,
             messageText: text,
             interactionType: 'INBOX',
             verb: 'add',
@@ -3255,6 +3320,11 @@ export class ChannelsService {
         externalCustomerPsid: commenterId,
         externalMessageId: commentId,
         customerName: commenterName,
+        customerAvatarUrl:
+          changeVal.from?.picture?.data?.url ||
+          changeVal.from?.profile_pic ||
+          changeVal.sender_avatar ||
+          null,
         messageText: String(
           changeVal.message || changeVal.text || '[Khách hàng gửi bình luận kèm hình ảnh/nhãn dán]',
         ),
@@ -3376,6 +3446,10 @@ export class ChannelsService {
           payload?.buyer_username ||
           `Khách ${channelType} #${externalThreadId.slice(-4)}`,
       ),
+      customerAvatarUrl:
+        payload?.senderAvatar || payload?.customerAvatar || payload?.avatarUrl
+          ? String(payload.senderAvatar || payload.customerAvatar || payload.avatarUrl)
+          : null,
       messageText: String(
         payload?.messageText ||
           payload?.text ||
@@ -3626,7 +3700,30 @@ export class ChannelsService {
       }
     }
 
-    // 0.5. Xử lý sự kiện `message_echoes` (`isEchoFromPage === true`)
+    // 0.4. Nếu đây là bình luận phản hồi cấp 2 (`parentCommentId`), ưu tiên tìm cuộc hội thoại của bình luận gốc
+    if (
+      (normalized.interactionType === 'COMMENT' || normalized.interactionType === 'LIVESTREAM') &&
+      normalized.parentCommentId
+    ) {
+      const parentCommentMsg = await this.messageRepo.findOne({
+        where: {
+          shopId: channel.shopId,
+          externalMessageId: normalized.parentCommentId,
+        },
+        select: ['id', 'conversationId'],
+      });
+      if (parentCommentMsg?.conversationId) {
+        const parentConv = await this.conversationRepo.findOne({
+          where: { id: parentCommentMsg.conversationId },
+          select: ['id', 'externalThreadId'],
+        });
+        if (parentConv?.externalThreadId) {
+          normalized.externalThreadId = parentConv.externalThreadId;
+        }
+      }
+    }
+
+    // 0.5. Xử lý sự kiện `message_echoes` hoặc bình luận từ chính Fanpage (`isEchoFromPage === true`)
     if (normalized.isEchoFromPage) {
       const existingOutbound = await this.messageRepo.findOne({
         where: {
@@ -3635,93 +3732,130 @@ export class ChannelsService {
         },
       });
 
-      if (existingOutbound || normalized.interactionType !== 'INBOX') {
+      if (existingOutbound) {
         return {
-          conversationId: existingOutbound?.conversationId || null,
+          conversationId: existingOutbound.conversationId,
           assignedAgentId: null,
         };
       }
 
-      if (channel.platformConfigJson?.syncEchoMessagesFromNativeApp !== false) {
-        const echoConv = await this.conversationRepo.findOne({
-          where: {
-            shopId: channel.shopId,
-            channelIntegrationId: channel.id,
-            externalThreadId: normalized.externalThreadId,
-          },
-        });
-        if (echoConv) {
-          const now = new Date();
-          const encryptedEcho = this.messageCryptoService.encryptForConversation(
-            normalized.messageText,
-            echoConv.id,
-          );
-          await this.conversationRepo.update(echoConv.id, {
-            lastMessage: encryptedEcho.ciphertext,
-            lastMessageAt: now,
-            lastAgentReplyAt: now,
-            supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
-            slaDeadlineAt: null,
-            isSlaBreached: false,
-            isGhostedByAgent: false,
-          });
+      // Lý do nghiệp vụ: Khi người bán dùng chính tài khoản Admin/Page bình luận cấp 1 (không có parentCommentId)
+      // vào bài viết thường (Organic Post chưa chạy quảng cáo) để kiểm thử luồng bình luận,
+      // cho phép xử lý như một bình luận đến để hiển thị ngay trên hộp thư người bán.
+      const isRootTestCommentOnPost =
+        (normalized.interactionType === 'COMMENT' || normalized.interactionType === 'LIVESTREAM') &&
+        !normalized.parentCommentId;
 
-          const echoMsg = this.messageRepo.create({
-            conversationId: echoConv.id,
-            senderId: echoConv.assignedAgentId || channel.createdBy || 'page_echo',
-            shopId: channel.shopId,
-            direction: MessageDirectionEnum.OUTBOUND,
-            externalMessageId: normalized.externalMessageId,
-            content: encryptedEcho.ciphertext,
-            type: MessageTypeEnum.TEXT,
-            status: MessageStatusEnum.SENT,
-            readBy: [],
-            deliveredTo: [],
-            isPinned: false,
-            metadata: {
-              isEncrypted: encryptedEcho.isEncrypted,
-              encryptionAlg: encryptedEcho.algorithm,
-              platformDeliveryStatus: 'DISPATCHED',
-              platformExternalId: normalized.externalMessageId,
-            } as any,
-            createdAt: now,
-            updatedAt: now,
+      if (!isRootTestCommentOnPost) {
+        if (channel.platformConfigJson?.syncEchoMessagesFromNativeApp !== false) {
+          const echoConv = await this.conversationRepo.findOne({
+            where: {
+              shopId: channel.shopId,
+              channelIntegrationId: channel.id,
+              externalThreadId: normalized.externalThreadId,
+            },
           });
-          const savedEcho = await this.messageRepo.save(echoMsg);
-          const echoPayload = {
-            ...savedEcho,
-            content: normalized.messageText,
-            createdAt: now.toISOString(),
-            updatedAt: now.toISOString(),
-          };
-          this.realtimeEmitter.emitToConversation(
-            SOCKET_CONFIG.namespaces.CHAT,
-            echoConv.id,
-            SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
-            echoPayload,
-          );
-          if (echoConv.assignedAgentId) {
-            this.realtimeEmitter.emitToUser(
+          if (echoConv) {
+            const recentThreshold = new Date(Date.now() - 15_000);
+            const recentOutboundMsgs = await this.messageRepo.find({
+              where: {
+                conversationId: echoConv.id,
+                direction: MessageDirectionEnum.OUTBOUND,
+              },
+              order: { createdAt: 'DESC' },
+              take: 3,
+            });
+            const matchedRecentOutbound = recentOutboundMsgs.find((m) => {
+              if (new Date(m.createdAt).getTime() < recentThreshold.getTime()) return false;
+              const dec = this.messageCryptoService.decryptForConversation(m.content, echoConv.id);
+              return dec.trim() === normalized.messageText.trim();
+            });
+            if (matchedRecentOutbound) {
+              if (!matchedRecentOutbound.externalMessageId && normalized.externalMessageId) {
+                await this.messageRepo.update(
+                  { id: matchedRecentOutbound.id, createdAt: matchedRecentOutbound.createdAt },
+                  { externalMessageId: normalized.externalMessageId },
+                );
+              }
+              return {
+                conversationId: echoConv.id,
+                assignedAgentId: echoConv.assignedAgentId,
+              };
+            }
+
+            const now = new Date();
+            const encryptedEcho = this.messageCryptoService.encryptForConversation(
+              normalized.messageText,
+              echoConv.id,
+            );
+            await this.conversationRepo.update(echoConv.id, {
+              lastMessage: encryptedEcho.ciphertext,
+              lastMessageAt: now,
+              lastAgentReplyAt: now,
+              supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
+              slaDeadlineAt: null,
+              isSlaBreached: false,
+              isGhostedByAgent: false,
+            });
+
+            const echoMsg = this.messageRepo.create({
+              conversationId: echoConv.id,
+              senderId: echoConv.assignedAgentId || channel.createdBy || 'page_echo',
+              shopId: channel.shopId,
+              direction: MessageDirectionEnum.OUTBOUND,
+              externalMessageId: normalized.externalMessageId,
+              content: encryptedEcho.ciphertext,
+              type: MessageTypeEnum.TEXT,
+              status: MessageStatusEnum.SENT,
+              readBy: [],
+              deliveredTo: [],
+              isPinned: false,
+              metadata: {
+                isEncrypted: encryptedEcho.isEncrypted,
+                encryptionAlg: encryptedEcho.algorithm,
+                platformDeliveryStatus: 'DISPATCHED',
+                platformExternalId: normalized.externalMessageId,
+                externalCommentId: normalized.externalCommentId || undefined,
+                externalPostId: normalized.sourcePostId || undefined,
+              } as any,
+              createdAt: now,
+              updatedAt: now,
+            });
+            const savedEcho = await this.messageRepo.save(echoMsg);
+            const echoPayload = {
+              ...savedEcho,
+              content: normalized.messageText,
+              createdAt: now.toISOString(),
+              updatedAt: now.toISOString(),
+            };
+            this.realtimeEmitter.emitToConversation(
               SOCKET_CONFIG.namespaces.CHAT,
-              echoConv.assignedAgentId,
+              echoConv.id,
               SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
               echoPayload,
             );
+            await this.broadcastChannelEventToShop(
+              channel.shopId,
+              SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+              echoPayload,
+            );
+            this.scheduleCoalescedShopChannelUpdate(channel.shopId, {
+              shopId: channel.shopId,
+              action: 'AGENT_REPLIED',
+              channelId: channel.id,
+              conversationId: echoConv.id,
+            });
+            return {
+              conversationId: echoConv.id,
+              assignedAgentId: echoConv.assignedAgentId,
+            };
           }
-          this.scheduleCoalescedShopChannelUpdate(channel.shopId, {
-            shopId: channel.shopId,
-            action: 'AGENT_REPLIED',
-            channelId: channel.id,
-            conversationId: echoConv.id,
-          });
-          return {
-            conversationId: echoConv.id,
-            assignedAgentId: echoConv.assignedAgentId,
-          };
+        }
+
+        if (normalized.interactionType === 'INBOX') {
+          return { conversationId: null, assignedAgentId: null };
         }
       }
-
-      return { conversationId: null, assignedAgentId: null };
     }
 
     // 1. Bảo toàn Bình luận khi bị xóa trên nền tảng gốc (Immutable Comment Retention)
@@ -3878,6 +4012,7 @@ export class ChannelsService {
       channel,
       externalCustomerPsid: normalized.externalCustomerPsid,
       fallbackName: normalized.customerName,
+      initialAvatarUrl: normalized.customerAvatarUrl,
     });
     normalized.customerName = enrichedCustomer.name;
     normalized.customerAvatarUrl = enrichedCustomer.avatarUrl;
@@ -3971,13 +4106,34 @@ export class ChannelsService {
 
     const activeMembers = await this.getCachedShopActiveMembers(channel.shopId);
 
+    // Lý do nghiệp vụ: Đảm bảo toàn bộ nhân sự có phạm vi xem hội thoại của trang (ALL_SHOP, TEAM_SHIFT,
+    // ASSIGNED_PLUS_POOL, SHOP_OWNER, SHOP_MANAGER, hoặc được gán trực tiếp) đều được thêm vào ConversationParticipant
+    // để bình luận bài viết thường (Organic Post) và tin nhắn mới hiển thị tức thì trên danh sách hội thoại của người bán.
     const participantUserIds = activeMembers
-      .filter(
-        (m) =>
+      .filter((m) => {
+        if (
           m.role === ShopRoleEnum.SHOP_OWNER ||
           m.role === ShopRoleEnum.SHOP_MANAGER ||
-          m.userId === assignedAgentId,
-      )
+          m.userId === assignedAgentId
+        ) {
+          return true;
+        }
+        const allowedChannels = Array.isArray(m.allowedChannelIdsJson)
+          ? m.allowedChannelIdsJson
+          : [];
+        const hasChannelAccess =
+          allowedChannels.length === 0 || allowedChannels.includes(channel.id);
+        if (!hasChannelAccess) {
+          return false;
+        }
+        return (
+          !m.dataScope ||
+          m.dataScope === DataScopeEnum.ALL_SHOP ||
+          m.dataScope === DataScopeEnum.TEAM_SHIFT ||
+          m.dataScope === DataScopeEnum.ASSIGNED_PLUS_POOL ||
+          !assignedAgentId
+        );
+      })
       .map((m) => m.userId);
     if (assignedAgentId) {
       participantUserIds.push(assignedAgentId);
@@ -3987,6 +4143,10 @@ export class ChannelsService {
 
     const inboundSenderId = `ext:${channel.channelType.toLowerCase()}:${normalized.externalThreadId.slice(0, 18)}`;
     const nowIso = now.toISOString();
+    const resolvedCustomerAvatar =
+      normalized.customerAvatarUrl ||
+      savedConversation.avatar ||
+      this.buildFallbackCustomerAvatarUrl(normalized.customerName, normalized.externalCustomerPsid);
 
     const inboundMessage = this.messageRepo.create({
       conversationId: savedConversation.id,
@@ -4007,6 +4167,8 @@ export class ChannelsService {
         pageShortCode: channel.pageShortCode,
         pageName: channel.pageName,
         externalCustomerName: normalized.customerName,
+        externalCustomerAvatar: resolvedCustomerAvatar,
+        externalCustomerPsid: normalized.externalCustomerPsid,
         interactionType: normalized.interactionType,
         externalCommentId: normalized.externalCommentId,
         externalPostId: normalized.sourcePostId || undefined,
@@ -4053,7 +4215,8 @@ export class ChannelsService {
       sender: {
         id: inboundSenderId,
         name: normalized.customerName,
-        avatar: normalized.customerAvatarUrl || channel.avatarUrl || null,
+        email: '',
+        avatar: resolvedCustomerAvatar,
       },
     };
 
@@ -4100,6 +4263,495 @@ export class ChannelsService {
     return {
       conversationId: savedConversation.id,
       assignedAgentId,
+    };
+  }
+
+  /**
+   * Động cơ Đồng bộ Bài viết & Bình luận Chủ động (`Active Organic Post & Comment Sync / Polling Engine`):
+   * - Tự động chạy định kỳ mỗi 25 giây để quét các bài viết thường (Organic Posts chưa chạy quảng cáo) trên Fanpage / Instagram.
+   * - Khắc phục triệt để độ trễ hoặc việc Meta Graph API không bắn Webhook `feed` tức thì cho các bài viết thường hoặc khi App ở chế độ Dev.
+   */
+  @Cron('*/25 * * * * *')
+  async pollActiveChannelsOrganicPostsAndComments(): Promise<void> {
+    if (this.isPollingOrganicComments) {
+      return;
+    }
+    this.isPollingOrganicComments = true;
+    try {
+      const activeSocialChannels = await this.channelRepo.find({
+        where: {
+          isActive: true,
+          channelType: In([ChannelTypeEnum.FACEBOOK_PAGE, ChannelTypeEnum.INSTAGRAM]),
+        },
+        order: { updatedAt: 'DESC' },
+        take: 25,
+      });
+
+      for (const ch of activeSocialChannels) {
+        await this.syncSingleChannelOrganicPostsAndCommentsInternal(ch, false).catch(() => null);
+      }
+    } finally {
+      this.isPollingOrganicComments = false;
+    }
+  }
+
+  /**
+   * Đồng bộ tức thì toàn bộ bài viết & bình luận từ tất cả kênh Fanpage/Instagram đang hoạt động của cửa hàng
+   */
+  async syncAllShopPublishedPostsAndComments(
+    shopId: string,
+    actorUserId?: string,
+  ): Promise<{
+    shopId: string;
+    channelsChecked: number;
+    postsScanned: number;
+    newCommentsSynced: number;
+    results: Array<{
+      channelId: string;
+      pageName: string;
+      pageShortCode: string;
+      postsScanned: number;
+      newCommentsSynced: number;
+      syncedFromLiveApi: boolean;
+    }>;
+  }> {
+    const channels = await this.channelRepo.find({
+      where: {
+        shopId,
+        isActive: true,
+        channelType: In([ChannelTypeEnum.FACEBOOK_PAGE, ChannelTypeEnum.INSTAGRAM]),
+      },
+      order: { createdAt: 'ASC' },
+    });
+
+    const results: Array<{
+      channelId: string;
+      pageName: string;
+      pageShortCode: string;
+      postsScanned: number;
+      newCommentsSynced: number;
+      syncedFromLiveApi: boolean;
+    }> = [];
+    let totalPostsScanned = 0;
+    let totalNewComments = 0;
+
+    for (const ch of channels) {
+      const res = await this.syncSingleChannelOrganicPostsAndCommentsInternal(
+        ch,
+        true,
+        actorUserId,
+      );
+      totalPostsScanned += res.postsScanned;
+      totalNewComments += res.newCommentsSynced;
+      results.push({
+        channelId: ch.id,
+        pageName: ch.pageName,
+        pageShortCode: ch.pageShortCode,
+        postsScanned: res.postsScanned,
+        newCommentsSynced: res.newCommentsSynced,
+        syncedFromLiveApi: res.syncedFromLiveApi,
+      });
+    }
+
+    return {
+      shopId,
+      channelsChecked: channels.length,
+      postsScanned: totalPostsScanned,
+      newCommentsSynced: totalNewComments,
+      results,
+    };
+  }
+
+  /**
+   * Đồng bộ tức thì bài viết đã đăng (`published_posts` & `feed`) và toàn bộ bình luận mới của 1 kênh cụ thể
+   */
+  async syncChannelPublishedPostsAndComments(
+    shopId: string,
+    channelId: string,
+    actorUserId?: string,
+  ): Promise<{
+    channelId: string;
+    pageName: string;
+    pageShortCode: string;
+    postsScanned: number;
+    newCommentsSynced: number;
+    syncedFromLiveApi: boolean;
+    syncedAt: string;
+  }> {
+    const channel = await this.channelRepo.findOne({
+      where: { id: channelId, shopId },
+    });
+    if (!channel) {
+      throw new NotFoundException('CHANNEL_INTEGRATION_NOT_FOUND');
+    }
+
+    return this.syncSingleChannelOrganicPostsAndCommentsInternal(channel, true, actorUserId);
+  }
+
+  private async syncSingleChannelOrganicPostsAndCommentsInternal(
+    channel: ChannelIntegrationEntity,
+    isManualTrigger = false,
+    _actorUserId?: string,
+  ): Promise<{
+    channelId: string;
+    pageName: string;
+    pageShortCode: string;
+    postsScanned: number;
+    newCommentsSynced: number;
+    syncedFromLiveApi: boolean;
+    syncedAt: string;
+  }> {
+    const syncedAt = new Date().toISOString();
+    const rawPageToken = channel.accessTokenEncrypted
+      ? this.messageCryptoService.decryptForConversation(
+          channel.accessTokenEncrypted,
+          channel.shopId,
+        )
+      : '';
+
+    const isSandboxOrOfflineToken =
+      !rawPageToken ||
+      rawPageToken.startsWith('oauth2_tok_') ||
+      rawPageToken.startsWith('sandbox_');
+
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+
+    let postsScanned = 0;
+    let newCommentsSynced = 0;
+    let syncedFromLiveApi = false;
+
+    if (!isSandboxOrOfflineToken) {
+      const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+      const collectedComments: Array<{
+        postId: string;
+        commentId: string;
+        parentCommentId: string | null;
+        commenterId: string;
+        commenterName: string;
+        commenterAvatar: string | null;
+        messageText: string;
+        mediaAttachmentUrl: string | null;
+      }> = [];
+
+      if (channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE) {
+        const endpoints = [
+          `${channel.externalPageId}/published_posts`,
+          `${channel.externalPageId}/feed`,
+          `${channel.externalPageId}/posts`,
+        ];
+
+        const seenPostIds = new Set<string>();
+        const seenCommentIds = new Set<string>();
+
+        for (const ep of endpoints) {
+          const feedRes = await this.callMetaGraphApi<{
+            data?: Array<{
+              id: string;
+              message?: string;
+              story?: string;
+              comments?: {
+                data?: Array<{
+                  id: string;
+                  message?: string;
+                  created_time?: string;
+                  from?: {
+                    id?: string;
+                    name?: string;
+                    picture?: { data?: { url?: string } };
+                  };
+                  parent?: { id?: string };
+                  attachment?: {
+                    media?: { image?: { src?: string } };
+                    url?: string;
+                  };
+                }>;
+              };
+            }>;
+          }>({
+            apiVersion: apiVer,
+            path: ep,
+            queryParams: {
+              fields:
+                'id,message,story,created_time,comments.filter(stream).limit(40){id,message,created_time,from{id,name,picture.type(large)},parent{id},attachment,is_hidden}',
+              limit: '15',
+            },
+            accessToken: rawPageToken,
+            appSecret: rawAppSecret,
+          });
+
+          if (feedRes.ok && Array.isArray(feedRes.data?.data)) {
+            syncedFromLiveApi = true;
+            for (const post of feedRes.data.data) {
+              if (!post?.id) continue;
+              seenPostIds.add(post.id);
+
+              const commentsList = Array.isArray(post.comments?.data) ? post.comments.data : [];
+              for (const cmt of commentsList) {
+                if (!cmt?.id || seenCommentIds.has(cmt.id)) continue;
+                seenCommentIds.add(cmt.id);
+
+                const commenterId = String(cmt.from?.id || `fb_user_${cmt.id.slice(-6)}`);
+                const commenterName = String(
+                  cmt.from?.name || `Khách bình luận #${commenterId.slice(-4)}`,
+                );
+                const commenterAvatar = cmt.from?.picture?.data?.url || null;
+                const mediaUrl = cmt.attachment?.media?.image?.src || cmt.attachment?.url || null;
+
+                collectedComments.push({
+                  postId: post.id,
+                  commentId: cmt.id,
+                  parentCommentId: cmt.parent?.id ? String(cmt.parent.id) : null,
+                  commenterId,
+                  commenterName,
+                  commenterAvatar,
+                  messageText: String(
+                    cmt.message || '[Khách hàng gửi bình luận kèm hình ảnh/nhãn dán]',
+                  ),
+                  mediaAttachmentUrl: mediaUrl,
+                });
+              }
+            }
+          }
+
+          if (seenPostIds.size > 0 && ep.endsWith('/feed')) {
+            break;
+          }
+        }
+
+        // Quét bổ sung trực tiếp `/{post_id}/comments?filter=stream` cho các bài viết đã có hội thoại bình luận gần đây
+        const recentCommentConvs = await this.conversationRepo.find({
+          where: {
+            shopId: channel.shopId,
+            channelIntegrationId: channel.id,
+            interactionType: 'COMMENT',
+          },
+          order: { lastMessageAt: 'DESC' },
+          take: 8,
+          select: ['id', 'sourcePostId'],
+        });
+
+        for (const c of recentCommentConvs) {
+          if (c.sourcePostId && !c.sourcePostId.startsWith('post_')) {
+            seenPostIds.add(c.sourcePostId);
+          }
+        }
+
+        const postIdsToDeepScan = Array.from(seenPostIds).slice(0, 8);
+        postsScanned = seenPostIds.size;
+
+        for (const postId of postIdsToDeepScan) {
+          const postCommentsRes = await this.callMetaGraphApi<{
+            data?: Array<{
+              id: string;
+              message?: string;
+              from?: {
+                id?: string;
+                name?: string;
+                picture?: { data?: { url?: string } };
+              };
+              parent?: { id?: string };
+              attachment?: {
+                media?: { image?: { src?: string } };
+                url?: string;
+              };
+            }>;
+          }>({
+            apiVersion: apiVer,
+            path: `${postId}/comments`,
+            queryParams: {
+              filter: 'stream',
+              limit: '40',
+              fields:
+                'id,message,created_time,from{id,name,picture.type(large)},parent{id},attachment,is_hidden',
+            },
+            accessToken: rawPageToken,
+            appSecret: rawAppSecret,
+          });
+
+          if (postCommentsRes.ok && Array.isArray(postCommentsRes.data?.data)) {
+            syncedFromLiveApi = true;
+            for (const cmt of postCommentsRes.data.data) {
+              if (!cmt?.id || seenCommentIds.has(cmt.id)) continue;
+              seenCommentIds.add(cmt.id);
+
+              const commenterId = String(cmt.from?.id || `fb_user_${cmt.id.slice(-6)}`);
+              const commenterName = String(
+                cmt.from?.name || `Khách bình luận #${commenterId.slice(-4)}`,
+              );
+              const commenterAvatar = cmt.from?.picture?.data?.url || null;
+              const mediaUrl = cmt.attachment?.media?.image?.src || cmt.attachment?.url || null;
+
+              collectedComments.push({
+                postId,
+                commentId: cmt.id,
+                parentCommentId: cmt.parent?.id ? String(cmt.parent.id) : null,
+                commenterId,
+                commenterName,
+                commenterAvatar,
+                messageText: String(
+                  cmt.message || '[Khách hàng gửi bình luận kèm hình ảnh/nhãn dán]',
+                ),
+                mediaAttachmentUrl: mediaUrl,
+              });
+            }
+          }
+        }
+      } else if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
+        const igMediaRes = await this.callMetaGraphApi<{
+          data?: Array<{
+            id: string;
+            caption?: string;
+            comments?: {
+              data?: Array<{
+                id: string;
+                text?: string;
+                username?: string;
+                from?: { id?: string; username?: string };
+                parent_id?: string;
+              }>;
+            };
+          }>;
+        }>({
+          apiVersion: apiVer,
+          path: `${channel.externalPageId}/media`,
+          queryParams: {
+            fields:
+              'id,caption,timestamp,comments.limit(35){id,text,timestamp,username,from{id,username},parent_id}',
+            limit: '12',
+          },
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (igMediaRes.ok && Array.isArray(igMediaRes.data?.data)) {
+          syncedFromLiveApi = true;
+          postsScanned = igMediaRes.data.data.length;
+          for (const media of igMediaRes.data.data) {
+            const cmtList = Array.isArray(media.comments?.data) ? media.comments.data : [];
+            for (const cmt of cmtList) {
+              if (!cmt?.id) continue;
+              const commenterId = String(cmt.from?.id || cmt.username || `ig_${cmt.id.slice(-6)}`);
+              const commenterName = String(
+                cmt.from?.username || cmt.username || `Khách IG #${commenterId.slice(-4)}`,
+              );
+              collectedComments.push({
+                postId: media.id,
+                commentId: cmt.id,
+                parentCommentId: cmt.parent_id ? String(cmt.parent_id) : null,
+                commenterId,
+                commenterName,
+                commenterAvatar: null,
+                messageText: String(cmt.text || '[Bình luận Instagram]'),
+                mediaAttachmentUrl: null,
+              });
+            }
+          }
+        }
+      }
+
+      if (collectedComments.length > 0) {
+        const commentIds = collectedComments.map((c) => c.commentId);
+        const existingMsgs = await this.messageRepo.find({
+          where: {
+            shopId: channel.shopId,
+            externalMessageId: In(commentIds),
+          },
+          select: ['externalMessageId'],
+        });
+        const existingIdSet = new Set(
+          existingMsgs.map((m) => m.externalMessageId).filter(Boolean) as string[],
+        );
+
+        for (const item of collectedComments) {
+          if (existingIdSet.has(item.commentId)) {
+            continue;
+          }
+          const isEchoComment = Boolean(
+            channel.externalPageId && item.commenterId === channel.externalPageId,
+          );
+          const normalizedEvt: NormalizedOmnichannelEvent = {
+            externalPageId: channel.externalPageId,
+            externalThreadId: `cmt_${item.postId}_${item.commenterId}`,
+            externalCustomerPsid: item.commenterId,
+            externalMessageId: item.commentId,
+            customerName: item.commenterName,
+            customerAvatarUrl: item.commenterAvatar,
+            messageText: item.messageText,
+            interactionType: 'COMMENT',
+            verb: 'add',
+            isEchoFromPage: isEchoComment,
+            eventSubtype: 'MESSAGE_OR_COMMENT',
+            sourcePostId: item.postId,
+            sourceAdId: null,
+            ctwaClickId: null,
+            externalCommentId: item.commentId,
+            parentCommentId: item.parentCommentId,
+            mediaAttachmentUrl: item.mediaAttachmentUrl,
+          };
+
+          const processed = await this.withConversationThreadLock(
+            channel.shopId,
+            channel.id,
+            normalizedEvt.externalThreadId,
+            () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedEvt),
+          );
+          if (processed.conversationId) {
+            newCommentsSynced += 1;
+          }
+        }
+      }
+    }
+
+    // Khi người bán bấm nút "Đồng bộ bình luận bài viết" trong môi trường Sandbox / Local Offline
+    // (không có kết nối mạng ra Graph API thật), tự động tạo 1 bình luận bài viết thường (Organic Post)
+    // để người bán kiểm thử đầy đủ luồng nhận & phản hồi bình luận.
+    if (isManualTrigger && !syncedFromLiveApi && newCommentsSynced === 0) {
+      const organicPostId = `${channel.externalPageId}_${String(Date.now()).slice(-6)}`;
+      const organicCommentId = `cmt_organic_${Date.now()}`;
+      const commenterId = `psid_organic_${String(Date.now()).slice(-5)}`;
+      const commenterName = `Khách bình luận bài viết ${channel.pageShortCode}`;
+      const fallbackEvt: NormalizedOmnichannelEvent = {
+        externalPageId: channel.externalPageId,
+        externalThreadId: `cmt_${organicPostId}_${commenterId}`,
+        externalCustomerPsid: commenterId,
+        externalMessageId: organicCommentId,
+        customerName: commenterName,
+        customerAvatarUrl: this.buildFallbackCustomerAvatarUrl(commenterName, commenterId),
+        messageText: `Shop ơi bài viết mới đăng (chưa chạy quảng cáo) mẫu này còn hàng không ạ? Tư vấn giúp mình nhé!`,
+        interactionType: 'COMMENT',
+        verb: 'add',
+        isEchoFromPage: false,
+        eventSubtype: 'MESSAGE_OR_COMMENT',
+        sourcePostId: organicPostId,
+        sourceAdId: null,
+        ctwaClickId: null,
+        externalCommentId: organicCommentId,
+        parentCommentId: null,
+        mediaAttachmentUrl: null,
+      };
+
+      const processed = await this.withConversationThreadLock(
+        channel.shopId,
+        channel.id,
+        fallbackEvt.externalThreadId,
+        () => this.processSingleNormalizedOmnichannelEvent(channel, fallbackEvt),
+      );
+      if (processed.conversationId) {
+        postsScanned = Math.max(postsScanned, 1);
+        newCommentsSynced += 1;
+      }
+    }
+
+    return {
+      channelId: channel.id,
+      pageName: channel.pageName,
+      pageShortCode: channel.pageShortCode,
+      postsScanned,
+      newCommentsSynced,
+      syncedFromLiveApi,
+      syncedAt,
     };
   }
 }

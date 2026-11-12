@@ -262,6 +262,7 @@ export class ChatService {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
+    let isTransactionCommitted = false;
 
     try {
       const participant = await this.ensureParticipant(dto.conversationId, senderId);
@@ -469,6 +470,7 @@ export class ChatService {
       });
 
       await queryRunner.commitTransaction();
+      isTransactionCommitted = true;
 
       if (
         conversation?.shopId &&
@@ -500,7 +502,12 @@ export class ChatService {
         }
       }
 
-      if (!isInternalNoteMsg && conversation?.channelIntegrationId && conversation.shopId) {
+      if (
+        !isInternalNoteMsg &&
+        !dto.metadata?.skipPlatformDispatch &&
+        conversation?.channelIntegrationId &&
+        conversation.shopId
+      ) {
         await this.dispatchOutboundConversationMessageToPlatform({
           conversation,
           savedMessage,
@@ -508,6 +515,10 @@ export class ChatService {
           senderId,
           commentReplyMode: dto.metadata?.commentReplyMode,
           autoHideCommentOnReply: Boolean(dto.metadata?.autoHideCommentOnReply),
+        }).catch((dispatchErr) => {
+          this.logger.warn(
+            `[sendMessage] Outbound platform dispatch warning: ${String(dispatchErr)}`,
+          );
         });
       }
 
@@ -689,10 +700,12 @@ export class ChatService {
         isDuplicate: false,
       };
     } catch (err) {
-      await queryRunner.rollbackTransaction();
+      if (!isTransactionCommitted) {
+        await queryRunner.rollbackTransaction().catch(() => undefined);
+      }
       throw err;
     } finally {
-      await queryRunner.release();
+      await queryRunner.release().catch(() => undefined);
     }
   }
 
@@ -994,13 +1007,27 @@ export class ChatService {
     });
   }
 
+  /**
+   * Tạo URL ảnh đại diện định danh theo tên khách hàng khi nền tảng ngoại vi (Meta PSID / Zalo OA)
+   * không trả về `profile_pic`, giúp khung hội thoại luôn hiển thị avatar khách hàng đồng nhất.
+   */
+  public buildCustomerFallbackAvatarUrl(name?: string | null): string {
+    const cleanName = (name || 'Khách hàng').trim();
+    return `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(cleanName)}&backgroundType=gradientLinear`;
+  }
+
   async editMessage(payload: { userId: string; dto: EditMessageDto }) {
     const { userId, dto } = payload;
     await this.ensureParticipant(dto.conversationId, userId);
 
-    const message = await this.msgRepository.findOne({
-      where: { id: dto.messageId, conversationId: dto.conversationId },
-    });
+    const [message, conversation] = await Promise.all([
+      this.msgRepository.findOne({
+        where: { id: dto.messageId, conversationId: dto.conversationId },
+      }),
+      this.convRepository.findOne({
+        where: { id: dto.conversationId },
+      }),
+    ]);
     if (!message) throw new NotFoundException('Message not found');
     if (message.senderId !== userId) {
       throw new ForbiddenException('Only the sender can edit this message');
@@ -1009,21 +1036,50 @@ export class ChatService {
       throw new BadRequestException('Cannot edit a recalled message');
     }
 
+    const cleanContent = dto.content.trim();
+    const previousPlaintext = this.messageCryptoService.decryptForConversation(
+      message.content,
+      dto.conversationId,
+    );
     const encrypted = this.messageCryptoService.encryptForConversation(
-      dto.content.trim(),
+      cleanContent,
       dto.conversationId,
     );
 
+    const nowIso = new Date().toISOString();
     message.content = encrypted.ciphertext;
     message.metadata = {
       ...(message.metadata || {}),
       isEncrypted: true,
       encryptionAlg: 'AES-256-GCM',
       isEdited: true,
-      editedAt: new Date().toISOString(),
+      editedAt: nowIso,
+      originalTextBeforePlatformEdit:
+        message.metadata?.originalTextBeforePlatformEdit || previousPlaintext,
     };
 
     await this.msgRepository.save(message);
+
+    // Lý do nghiệp vụ: Khi người bán sửa tin nhắn/bình luận đã gửi cho khách hàng trên hội thoại đa kênh
+    // (Facebook Messenger, Bình luận bài viết, Instagram, Zalo OA), hệ thống phải tự động đẩy nội dung cập nhật
+    // ra nền tảng ngoại vi để khách hàng thực sự nhận được nội dung đã sửa.
+    const isInternalNoteMsg = Boolean(
+      message.isInternalNote ||
+        message.metadata?.isInternalNote ||
+        message.direction === MessageDirectionEnum.INTERNAL_NOTE,
+    );
+    if (
+      !isInternalNoteMsg &&
+      conversation?.channelIntegrationId &&
+      conversation.shopId &&
+      message.direction !== MessageDirectionEnum.INBOUND
+    ) {
+      await this.dispatchOutboundEditedMessageToPlatform({
+        conversation,
+        message,
+        cleanContent,
+      });
+    }
 
     const latestMsg = await this.msgRepository.findOne({
       where: { conversationId: dto.conversationId },
@@ -1050,13 +1106,39 @@ export class ChatService {
     const { userId, dto } = payload;
     const participant = await this.ensureParticipant(dto.conversationId, userId);
 
-    const message = await this.msgRepository.findOne({
-      where: { id: dto.messageId, conversationId: dto.conversationId },
-    });
+    const [message, conversation] = await Promise.all([
+      this.msgRepository.findOne({
+        where: { id: dto.messageId, conversationId: dto.conversationId },
+      }),
+      this.convRepository.findOne({
+        where: { id: dto.conversationId },
+      }),
+    ]);
     if (!message) throw new NotFoundException('Message not found');
 
     if (message.senderId !== userId && !participant.isAdmin) {
       throw new ForbiddenException('You do not have permission to recall this message');
+    }
+
+    // Nếu thu hồi một bình luận phản hồi đã gửi ra bài viết Facebook/Instagram, tự động xóa luôn bình luận đó trên nền tảng
+    const externalTargetToDelete =
+      message.metadata?.platformEditedExternalId ||
+      message.metadata?.platformExternalId ||
+      message.externalMessageId;
+    if (
+      conversation?.channelIntegrationId &&
+      conversation.shopId &&
+      (conversation.interactionType === 'COMMENT' ||
+        conversation.interactionType === 'LIVESTREAM') &&
+      externalTargetToDelete &&
+      !externalTargetToDelete.startsWith('ext_')
+    ) {
+      await this.executePlatformHttpCall({
+        channelIntegrationId: conversation.channelIntegrationId,
+        shopId: conversation.shopId,
+        actionType: 'DELETE_COMMENT',
+        targetExternalId: externalTargetToDelete,
+      }).catch(() => null);
     }
 
     const recalledPlaceholder = this.messageCryptoService.encryptForConversation(
@@ -1068,9 +1150,11 @@ export class ChatService {
     message.status = MessageStatusEnum.REMOVED;
     message.isPinned = false;
     message.metadata = {
+      ...(message.metadata || {}),
       isEncrypted: true,
       encryptionAlg: 'AES-256-GCM',
       isPinned: false,
+      attachments: [],
     };
 
     await this.msgRepository.save(message);
@@ -1504,11 +1588,33 @@ export class ChatService {
       fullMessage.conversationId,
     );
 
-    const sender = fullMessage.sender as any;
+    let sender = fullMessage.sender as any;
     if (sender) {
       const avatarUrl = sender.avatarMedia?.file?.url || null;
       delete sender.avatarMedia;
       sender.avatar = avatarUrl;
+    } else {
+      const conv = await this.convRepository.findOne({
+        where: { id: fullMessage.conversationId },
+        select: ['id', 'name', 'avatar'],
+      });
+      const fallbackExtName =
+        (fullMessage.metadata as any)?.externalCustomerName ||
+        (fullMessage.metadata as any)?.marketplaceOrder?.buyerUsername ||
+        conv?.name ||
+        'Khách hàng';
+      const fallbackExtAvatar =
+        (fullMessage.metadata as any)?.externalCustomerAvatar ||
+        conv?.avatar ||
+        this.buildCustomerFallbackAvatarUrl(fallbackExtName);
+      sender = {
+        id: fullMessage.senderId,
+        name: fallbackExtName,
+        originalName: fallbackExtName,
+        email: '',
+        nickname: null,
+        avatar: fallbackExtAvatar,
+      };
     }
 
     return {
@@ -1531,11 +1637,17 @@ export class ChatService {
   }) {
     const { conversationId, userId, pagination } = payload;
 
-    const myPart = await this.ensureParticipant(conversationId, userId);
-    const allParts = await this.partRepository.find({
-      where: { conversationId },
-      select: ['userId', 'nickname', 'readReceiptsEnabled', 'isRestricted'],
-    });
+    const [myPart, convInfo, allParts] = await Promise.all([
+      this.ensureParticipant(conversationId, userId),
+      this.convRepository.findOne({
+        where: { id: conversationId },
+        select: ['id', 'name', 'avatar', 'channelType', 'interactionType'],
+      }),
+      this.partRepository.find({
+        where: { conversationId },
+        select: ['userId', 'nickname', 'readReceiptsEnabled', 'isRestricted'],
+      }),
+    ]);
     const nicknameMap = new Map<string, string>();
     const privacyHideReadSet = new Set<string>();
     allParts.forEach((p) => {
@@ -1597,7 +1709,12 @@ export class ChatService {
       const fallbackExtName =
         (msg.metadata as any)?.externalCustomerName ||
         (msg.metadata as any)?.marketplaceOrder?.buyerUsername ||
+        convInfo?.name ||
         'Khách hàng';
+      const fallbackExtAvatar =
+        (msg.metadata as any)?.externalCustomerAvatar ||
+        convInfo?.avatar ||
+        this.buildCustomerFallbackAvatarUrl(fallbackExtName);
       const cleanSender = sender?.id
         ? {
             ...sender,
@@ -1610,8 +1727,9 @@ export class ChatService {
             id: msg.senderId,
             name: fallbackExtName,
             originalName: fallbackExtName,
+            email: '',
             nickname: null,
-            avatar: null,
+            avatar: fallbackExtAvatar,
           };
 
       const computedStatus = this.computeStatus(
@@ -1925,7 +2043,9 @@ export class ChatService {
     const finalData = result.data.map((conv: any) => {
       const myParticipant = conv.participants?.[0];
       let isOnline = false;
-      let avatar = conv.avatar || null;
+      let avatar =
+        conv.avatar ||
+        (conv.shopId && conv.name ? this.buildCustomerFallbackAvatarUrl(conv.name) : null);
       let originalName: string | undefined;
       let partnerNickname: string | null = null;
       let partnerEmail: string | null = null;
@@ -2819,10 +2939,16 @@ export class ChatService {
       }
     }
 
+    const resolvedAvatar =
+      conv.avatar ||
+      partnerMember?.avatar ||
+      (conv.shopId && resolvedName ? this.buildCustomerFallbackAvatarUrl(resolvedName) : null);
+
     return {
       conversationId,
       type: conv.type,
       name: resolvedName,
+      avatar: resolvedAvatar,
       disappearingTtl: conv.disappearingTtl,
       shopId: conv.shopId,
       channelType: conv.channelType,
@@ -3098,8 +3224,119 @@ export class ChatService {
   }
 
   /**
+   * Phân giải chính xác mã định danh người nhận ngoại vi (`customerPsid` và `latestCommentId`) cho một cuộc hội thoại:
+   * - Ưu tiên lấy `externalCustomerPsid` đã lưu trong `metadata` của tin nhắn `INBOUND` gần nhất.
+   * - Nếu `externalThreadId` có dạng `inbox_{psid}` hoặc `zalo_{userId}`, bóc tách phần định danh sau tiền tố.
+   * - Nếu `externalThreadId` có dạng `cmt_{postId}_{commenterId}`, bóc tách chính xác phần `commenterId` ở cuối (loại bỏ `postId`).
+   * - Nếu cuộc hội thoại `INBOX` được tạo liên kết từ `sendPrivateReplyFromComment` mà chưa có `externalThreadId`,
+   *   tự động tra cứu sang cuộc hội thoại gốc cùng khách hàng trong cùng kênh để lấy đúng `psid` và `externalCommentId`.
+   */
+  private async resolveCustomerRecipientForConversation(conversation: ConversationEntity): Promise<{
+    recipientPsid: string | null;
+    latestCommentId: string | null;
+  }> {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    const extractPsidFromThreadId = (threadId?: string | null): string | null => {
+      if (!threadId) return null;
+      const trimmed = threadId.trim();
+      if (!trimmed || uuidRegex.test(trimmed)) return null;
+      if (trimmed.startsWith('inbox_') || trimmed.startsWith('zalo_')) {
+        const stripped = trimmed.replace(/^(inbox_|zalo_)/, '').trim();
+        return stripped && !uuidRegex.test(stripped) ? stripped : null;
+      }
+      if (trimmed.startsWith('cmt_')) {
+        const parts = trimmed.split('_').filter(Boolean);
+        const lastPart = parts.length >= 3 ? parts[parts.length - 1] : null;
+        return lastPart && !uuidRegex.test(lastPart) ? lastPart : null;
+      }
+      if (!trimmed.startsWith('thread_') && !trimmed.startsWith('priv_')) {
+        return trimmed;
+      }
+      return null;
+    };
+
+    const latestInbound = await this.msgRepository.findOne({
+      where: {
+        conversationId: conversation.id,
+        direction: MessageDirectionEnum.INBOUND,
+      },
+      order: { createdAt: 'DESC' },
+    });
+
+    const metaPsid = (latestInbound?.metadata as any)?.externalCustomerPsid
+      ? String((latestInbound?.metadata as any).externalCustomerPsid).trim()
+      : null;
+
+    let latestCommentId =
+      latestInbound?.metadata?.externalCommentId ||
+      (conversation.interactionType === 'COMMENT' || conversation.interactionType === 'LIVESTREAM'
+        ? latestInbound?.externalMessageId || null
+        : null);
+
+    let recipientPsid = metaPsid || extractPsidFromThreadId(conversation.externalThreadId);
+
+    // Nếu hội thoại hiện tại chưa có recipientPsid (VD: hội thoại INBOX tạo từ Private Reply của bình luận),
+    // tra cứu sang các hội thoại cùng khách hàng trên cùng kênh tích hợp
+    if ((!recipientPsid || !latestCommentId) && conversation.shopId && conversation.name) {
+      const siblingConvs = await this.convRepository.find({
+        where: {
+          shopId: conversation.shopId,
+          ...(conversation.channelIntegrationId
+            ? { channelIntegrationId: conversation.channelIntegrationId }
+            : {}),
+          name: conversation.name,
+        },
+        order: { lastMessageAt: 'DESC' },
+        take: 5,
+      });
+
+      for (const sib of siblingConvs) {
+        if (!recipientPsid) {
+          recipientPsid = extractPsidFromThreadId(sib.externalThreadId);
+        }
+        const sibInbound = await this.msgRepository.findOne({
+          where: {
+            conversationId: sib.id,
+            direction: MessageDirectionEnum.INBOUND,
+          },
+          order: { createdAt: 'DESC' },
+        });
+        if (!recipientPsid && (sibInbound?.metadata as any)?.externalCustomerPsid) {
+          recipientPsid = String((sibInbound?.metadata as any).externalCustomerPsid).trim();
+        }
+        if (!latestCommentId && sibInbound?.metadata?.externalCommentId) {
+          latestCommentId = String(sibInbound.metadata.externalCommentId).trim();
+        }
+        if (recipientPsid && latestCommentId) break;
+      }
+
+      if (recipientPsid && !conversation.externalThreadId) {
+        const nextThreadId =
+          conversation.channelType === ChannelTypeEnum.ZALO_OA
+            ? `zalo_${recipientPsid}`
+            : `inbox_${recipientPsid}`;
+        conversation.externalThreadId = nextThreadId;
+        await this.convRepository
+          .update(conversation.id, { externalThreadId: nextThreadId })
+          .catch(() => undefined);
+      }
+    }
+
+    return {
+      recipientPsid,
+      latestCommentId: latestCommentId || null,
+    };
+  }
+
+  /**
    * Thực thi gọi API thực tế ra nền tảng ngoài (Facebook Graph API, Instagram, Zalo OA, TikTok Shop, Shopee)
-   * kèm cơ chế Non-Blocking Sandbox Fallback khi chạy ở môi trường Local không mở mạng ra Internet.
+   * với cơ chế:
+   * 1. Mỗi lần thử dùng một `AbortController` độc lập (timeout 6000ms) để không bị hủy dây chuyền khi thương lượng phiên bản API.
+   * 2. Tự động đính kèm `access_token` trên cả Query String lẫn Body JSON.
+   * 3. Tự động thử lại KHÔNG kèm `appsecret_proof` (`attemptRequest(false)`) khi người dùng sử dụng Token từ Graph API Explorer
+   *    hoặc khi `appSecret` trong cấu hình khác với ứng dụng phát hành Token (khắc phục lỗi OAuthException #100 Invalid appsecret_proof).
+   * 4. Tự động fallback sang `/me/messages`, `HUMAN_AGENT` Message Tag (7 ngày) hoặc `comment_id` Private Reply khi cần.
    */
   private async executePlatformHttpCall(params: {
     channelIntegrationId?: string | null;
@@ -3107,6 +3344,7 @@ export class ChatService {
     actionType:
       | 'SEND_INBOX_MESSAGE'
       | 'REPLY_PUBLIC_COMMENT'
+      | 'EDIT_COMMENT'
       | 'SEND_PRIVATE_REPLY'
       | 'HIDE_UNHIDE_COMMENT'
       | 'LIKE_UNLIKE_COMMENT'
@@ -3135,11 +3373,11 @@ export class ChatService {
       };
     }
 
-    const rawToken = this.messageCryptoService.decryptForConversation(
-      channel.accessTokenEncrypted,
-      channel.shopId,
-    );
-    if (!rawToken || rawToken.startsWith('oauth2_tok_')) {
+    const rawToken = this.messageCryptoService
+      .decryptForConversation(channel.accessTokenEncrypted, channel.shopId)
+      .trim()
+      .replace(/^Bearer\s+/i, '');
+    if (!rawToken || rawToken.startsWith('oauth2_tok_') || rawToken.startsWith('sandbox_')) {
       return {
         deliveryStatus: 'SIMULATED_SANDBOX',
         externalId: fallbackExternalId,
@@ -3147,9 +3385,6 @@ export class ChatService {
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
       if (
         channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
         channel.channelType === ChannelTypeEnum.INSTAGRAM
@@ -3158,10 +3393,14 @@ export class ChatService {
           channel.apiVersion ||
           channel.platformConfigJson?.apiVersion ||
           envs.omnichannelSaas?.metaGraphApiVersion ||
-          'v27.1'
-        ).trim();
-        const preferredVer = rawVer.startsWith('v') ? rawVer : `v${rawVer}`;
-        const candidateVersions = Array.from(new Set([preferredVer, 'v22.0', 'v21.0', 'v20.0']));
+          'v22.0'
+        )
+          .trim()
+          .replace(/^v\.?/i, '');
+        const preferredVer = /^\d+(\.\d+)?$/.test(rawVer) ? `v${rawVer}` : 'v22.0';
+        const candidateVersions = Array.from(
+          new Set([preferredVer, 'v22.0', 'v21.0', 'v20.0', 'v19.0']),
+        );
 
         let appSecret = (envs.omnichannelSaas?.metaAppSecret || '').trim();
         if (channel.appSecretEncrypted) {
@@ -3170,121 +3409,410 @@ export class ChatService {
             channel.shopId,
           );
           if (decryptedSecret && !decryptedSecret.startsWith('enc_')) {
-            appSecret = decryptedSecret;
+            appSecret = decryptedSecret.trim();
           }
         }
         const appSecretProof = appSecret
           ? createHmac('sha256', appSecret).update(rawToken).digest('hex')
           : undefined;
 
-        for (const ver of candidateVersions) {
-          let url = '';
-          let method = 'POST';
-          const baseAuthPayload: Record<string, unknown> = {
-            access_token: rawToken,
-            ...(appSecretProof ? { appsecret_proof: appSecretProof } : {}),
-          };
-          let body: Record<string, unknown> = { ...baseAuthPayload };
+        const cleanTargetId = params.targetExternalId.replace(/^(inbox_|zalo_)/, '').trim();
 
-          if (params.actionType === 'SEND_INBOX_MESSAGE') {
-            const cleanPsid = params.targetExternalId.replace(/^(inbox_|cmt_)/, '');
-            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(channel.externalPageId)}/messages`;
-            const attachmentUrl = params.bodyPayload?.attachmentUrl as string | undefined;
-            const attachmentType =
-              (params.bodyPayload?.attachmentType as string | undefined) || 'image';
-            body = {
-              recipient: { id: cleanPsid },
-              messaging_type: 'RESPONSE',
-              message: attachmentUrl
-                ? {
-                    attachment: {
-                      type: attachmentType,
-                      payload: { url: attachmentUrl, is_reusable: true },
-                    },
-                  }
-                : { text: String(params.bodyPayload?.text || '') },
-              ...baseAuthPayload,
-            };
-          } else if (params.actionType === 'REPLY_PUBLIC_COMMENT') {
-            url =
-              channel.channelType === ChannelTypeEnum.INSTAGRAM
-                ? `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/replies`
-                : `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/comments`;
-            body = {
-              message: String(params.bodyPayload?.text || ''),
-              ...(params.bodyPayload?.attachmentUrl
-                ? { attachment_url: String(params.bodyPayload.attachmentUrl) }
-                : {}),
-              ...baseAuthPayload,
-            };
-          } else if (params.actionType === 'SEND_PRIVATE_REPLY') {
-            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(channel.externalPageId)}/messages`;
-            body = {
-              recipient: { comment_id: params.targetExternalId },
-              message: { text: String(params.bodyPayload?.text || '') },
-              ...baseAuthPayload,
-            };
-          } else if (params.actionType === 'HIDE_UNHIDE_COMMENT') {
-            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}`;
-            body =
-              channel.channelType === ChannelTypeEnum.INSTAGRAM
-                ? { hide: Boolean(params.bodyPayload?.isHidden), ...baseAuthPayload }
-                : { is_hidden: Boolean(params.bodyPayload?.isHidden), ...baseAuthPayload };
-          } else if (params.actionType === 'LIKE_UNLIKE_COMMENT') {
-            const queryStr = new URLSearchParams(
-              baseAuthPayload as Record<string, string>,
-            ).toString();
-            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}/likes?${queryStr}`;
-            method = params.bodyPayload?.isLiked ? 'POST' : 'DELETE';
-          } else if (params.actionType === 'DELETE_COMMENT') {
-            const queryStr = new URLSearchParams(
-              baseAuthPayload as Record<string, string>,
-            ).toString();
-            url = `https://graph.facebook.com/${ver}/${encodeURIComponent(params.targetExternalId)}?${queryStr}`;
-            method = 'DELETE';
+        const executeSingleGraphRequest = async (reqConfig: {
+          ver: string;
+          endpointPath: string;
+          method: 'POST' | 'DELETE';
+          bodyObj?: Record<string, unknown>;
+          includeProof: boolean;
+        }): Promise<{
+          ok: boolean;
+          externalId?: string;
+          errorCode?: number;
+          errorSubcode?: number;
+          errorMessage?: string;
+        }> => {
+          const queryParams = new URLSearchParams({ access_token: rawToken });
+          if (reqConfig.includeProof && appSecretProof) {
+            queryParams.set('appsecret_proof', appSecretProof);
           }
 
-          if (url) {
-            const res = await fetch(url, {
-              method,
-              headers: { 'Content-Type': 'application/json' },
-              body: method === 'DELETE' ? undefined : JSON.stringify(body),
-              signal: controller.signal,
-            }).catch(() => null);
+          const cleanPath = reqConfig.endpointPath.replace(/^\/+/, '');
+          const url = `https://graph.facebook.com/${reqConfig.ver}/${cleanPath}?${queryParams.toString()}`;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-            if (!res) break;
+          try {
+            const payloadWithAuth =
+              reqConfig.method === 'DELETE' || !reqConfig.bodyObj
+                ? undefined
+                : {
+                    ...reqConfig.bodyObj,
+                    access_token: rawToken,
+                    ...(reqConfig.includeProof && appSecretProof
+                      ? { appsecret_proof: appSecretProof }
+                      : {}),
+                  };
+
+            const res = await fetch(url, {
+              method: reqConfig.method,
+              headers:
+                reqConfig.method === 'DELETE' ? undefined : { 'Content-Type': 'application/json' },
+              body: payloadWithAuth ? JSON.stringify(payloadWithAuth) : undefined,
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
 
             const json = (await res.json().catch(() => ({}))) as {
               id?: string;
               message_id?: string;
-              error?: { message?: string; code?: number };
+              success?: boolean;
+              error?: { message?: string; code?: number; error_subcode?: number };
             };
 
             if (res.ok && !json.error) {
-              clearTimeout(timeoutId);
               return {
-                deliveryStatus: 'DISPATCHED',
+                ok: true,
                 externalId: String(json.message_id || json.id || fallbackExternalId),
               };
             }
 
-            const errMsg = String(json?.error?.message || '');
-            const isVersionUnsupported =
-              json?.error?.code === 2635 ||
-              /unknown path components|unsupported get request|unsupported post request|version/i.test(
-                errMsg,
+            return {
+              ok: false,
+              errorCode: json?.error?.code,
+              errorSubcode: json?.error?.error_subcode,
+              errorMessage: String(json?.error?.message || `HTTP_${res.status}`),
+            };
+          } catch (err) {
+            clearTimeout(timeoutId);
+            return {
+              ok: false,
+              errorCode: 0,
+              errorMessage: err instanceof Error ? err.message : String(err),
+            };
+          }
+        };
+
+        const runWithProofFallback = async (reqConfig: {
+          ver: string;
+          endpointPath: string;
+          method: 'POST' | 'DELETE';
+          bodyObj?: Record<string, unknown>;
+        }) => {
+          const firstAttempt = await executeSingleGraphRequest({
+            ...reqConfig,
+            includeProof: Boolean(appSecretProof),
+          });
+          if (firstAttempt.ok) {
+            return firstAttempt;
+          }
+
+          // Nếu Token được lấy từ Graph API Explorer hoặc App Secret không khớp với Token,
+          // tự động thử lại ngay lập tức không đính kèm appsecret_proof
+          if (
+            appSecretProof &&
+            firstAttempt.errorMessage &&
+            (firstAttempt.errorMessage.toLowerCase().includes('appsecret_proof') ||
+              firstAttempt.errorCode === 100)
+          ) {
+            const retryNoProof = await executeSingleGraphRequest({
+              ...reqConfig,
+              includeProof: false,
+            });
+            if (retryNoProof.ok) {
+              return retryNoProof;
+            }
+            return retryNoProof;
+          }
+
+          return firstAttempt;
+        };
+
+        for (const ver of candidateVersions) {
+          if (params.actionType === 'SEND_INBOX_MESSAGE') {
+            const attachmentUrl = params.bodyPayload?.attachmentUrl as string | undefined;
+            const attachmentType =
+              (params.bodyPayload?.attachmentType as string | undefined) || 'image';
+            const textContent = String(params.bodyPayload?.text || '').trim();
+            const fallbackCommentId = params.bodyPayload?.fallbackCommentId as string | undefined;
+
+            const messagePayload = attachmentUrl
+              ? {
+                  attachment: {
+                    type: attachmentType,
+                    payload: { url: attachmentUrl, is_reusable: true },
+                  },
+                }
+              : { text: textContent };
+
+            // 1. Gửi chuẩn RESPONSE tới /{externalPageId}/messages
+            const primaryRes = await runWithProofFallback({
+              ver,
+              endpointPath: `${encodeURIComponent(channel.externalPageId)}/messages`,
+              method: 'POST',
+              bodyObj: {
+                recipient: { id: cleanTargetId },
+                messaging_type: 'RESPONSE',
+                message: messagePayload,
+              },
+            });
+            if (primaryRes.ok && primaryRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: primaryRes.externalId,
+              };
+            }
+
+            // 2. Nếu lỗi ngoài cửa sổ 24h (code 10 / subcode 2018278), tự động dùng HUMAN_AGENT tag (7 ngày)
+            const errMsgLower = (primaryRes.errorMessage || '').toLowerCase();
+            if (
+              primaryRes.errorCode === 10 ||
+              primaryRes.errorSubcode === 2018278 ||
+              errMsgLower.includes('outside of allowed window') ||
+              errMsgLower.includes('24 hour')
+            ) {
+              const humanAgentRes = await runWithProofFallback({
+                ver,
+                endpointPath: `${encodeURIComponent(channel.externalPageId)}/messages`,
+                method: 'POST',
+                bodyObj: {
+                  recipient: { id: cleanTargetId },
+                  messaging_type: 'MESSAGE_TAG',
+                  tag: 'HUMAN_AGENT',
+                  message: messagePayload,
+                },
+              });
+              if (humanAgentRes.ok && humanAgentRes.externalId) {
+                return {
+                  deliveryStatus: 'DISPATCHED',
+                  externalId: humanAgentRes.externalId,
+                };
+              }
+            }
+
+            // 3. Fallback gọi qua /me/messages nếu externalPageId khác biệt
+            const meRes = await runWithProofFallback({
+              ver,
+              endpointPath: 'me/messages',
+              method: 'POST',
+              bodyObj: {
+                recipient: { id: cleanTargetId },
+                messaging_type: 'RESPONSE',
+                message: messagePayload,
+              },
+            });
+            if (meRes.ok && meRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: meRes.externalId,
+              };
+            }
+
+            // 4. Nếu khách hàng đến từ bình luận bài viết và chưa nhắn tin vào hộp thư Page lần nào
+            // (khiến PSID chưa mở luồng Messenger trực tiếp), tự động gửi qua Private Reply `recipient: { comment_id }`
+            if (fallbackCommentId && textContent) {
+              const privateFallbackRes = await runWithProofFallback({
+                ver,
+                endpointPath: `${encodeURIComponent(channel.externalPageId)}/messages`,
+                method: 'POST',
+                bodyObj: {
+                  recipient: { comment_id: fallbackCommentId },
+                  message: { text: textContent },
+                },
+              });
+              if (privateFallbackRes.ok && privateFallbackRes.externalId) {
+                return {
+                  deliveryStatus: 'DISPATCHED',
+                  externalId: privateFallbackRes.externalId,
+                };
+              }
+            }
+
+            const isVersionErr =
+              primaryRes.errorCode === 12 ||
+              primaryRes.errorCode === 2635 ||
+              /unknown path components|unsupported post request|invalid version|version/i.test(
+                primaryRes.errorMessage || '',
               );
-            if (!isVersionUnsupported) {
+            if (!isVersionErr) {
               break;
             }
+          } else if (params.actionType === 'REPLY_PUBLIC_COMMENT') {
+            const endpointPath =
+              channel.channelType === ChannelTypeEnum.INSTAGRAM
+                ? `${encodeURIComponent(params.targetExternalId)}/replies`
+                : `${encodeURIComponent(params.targetExternalId)}/comments`;
+            const replyRes = await runWithProofFallback({
+              ver,
+              endpointPath,
+              method: 'POST',
+              bodyObj: {
+                message: String(params.bodyPayload?.text || ''),
+                ...(params.bodyPayload?.attachmentUrl
+                  ? { attachment_url: String(params.bodyPayload.attachmentUrl) }
+                  : {}),
+              },
+            });
+            if (replyRes.ok && replyRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: replyRes.externalId,
+              };
+            }
+
+            const isVersionErr =
+              replyRes.errorCode === 12 ||
+              replyRes.errorCode === 2635 ||
+              /unknown path components|unsupported post request|invalid version|version/i.test(
+                replyRes.errorMessage || '',
+              );
+            if (!isVersionErr) {
+              break;
+            }
+          } else if (params.actionType === 'EDIT_COMMENT') {
+            const editRes = await runWithProofFallback({
+              ver,
+              endpointPath: encodeURIComponent(params.targetExternalId),
+              method: 'POST',
+              bodyObj: {
+                message: String(params.bodyPayload?.text || ''),
+              },
+            });
+            if (editRes.ok && editRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: editRes.externalId,
+              };
+            }
+
+            // Nếu nền tảng không cho phép sửa trực tiếp comment, tự động đăng bình luận phản hồi đính chính dưới bình luận gốc
+            const fallbackParentCommentId = params.bodyPayload?.fallbackParentCommentId as
+              | string
+              | undefined;
+            if (fallbackParentCommentId) {
+              const fallbackReplyPath =
+                channel.channelType === ChannelTypeEnum.INSTAGRAM
+                  ? `${encodeURIComponent(fallbackParentCommentId)}/replies`
+                  : `${encodeURIComponent(fallbackParentCommentId)}/comments`;
+              const fallbackReplyRes = await runWithProofFallback({
+                ver,
+                endpointPath: fallbackReplyPath,
+                method: 'POST',
+                bodyObj: {
+                  message: String(params.bodyPayload?.text || ''),
+                },
+              });
+              if (fallbackReplyRes.ok && fallbackReplyRes.externalId) {
+                return {
+                  deliveryStatus: 'DISPATCHED',
+                  externalId: fallbackReplyRes.externalId,
+                };
+              }
+            }
+
+            const isVersionErr =
+              editRes.errorCode === 12 ||
+              editRes.errorCode === 2635 ||
+              /unknown path components|unsupported post request|invalid version|version/i.test(
+                editRes.errorMessage || '',
+              );
+            if (!isVersionErr) {
+              break;
+            }
+          } else if (params.actionType === 'SEND_PRIVATE_REPLY') {
+            const privRes = await runWithProofFallback({
+              ver,
+              endpointPath: `${encodeURIComponent(channel.externalPageId)}/messages`,
+              method: 'POST',
+              bodyObj: {
+                recipient: { comment_id: params.targetExternalId },
+                message: { text: String(params.bodyPayload?.text || '') },
+              },
+            });
+            if (privRes.ok && privRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: privRes.externalId,
+              };
+            }
+
+            const privMeRes = await runWithProofFallback({
+              ver,
+              endpointPath: 'me/messages',
+              method: 'POST',
+              bodyObj: {
+                recipient: { comment_id: params.targetExternalId },
+                message: { text: String(params.bodyPayload?.text || '') },
+              },
+            });
+            if (privMeRes.ok && privMeRes.externalId) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: privMeRes.externalId,
+              };
+            }
+
+            const isVersionErr =
+              privRes.errorCode === 12 ||
+              privRes.errorCode === 2635 ||
+              /unknown path components|unsupported post request|invalid version|version/i.test(
+                privRes.errorMessage || '',
+              );
+            if (!isVersionErr) {
+              break;
+            }
+          } else if (params.actionType === 'HIDE_UNHIDE_COMMENT') {
+            const hideRes = await runWithProofFallback({
+              ver,
+              endpointPath: encodeURIComponent(params.targetExternalId),
+              method: 'POST',
+              bodyObj:
+                channel.channelType === ChannelTypeEnum.INSTAGRAM
+                  ? { hide: Boolean(params.bodyPayload?.isHidden) }
+                  : { is_hidden: Boolean(params.bodyPayload?.isHidden) },
+            });
+            if (hideRes.ok) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: hideRes.externalId || params.targetExternalId,
+              };
+            }
+            break;
+          } else if (params.actionType === 'LIKE_UNLIKE_COMMENT') {
+            const likeRes = await runWithProofFallback({
+              ver,
+              endpointPath: `${encodeURIComponent(params.targetExternalId)}/likes`,
+              method: params.bodyPayload?.isLiked ? 'POST' : 'DELETE',
+              bodyObj: {},
+            });
+            if (likeRes.ok) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: likeRes.externalId || params.targetExternalId,
+              };
+            }
+            break;
+          } else if (params.actionType === 'DELETE_COMMENT') {
+            const delRes = await runWithProofFallback({
+              ver,
+              endpointPath: encodeURIComponent(params.targetExternalId),
+              method: 'DELETE',
+            });
+            if (delRes.ok) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: delRes.externalId || params.targetExternalId,
+              };
+            }
+            break;
           }
         }
-        clearTimeout(timeoutId);
       } else if (
         channel.channelType === ChannelTypeEnum.ZALO_OA &&
         params.actionType === 'SEND_INBOX_MESSAGE'
       ) {
-        const cleanZaloUserId = params.targetExternalId.replace(/^zalo_/, '');
+        const cleanZaloUserId = params.targetExternalId.replace(/^zalo_/, '').trim();
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         const res = await fetch('https://openapi.zalo.me/v3.0/oa/message/cs', {
           method: 'POST',
           headers: {
@@ -3309,7 +3837,6 @@ export class ChatService {
           };
         }
       }
-      clearTimeout(timeoutId);
     } catch {
       // Bảo toàn luồng hoạt động khi môi trường không kết nối Internet
     }
@@ -3336,7 +3863,10 @@ export class ChatService {
     const isCommentConv =
       conversation.interactionType === 'COMMENT' || conversation.interactionType === 'LIVESTREAM';
 
-    let targetExternalId = conversation.externalThreadId || conversation.id;
+    const { recipientPsid, latestCommentId } =
+      await this.resolveCustomerRecipientForConversation(conversation);
+
+    let targetExternalId = recipientPsid || conversation.externalThreadId || conversation.id;
     let latestInboundComment: MessageEntity | null = null;
 
     if (isCommentConv) {
@@ -3361,6 +3891,7 @@ export class ChatService {
         targetExternalId =
           latestInboundComment.metadata?.externalCommentId ||
           latestInboundComment.externalMessageId ||
+          latestCommentId ||
           targetExternalId;
       }
     }
@@ -3370,13 +3901,44 @@ export class ChatService {
       750,
     );
 
-    const dispatchRes = await this.executePlatformHttpCall({
-      channelIntegrationId: conversation.channelIntegrationId,
-      shopId: conversation.shopId,
-      actionType: isCommentConv ? 'REPLY_PUBLIC_COMMENT' : 'SEND_INBOX_MESSAGE',
-      targetExternalId,
-      bodyPayload: { text: cleanContent },
-    });
+    const firstAttachment = savedMessage.metadata?.attachments?.[0];
+    const attachmentUrl = firstAttachment?.url || undefined;
+    const attachmentType = firstAttachment?.mimeType?.startsWith('video/')
+      ? 'video'
+      : firstAttachment?.mimeType?.startsWith('audio/')
+        ? 'audio'
+        : firstAttachment?.mimeType?.startsWith('image/')
+          ? 'image'
+          : 'file';
+
+    const requestedReplyMode = params.commentReplyMode || 'REPLY_COMMENT_ONLY';
+    let dispatchRes: {
+      deliveryStatus: 'DISPATCHED' | 'SIMULATED_SANDBOX';
+      externalId: string;
+    };
+
+    if (isCommentConv && requestedReplyMode === 'SEND_PRIVATE_REPLY_ONLY') {
+      dispatchRes = await this.executePlatformHttpCall({
+        channelIntegrationId: conversation.channelIntegrationId,
+        shopId: conversation.shopId,
+        actionType: 'SEND_PRIVATE_REPLY',
+        targetExternalId,
+        bodyPayload: { text: cleanContent },
+      });
+    } else {
+      dispatchRes = await this.executePlatformHttpCall({
+        channelIntegrationId: conversation.channelIntegrationId,
+        shopId: conversation.shopId,
+        actionType: isCommentConv ? 'REPLY_PUBLIC_COMMENT' : 'SEND_INBOX_MESSAGE',
+        targetExternalId,
+        bodyPayload: {
+          text: cleanContent,
+          attachmentUrl,
+          attachmentType,
+          fallbackCommentId: latestCommentId || undefined,
+        },
+      });
+    }
 
     const updatedMeta: MessageMetadata = {
       ...(savedMessage.metadata || {}),
@@ -3429,6 +3991,109 @@ export class ChatService {
         );
       }
     }
+  }
+
+  /**
+   * Đồng bộ nội dung tin nhắn / bình luận mà người bán vừa chỉnh sửa (`editMessage`) ra nền tảng ngoại vi:
+   * - Với luồng Bình luận (`COMMENT` / `LIVESTREAM`): Gọi `POST /{apiVersion}/{comment_id}` (`EDIT_COMMENT`) để sửa trực tiếp
+   *   bình luận của Fanpage trên bài viết; nếu nền tảng từ chối sửa trực tiếp thì tự động đăng bình luận đính chính dưới bình luận khách.
+   * - Với luồng Tin nhắn (`INBOX` trên Messenger / Instagram DM / Zalo OA): Tự động gửi ngay bản tin cập nhật (`SEND_INBOX_MESSAGE`)
+   *   vào hộp thư của khách hàng để khách nhận được nội dung mới tức thì trên điện thoại.
+   */
+  private async dispatchOutboundEditedMessageToPlatform(params: {
+    conversation: ConversationEntity;
+    message: MessageEntity;
+    cleanContent: string;
+  }): Promise<void> {
+    const { conversation, message, cleanContent } = params;
+    const isCommentConv =
+      conversation.interactionType === 'COMMENT' || conversation.interactionType === 'LIVESTREAM';
+
+    await this.consumeMetaGraphActionQuota(
+      conversation.channelIntegrationId || conversation.shopId || conversation.id,
+      750,
+    );
+
+    const { recipientPsid, latestCommentId } =
+      await this.resolveCustomerRecipientForConversation(conversation);
+
+    let dispatchRes: {
+      deliveryStatus: 'DISPATCHED' | 'SIMULATED_SANDBOX';
+      externalId: string;
+    };
+
+    if (isCommentConv) {
+      const existingPlatformCommentId =
+        message.metadata?.platformEditedExternalId ||
+        message.metadata?.platformExternalId ||
+        message.externalMessageId;
+
+      if (existingPlatformCommentId && !existingPlatformCommentId.startsWith('ext_')) {
+        dispatchRes = await this.executePlatformHttpCall({
+          channelIntegrationId: conversation.channelIntegrationId,
+          shopId: conversation.shopId,
+          actionType: 'EDIT_COMMENT',
+          targetExternalId: existingPlatformCommentId,
+          bodyPayload: {
+            text: cleanContent,
+            fallbackParentCommentId: latestCommentId || undefined,
+          },
+        });
+      } else {
+        const parentTargetId = latestCommentId || conversation.externalThreadId || conversation.id;
+
+        dispatchRes = await this.executePlatformHttpCall({
+          channelIntegrationId: conversation.channelIntegrationId,
+          shopId: conversation.shopId,
+          actionType: 'REPLY_PUBLIC_COMMENT',
+          targetExternalId: parentTargetId,
+          bodyPayload: { text: cleanContent },
+        });
+      }
+    } else {
+      const targetExternalId = recipientPsid || conversation.externalThreadId || conversation.id;
+      dispatchRes = await this.executePlatformHttpCall({
+        channelIntegrationId: conversation.channelIntegrationId,
+        shopId: conversation.shopId,
+        actionType: 'SEND_INBOX_MESSAGE',
+        targetExternalId,
+        bodyPayload: {
+          text: cleanContent,
+          fallbackCommentId: latestCommentId || undefined,
+        },
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedMeta: MessageMetadata = {
+      ...(message.metadata || {}),
+      platformDeliveryStatus: dispatchRes.deliveryStatus,
+      platformEditedExternalId:
+        dispatchRes.externalId || message.metadata?.platformExternalId || null,
+      platformEditSyncedAt: nowIso,
+    };
+
+    await this.msgRepository.update(
+      { id: message.id, createdAt: message.createdAt },
+      {
+        metadata: updatedMeta as any,
+      },
+    );
+    message.metadata = updatedMeta;
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversation.id,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.OUTBOUND_DELIVERY_STATUS,
+      {
+        conversationId: conversation.id,
+        messageId: message.id,
+        platformDeliveryStatus: dispatchRes.deliveryStatus,
+        platformExternalId: updatedMeta.platformEditedExternalId,
+        platformEditSyncedAt: nowIso,
+        timestamp: nowIso,
+      },
+    );
   }
 
   /**
@@ -3670,6 +4335,11 @@ export class ChatService {
       });
     }
 
+    const { recipientPsid } = await this.resolveCustomerRecipientForConversation(parentConv);
+    const derivedInboxThreadId = recipientPsid
+      ? `inbox_${recipientPsid}`
+      : `inbox_${parentConv.id.slice(0, 12)}`;
+
     let inboxConv = await this.convRepository.findOne({
       where: {
         shopId: parentConv.shopId || undefined,
@@ -3688,6 +4358,7 @@ export class ChatService {
         shopId: parentConv.shopId,
         channelType: parentConv.channelType,
         channelIntegrationId: parentConv.channelIntegrationId,
+        externalThreadId: derivedInboxThreadId,
         interactionType: 'INBOX',
         customerId: parentConv.customerId,
         assignedAgentId: params.senderId,
@@ -3701,20 +4372,30 @@ export class ChatService {
       });
       inboxConv = await this.convRepository.save(inboxConv);
 
-      const agentPart = this.partRepository.create({
-        conversationId: inboxConv.id,
-        userId: params.senderId,
-        isAdmin: true,
-        joinedAt: now,
-        lastReadAt: now,
-      });
-      await this.partRepository.save(agentPart);
+      const parentMemberIds = await this.getConversationMemberIds(parentConv.id);
+      const uniquePartIds = Array.from(new Set([params.senderId, ...parentMemberIds]));
+      const partEntities = uniquePartIds.map((uid) =>
+        this.partRepository.create({
+          conversationId: inboxConv!.id,
+          userId: uid,
+          isAdmin: uid === params.senderId,
+          joinedAt: now,
+          lastReadAt: now,
+        }),
+      );
+      await this.partRepository.save(partEntities).catch(() => undefined);
+    } else if (!inboxConv.externalThreadId && derivedInboxThreadId) {
+      inboxConv.externalThreadId = derivedInboxThreadId;
+      await this.convRepository
+        .update(inboxConv.id, { externalThreadId: derivedInboxThreadId })
+        .catch(() => undefined);
     }
 
     const decryptedCommentPreview = this.messageCryptoService
       .decryptForConversation(commentMsg.content, params.conversationId)
       .slice(0, 160);
 
+    // Đánh dấu skipPlatformDispatch: true vì SEND_PRIVATE_REPLY đã được chuyển phát ở bước trên
     const inboxMsgRes = await this.sendMessage({
       senderId: params.senderId,
       dto: {
@@ -3722,9 +4403,11 @@ export class ChatService {
         content: params.content.trim(),
         type: MessageTypeEnum.TEXT,
         metadata: {
+          skipPlatformDispatch: true,
           commentReplyMode: 'SEND_PRIVATE_REPLY_ONLY',
           externalCommentId,
           externalPostId: parentConv.sourcePostId || undefined,
+          externalCustomerPsid: recipientPsid || undefined,
           platformDeliveryStatus: privateReplyDispatch.deliveryStatus,
           platformExternalId: privateReplyDispatch.externalId,
           replyPreview: {

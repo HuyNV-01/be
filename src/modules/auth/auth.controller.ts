@@ -44,17 +44,46 @@ export class AuthController {
     timestamp: true,
   });
 
+  /**
+   * Nhận diện chính xác yêu cầu đi qua Ngrok / Cloudflare Tunnel hoặc Cross-Origin HTTPS:
+   * - Kiểm tra `x-forwarded-proto`, `origin`, `referer`, `x-forwarded-host`, `host` và header `ngrok-skip-browser-warning`.
+   * - Ngay cả khi Ngrok Agent chạy chế độ `--host-header=rewrite` (viết lại `host` thành `localhost:3000`),
+   *   nếu `origin` là `https://...` hoặc chứa tên miền tunnel (`.ngrok-free.app`, `.ngrok.io`, `.trycloudflare.com`),
+   *   hệ thống vẫn nhận diện đúng ngữ cảnh Cross-Site HTTPS để cấp Cookie `SameSite=None; Secure; Partitioned`.
+   */
   private isHttpsTunnelOrCrossSiteRequest(req?: express.Request): boolean {
     if (!req) return false;
     const forwardedProto = (req.headers?.['x-forwarded-proto'] as string | undefined)
       ?.split(',')[0]
       ?.trim()
       ?.toLowerCase();
-    const isHttps = Boolean(req.secure || forwardedProto === 'https');
-    if (!isHttps) return false;
+    const origin = (req.headers?.origin as string | undefined)?.trim() || '';
+    const referer = (req.headers?.referer as string | undefined)?.trim() || '';
+    const host =
+      (req.headers?.['x-forwarded-host'] as string | undefined)?.split(',')[0]?.trim() ||
+      req.headers?.host ||
+      '';
+    const hasNgrokHeader = Boolean(req.headers?.['ngrok-skip-browser-warning']);
 
-    const origin = req.headers?.origin;
-    const host = (req.headers?.['x-forwarded-host'] as string | undefined) || req.headers?.host;
+    const tunnelPattern =
+      /\.(ngrok-free\.app|ngrok-free\.dev|ngrok\.io|ngrok\.app|trycloudflare\.com|loca\.lt)/i;
+    const isTunnelDomain =
+      tunnelPattern.test(origin) ||
+      tunnelPattern.test(referer) ||
+      tunnelPattern.test(host) ||
+      Boolean(envs.tunnel?.enabled && envs.tunnel?.publicWebhookBaseUrl);
+
+    const isHttps = Boolean(
+      req.secure ||
+        forwardedProto === 'https' ||
+        origin.toLowerCase().startsWith('https://') ||
+        referer.toLowerCase().startsWith('https://') ||
+        (hasNgrokHeader && isTunnelDomain),
+    );
+
+    if (!isHttps) return false;
+    if (isTunnelDomain) return true;
+
     if (origin && host) {
       try {
         const originHost = new URL(origin).host.toLowerCase();
@@ -69,7 +98,10 @@ export class AuthController {
     return false;
   }
 
-  private getClearRefreshCookieOptions(req?: express.Request): express.CookieOptions {
+  private getClearRefreshCookieOptions(
+    req?: express.Request,
+    cookiePath = '/',
+  ): express.CookieOptions {
     const isCrossSiteHttps = this.isHttpsTunnelOrCrossSiteRequest(req);
     const isSecure = isCrossSiteHttps || envs.isProduction;
 
@@ -77,14 +109,15 @@ export class AuthController {
       httpOnly: true,
       secure: isSecure,
       sameSite: isCrossSiteHttps ? 'none' : envs.isProduction ? 'strict' : 'lax',
-      path: '/api/auth/refresh',
+      path: cookiePath,
+      ...(isCrossSiteHttps ? ({ partitioned: true } as Record<string, unknown>) : {}),
     };
   }
 
   private getRefreshCookieOptions(req?: express.Request): express.CookieOptions {
     return {
-      ...this.getClearRefreshCookieOptions(req),
-      maxAge: parseExpiresInMs(envs.jwtRefreshExpiresIn),
+      ...this.getClearRefreshCookieOptions(req, '/'),
+      maxAge: parseExpiresInMs(envs.jwtRefreshExpiresIn, 30 * 24 * 60 * 60 * 1000),
     };
   }
 
@@ -214,7 +247,8 @@ export class AuthController {
   ) {
     const userId = req.user.id;
     await this.authService.logout({ userId });
-    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions(req));
+    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions(req, '/'));
+    res.clearCookie('refresh_token', this.getClearRefreshCookieOptions(req, '/api/auth/refresh'));
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.AUTH.LOGOUT_SUCCESS.message,
@@ -240,11 +274,14 @@ export class AuthController {
     },
   })
   @UseGuards(AuthRateLimitGuard, JwtRefreshGuard)
-  @AuthRateLimit({ keyPrefix: 'refresh', limit: 20, windowSeconds: 60 })
+  @AuthRateLimit({ keyPrefix: 'refresh', limit: 60, windowSeconds: 60 })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refreshTokens(
-    @Request() req: express.Request & { user: { id: string; refreshToken: string } },
+    @Request()
+    req: express.Request & {
+      user: { id: string; refreshToken: string; candidateRefreshTokens?: string[] };
+    },
     @Res({ passthrough: true }) res: express.Response,
   ) {
     const userId = req.user.id;
@@ -252,6 +289,7 @@ export class AuthController {
     const result = await this.authService.refreshTokens({
       userId,
       refreshToken,
+      candidateRefreshTokens: req.user.candidateRefreshTokens,
     });
     res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions(req));
     return {
@@ -383,7 +421,9 @@ export class AuthController {
     });
 
     res.cookie('refresh_token', result.refreshToken, this.getRefreshCookieOptions(req));
-    return res.redirect(`${this.resolveFrontendRedirectBaseUrl()}?token=${result.accessToken}`);
+    return res.redirect(
+      `${this.resolveFrontendRedirectBaseUrl()}?token=${encodeURIComponent(result.accessToken)}&refreshToken=${encodeURIComponent(result.refreshToken)}`,
+    );
   }
 
   @UseGuards(JwtAuthGuard)

@@ -9,18 +9,43 @@ import { envs } from 'src/config/envs';
 import { HTTP_RESPONSE } from 'src/constants/http-response';
 import { IJwtTokenPayload } from 'src/interface/auth.interface';
 
-const cookieOrBearerExtractor = (req: Request): string | null => {
-  if (req && req.cookies && req.cookies['refresh_token']) {
-    return req.cookies['refresh_token'] as string;
+const collectCandidateRefreshTokens = (req: Request): string[] => {
+  if (!req) return [];
+  const candidates: string[] = [];
+
+  const bearerToken = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+  if (bearerToken && bearerToken.trim()) {
+    candidates.push(bearerToken.trim());
   }
-  return ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+
+  const headerRefreshToken = req.headers?.['x-refresh-token'];
+  if (typeof headerRefreshToken === 'string' && headerRefreshToken.trim()) {
+    candidates.push(headerRefreshToken.replace(/^Bearer\s+/i, '').trim());
+  }
+
+  const bodyRefreshToken = (req.body as Record<string, unknown> | undefined)?.refreshToken;
+  if (typeof bodyRefreshToken === 'string' && bodyRefreshToken.trim()) {
+    candidates.push(bodyRefreshToken.replace(/^Bearer\s+/i, '').trim());
+  }
+
+  const cookieToken = req.cookies?.['refresh_token'];
+  if (typeof cookieToken === 'string' && cookieToken.trim()) {
+    candidates.push(cookieToken.trim());
+  }
+
+  return Array.from(new Set(candidates));
+};
+
+const multiChannelRefreshExtractor = (req: Request): string | null => {
+  const candidates = collectCandidateRefreshTokens(req);
+  return candidates[0] ?? null;
 };
 
 @Injectable()
 export class JwtRefreshStrategy extends PassportStrategy(Strategy, 'jwt-refresh') {
   constructor() {
     super({
-      jwtFromRequest: cookieOrBearerExtractor,
+      jwtFromRequest: multiChannelRefreshExtractor,
       ignoreExpiration: false,
       secretOrKey: envs.jwtRefreshSecret,
       passReqToCallback: true,
@@ -36,7 +61,8 @@ export class JwtRefreshStrategy extends PassportStrategy(Strategy, 'jwt-refresh'
       });
     }
 
-    const refreshToken = cookieOrBearerExtractor(req) ?? '';
+    const candidates = collectCandidateRefreshTokens(req);
+    const refreshToken = candidates[0] ?? '';
 
     if (!refreshToken) {
       throw new UnauthorizedException({
@@ -49,6 +75,7 @@ export class JwtRefreshStrategy extends PassportStrategy(Strategy, 'jwt-refresh'
     return {
       ...payload,
       refreshToken,
+      candidateRefreshTokens: candidates,
     };
   }
 }

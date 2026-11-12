@@ -198,7 +198,11 @@ export class OmnichannelInboxQueryService {
 
     const items: OmnichannelMergedConversationItem[] = rawItems.map((conv) => {
       const ch = conv.channelIntegrationId ? channelMap.get(conv.channelIntegrationId) : undefined;
+      const fallbackAvatar =
+        conv.avatar ||
+        `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent((conv.name || 'Khách hàng').trim())}&backgroundType=gradientLinear`;
       return Object.assign(conv, {
+        avatar: fallbackAvatar,
         lastMessage: conv.lastMessage
           ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
           : '',

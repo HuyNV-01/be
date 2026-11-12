@@ -153,9 +153,10 @@ export class AuthService {
     const { id, iat } = payload;
 
     // Kiểm tra mốc thu hồi phiên tức thì trong Redis (khi user logout hoặc đổi mật khẩu)
+    // Trừ lùi 2000ms cho mốc thu hồi để tránh sai số làm tròn giây của trường chuẩn JWT `iat`
     try {
       const revokedAfterStr = await this.redis.get(`auth:revoked_after:${id}`);
-      if (revokedAfterStr && iat && iat * 1000 < Number(revokedAfterStr)) {
+      if (revokedAfterStr && iat && iat * 1000 < Number(revokedAfterStr) - 2000) {
         throw new UnauthorizedException({
           status: HttpStatus.UNAUTHORIZED,
           message: HTTP_RESPONSE.AUTH.UNAUTHORIZED.message,
@@ -225,6 +226,9 @@ export class AuthService {
     const tokens = this.getTokens({ userId: id });
     const hashedRefreshToken = await this.hashRefreshToken(tokens.refreshToken);
 
+    // Xóa ngay khóa thu hồi cũ trong Redis khi người dùng đăng nhập lại hợp lệ
+    await this.redis.del(`auth:revoked_after:${id}`).catch(() => null);
+
     const user = await this.userService.updateUser({
       userId: id,
       data: {
@@ -262,18 +266,49 @@ export class AuthService {
     });
   }
 
+  /**
+   * Đảm bảo thời gian hiệu lực tối thiểu của Access Token và Refresh Token:
+   * - Nếu môi trường cấu hình `JWT_EXPIRES_IN` quá ngắn (ví dụ vài chục giây hoặc vài phút khi test),
+   *   khi chạy qua Ngrok Tunnel có độ trễ mạng và nhiều kết nối Socket/HTTP song song sẽ gây xoay vòng token liên tục.
+   * - Hàm này đảm bảo Access Token có thời hạn tối thiểu 12 giờ (43200s) và Refresh Token tối thiểu 30 ngày.
+   */
+  private resolveEffectiveExpiresIn(
+    rawConfig: string | undefined,
+    minSeconds: number,
+    defaultFallback: string,
+  ): string | number {
+    const parsed = parseExpiresIn(rawConfig || defaultFallback);
+    if (typeof parsed === 'number') {
+      return Math.max(parsed, minSeconds);
+    }
+    if (typeof parsed === 'string') {
+      const match = /^(\d+)([smhd])$/i.exec(parsed.trim());
+      if (match) {
+        const val = Number(match[1]);
+        const unit = match[2].toLowerCase();
+        const totalSec =
+          unit === 's' ? val : unit === 'm' ? val * 60 : unit === 'h' ? val * 3600 : val * 86400;
+        if (totalSec < minSeconds) {
+          return minSeconds;
+        }
+      }
+      return parsed;
+    }
+    return defaultFallback;
+  }
+
   private getTokens(payload: { userId: string }) {
     const accessToken = this.getJwtToken({
       userId: payload.userId,
       type: 'access',
       secret: envs.jwtSecret,
-      expiresIn: parseExpiresIn(envs.jwtExpiresIn),
+      expiresIn: this.resolveEffectiveExpiresIn(envs.jwtExpiresIn, 12 * 3600, '24h'),
     });
     const refreshToken = this.getJwtToken({
       userId: payload.userId,
       type: 'refresh',
       secret: envs.jwtRefreshSecret,
-      expiresIn: parseExpiresIn(envs.jwtRefreshExpiresIn),
+      expiresIn: this.resolveEffectiveExpiresIn(envs.jwtRefreshExpiresIn, 30 * 86400, '30d'),
     });
 
     return {
@@ -316,11 +351,19 @@ export class AuthService {
   }
 
   /**
-   * 5. Refresh Token Rotation + Reuse Detection:
-   * Nếu phát hiện Refresh Token cũ bị tái sử dụng (Token Theft / Replay), lập tức thu hồi toàn bộ phiên của user!
+   * 5. Refresh Token Rotation + Idempotent Grace Window (30s) cho môi trường Ngrok / Multi-Tab:
+   * - Khi chạy qua Ngrok Domain, HTTP 401 Interceptor và WebSocket Reconnect (hoặc nhiều tab trình duyệt)
+   *   có thể gửi yêu cầu `/api/auth/refresh` đồng thời với cùng một `refreshToken`.
+   * - Cơ chế `rt_grace` lưu cặp token mới vừa xoay vòng vào Redis trong 30 giây theo mã băm của token cũ:
+   *   nếu có yêu cầu trùng lặp đến trong cửa sổ 30s, hệ thống trả về ngay cặp token mới thay vì hiểu nhầm là
+   *   Token Reuse và đăng xuất cưỡng bức người dùng.
    */
-  async refreshTokens(payload: { userId: string; refreshToken: string }) {
-    const { userId, refreshToken } = payload;
+  async refreshTokens(payload: {
+    userId: string;
+    refreshToken: string;
+    candidateRefreshTokens?: string[];
+  }) {
+    const { userId, refreshToken, candidateRefreshTokens } = payload;
     const user = await this.userService.findUserById({
       userId,
       includeSecrets: true,
@@ -335,32 +378,69 @@ export class AuthService {
       });
     }
 
-    const digest = this.preHashTokenForBcrypt(refreshToken);
-    let isTokenMatching = await bcrypt.compare(digest, user.refreshToken);
+    const allCandidates = Array.from(
+      new Set([refreshToken, ...(candidateRefreshTokens || [])].filter(Boolean)),
+    );
 
-    // Tương thích ngược (Backward Compatibility) với các refreshToken cũ trước khi nâng cấp SHA-256 pre-hash
-    if (!isTokenMatching) {
-      isTokenMatching = await bcrypt.compare(refreshToken, user.refreshToken);
+    let matchedCandidate: string | null = null;
+
+    for (const candidate of allCandidates) {
+      const digest = this.preHashTokenForBcrypt(candidate);
+
+      // 1. Kiểm tra trong cửa sổ ân hạn 30 giây trên Redis (chống Race Condition giữa HTTP & Socket / Multi-Tab)
+      const graceCacheKey = `auth:rt_grace:${userId}:${digest}`;
+      const cachedGraceTokens = await this.redis.get(graceCacheKey).catch(() => null);
+      if (cachedGraceTokens) {
+        try {
+          const parsed = JSON.parse(cachedGraceTokens) as {
+            accessToken: string;
+            refreshToken: string;
+          };
+          if (parsed?.accessToken && parsed?.refreshToken) {
+            return parsed;
+          }
+        } catch {
+          // Tiếp tục kiểm tra bcrypt nếu JSON lỗi
+        }
+      }
+
+      // 2. Đối chiếu với bcrypt hash hiện tại trong DB
+      let isMatching = await bcrypt.compare(digest, user.refreshToken);
+      if (!isMatching) {
+        isMatching = await bcrypt.compare(candidate, user.refreshToken);
+      }
+
+      if (isMatching) {
+        matchedCandidate = candidate;
+        break;
+      }
     }
 
-    if (!isTokenMatching) {
-      // Phát hiện Refresh Token Reuse: Thu hồi toàn bộ phiên đăng nhập để bảo vệ tài khoản
+    if (!matchedCandidate) {
       this.logger.warn(
-        `[Security Alert] Refresh token reuse detected for userId=${userId}. Revoking active session.`,
+        `[Auth Refresh] Stale or mismatched refresh token for userId=${userId}. Rejecting refresh without revoking active session.`,
       );
-      await this.logout({ userId });
-      throw new ForbiddenException({
-        status: HttpStatus.FORBIDDEN,
+      throw new UnauthorizedException({
+        status: HttpStatus.UNAUTHORIZED,
         message: HTTP_RESPONSE.AUTH.NOT_MATCH_TOKEN.message,
         code: HTTP_RESPONSE.AUTH.NOT_MATCH_TOKEN.code,
       });
     }
 
+    const matchedDigest = this.preHashTokenForBcrypt(matchedCandidate);
     const tokens = this.getTokens({ userId });
     await this.updateRefreshTokenHash({
       userId,
       refreshToken: tokens.refreshToken,
     });
+
+    // Lưu cặp token mới vào cửa sổ ân hạn 30 giây trên Redis và xóa mốc thu hồi cũ
+    await Promise.all([
+      this.redis
+        .set(`auth:rt_grace:${userId}:${matchedDigest}`, JSON.stringify(tokens), 'EX', 30)
+        .catch(() => null),
+      this.redis.del(`auth:revoked_after:${userId}`).catch(() => null),
+    ]);
 
     return tokens;
   }

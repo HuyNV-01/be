@@ -19,6 +19,7 @@ export const TUNNEL_ALLOWED_HEADERS = [
   'Origin',
   'X-Requested-With',
   'x-shop-id',
+  'x-refresh-token',
   'x-tunnel-provider',
   'ngrok-skip-browser-warning',
   'cf-access-client-id',
