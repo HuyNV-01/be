@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
@@ -8,6 +8,7 @@ import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity'
 import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { FileEntity } from 'src/entity/file.entity';
 import { MessageEntity } from 'src/entity/message.entity';
 import { QuickReplyTemplateEntity } from 'src/entity/quick-reply-template.entity';
@@ -15,6 +16,7 @@ import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { UserEntity } from 'src/entity/user.entity';
 
+import { CrmModule } from '../crm/crm.module';
 import { IamModule } from '../iam/iam.module';
 import { MediaModule } from '../media/media.module';
 import { UserModule } from '../user/user.module';
@@ -38,6 +40,7 @@ import { RealtimeChatTranslationService } from './services/realtime-chat-transla
     TypeOrmModule.forFeature([
       ConversationParticipantEntity,
       ConversationEntity,
+      CustomerProfileEntity,
       MessageEntity,
       FileEntity,
       CallSessionEntity,
@@ -53,6 +56,7 @@ import { RealtimeChatTranslationService } from './services/realtime-chat-transla
     MediaModule,
     WebSocketModule,
     IamModule,
+    forwardRef(() => CrmModule),
   ],
   controllers: [ChatController],
   providers: [

@@ -93,6 +93,13 @@ export interface MessageMetadata {
   quickReplyShortcutUsed?: string;
   productCards?: MessageProductCardMeta[];
   translation?: MessageTranslationMeta;
+  channelType?: string;
+  channelIntegrationId?: string | null;
+  externalPageId?: string | null;
+  pageShortCode?: string | null;
+  pageName?: string | null;
+  channelAvatarUrl?: string | null;
+  hasMaskedPhonesInContent?: boolean;
   externalCustomerName?: string;
   externalCustomerAvatar?: string | null;
   externalCustomerPsid?: string | null;

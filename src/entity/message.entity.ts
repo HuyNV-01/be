@@ -1,4 +1,4 @@
-import { MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
+import { DeliveryTrustBandEnum, MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
 import * as messageInterface from 'src/interface/message.interface';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
@@ -13,14 +13,44 @@ export enum MessageDirectionEnum {
   SYSTEM = 'SYSTEM',
 }
 
+export interface ExtractedPhoneTrustSummary {
+  customerId?: string | null;
+  phoneMasked: string;
+  carrierName?: string;
+  score: number;
+  band: DeliveryTrustBandEnum;
+  badgeVariant: 'success' | 'info' | 'warning' | 'danger';
+  headline: string;
+  recommendation?: string;
+  totalDeliveredCount: number;
+  shopDeliveredCount: number;
+  networkDeliveredCount: number;
+  totalReturnedCount: number;
+  shopReturnedCount: number;
+  networkReturnedCount: number;
+  reportedCount: number;
+  returnRatePercent: number;
+  successRatePercent: number;
+  requireDepositVietQr: boolean;
+  isBlacklisted: boolean;
+  lookupSource: string;
+  lookupSourceLabel: string;
+  latestReportReason?: string | null;
+  checkedAt: string;
+}
+
 export interface ExtractedCommerceEntitiesPayload {
   phones?: string[];
+  maskedPhones?: string[];
   normalizedPhones?: Array<{
     rawMatch: string;
-    localPhone: string;
-    e164Phone: string;
+    localPhone?: string;
+    maskedPhone?: string;
+    e164Phone?: string;
     carrierName: string;
   }>;
+  phoneTrustSummary?: ExtractedPhoneTrustSummary | null;
+  hasAddressDetected?: boolean;
   provinceCode?: string | null;
   provinceName?: string | null;
   districtCode?: string | null;

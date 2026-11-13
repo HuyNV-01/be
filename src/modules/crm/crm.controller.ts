@@ -16,7 +16,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import type { Request } from 'express';
-import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
+import { ChannelTypeEnum, PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { DBaseRes } from 'src/dto/base-res.dto';
@@ -24,16 +24,21 @@ import {
   AdjustCustomerWalletOrPointsDto,
   CustomerListQueryDto,
   ExtractVietnameseNerDto,
+  LookupPhoneTrustFromSourcesDto,
   MergeCustomerProfilesDto,
   OverrideDeliveryTrustScoreDto,
+  ReportCustomerPhoneAbuseDto,
   SecurityAuditQueryDto,
   ToggleCustomerBlacklistDto,
   TriggerAdsConversionEventDto,
   UnmaskCustomerPhoneDto,
+  UpdateShopCrmConfigDto,
   UpsertCustomerProfileDto,
 } from 'src/dto/crm/crm.dto';
+import { ConversationEntity } from 'src/entity/conversation.entity';
 import { MessageEntity } from 'src/entity/message.entity';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
+import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 import {
   RequireShopPermissions,
   ShopPermissionGuard,
@@ -58,11 +63,14 @@ export class CrmController {
   constructor(
     @InjectRepository(MessageEntity)
     private readonly messageRepo: Repository<MessageEntity>,
+    @InjectRepository(ConversationEntity)
+    private readonly conversationRepo: Repository<ConversationEntity>,
     private readonly nerService: VietnameseCommerceNerService,
     private readonly customer360Service: Customer360Service,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly adsConversionService: AdsConversionSyncService,
     private readonly rfmAndLoyaltyService: CustomerRfmAndLoyaltyService,
+    private readonly messageCryptoService: MessageCryptoService,
     private readonly realtimeEmitter: RealtimeEmitterService,
   ) {}
 
@@ -81,27 +89,101 @@ export class CrmController {
     };
   }
 
+  @Get(':shopId/settings/crm-config')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Lấy cấu hình Nguồn dữ liệu Tra cứu Chỉ số Nhận/Hoàn/Bị báo cáo SĐT & Cấu hình Hồ sơ theo Ngành hàng',
+  })
+  async getShopCrmConfig(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.customer360Service.getShopCrmTrustAndIndustryConfig(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched shop CRM trust lookup and industry config successfully',
+      data,
+    };
+  }
+
+  @Patch(':shopId/settings/crm-config')
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_PROFILE_EDIT)
+  @ApiOperation({
+    summary:
+      'Cập nhật cấu hình Nguồn dữ liệu Tra cứu Chỉ số Nhận/Hoàn/Bị báo cáo SĐT (Pancake Community, 3PL GHN/GHTK, Custom API) & Ngành hàng',
+  })
+  async updateShopCrmConfig(
+    @Param('shopId') shopId: string,
+    @Body() dto: UpdateShopCrmConfigDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.updateShopCrmTrustAndIndustryConfig({
+      shopId,
+      actorUserId: req.user?.id || 'system',
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated shop CRM trust lookup and industry config successfully',
+      data,
+    };
+  }
+
   @Post(':shopId/ner/extract')
   @HttpCode(HttpStatus.OK)
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'F04.1 & Công cụ T05: Bóc tách SĐT chống lách luật, Địa chỉ 3 cấp, Mã SKU, Màu sắc, Kích cỡ (< 3ms)',
+      'F04.1 & Công cụ T05: Bóc tách SĐT chống lách luật, tự động che SĐT, tra cứu chỉ số Nhận/Hoàn/Bị báo cáo & chuẩn hóa Địa chỉ 3 cấp (< 3ms)',
   })
   async extractVietnameseCommerceNer(
     @Param('shopId') shopId: string,
     @Body() dto: ExtractVietnameseNerDto,
   ): Promise<DBaseRes> {
-    const extracted = this.nerService.extractCommerceEntities(dto.text);
+    const rawExtracted = this.nerService.extractCommerceEntities(dto.text);
+    const maskedContent = this.nerService.maskPhonesInText(dto.text, rawExtracted.normalizedPhones);
+
+    let phoneTrustSummary = rawExtracted.phoneTrustSummary || null;
+
+    if (dto.conversationId) {
+      const conv = await this.conversationRepo.findOne({
+        where: { id: dto.conversationId },
+      });
+      if (conv) {
+        const resolved = await this.customer360Service.resolveOrUpsertCustomerFromOmnichannelEvent({
+          shopId: conv.shopId || shopId,
+          conversation: conv,
+          channelType: conv.channelType || ChannelTypeEnum.FACEBOOK_PAGE,
+          channelIntegrationId: conv.channelIntegrationId,
+          externalUserId: conv.externalThreadId || conv.id,
+          customerName: conv.name || 'Khách hàng',
+          customerAvatarUrl: conv.avatar,
+          extractedNer: rawExtracted,
+        });
+        phoneTrustSummary = resolved.phoneTrustSummary;
+      }
+    }
+
+    const publicSanitized = this.nerService.sanitizeExtractedEntitiesForPublicResponse(
+      rawExtracted,
+      phoneTrustSummary,
+    );
 
     if (dto.messageId && dto.conversationId) {
       const msg = await this.messageRepo.findOne({
         where: { id: dto.messageId, conversationId: dto.conversationId },
       });
       if (msg) {
+        const encryptedMasked = this.messageCryptoService.encryptForConversation(
+          maskedContent,
+          dto.conversationId,
+        );
         await this.messageRepo.update(
           { id: msg.id, createdAt: msg.createdAt },
-          { extractedEntitiesJson: extracted as any },
+          {
+            content: encryptedMasked.ciphertext,
+            extractedEntitiesJson: publicSanitized as any,
+          },
         );
       }
 
@@ -113,7 +195,8 @@ export class CrmController {
           shopId,
           conversationId: dto.conversationId,
           messageId: dto.messageId,
-          extractedEntities: extracted,
+          maskedContent,
+          extractedEntities: publicSanitized,
         },
       );
     }
@@ -122,7 +205,10 @@ export class CrmController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Extracted Vietnamese commerce entities successfully',
-      data: extracted,
+      data: {
+        ...publicSanitized,
+        maskedContent,
+      },
     };
   }
 
@@ -221,6 +307,57 @@ export class CrmController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Updated customer profile successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/customers/:customerId/lookup-trust')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'F04.3: Tra cứu & đồng bộ lại chỉ số Nhận hàng, Hoàn hàng, Bị báo cáo từ nguồn dữ liệu Cộng đồng Pancake & ĐVVC 3PL (GHN/GHTK/VTP/J&T)',
+  })
+  async lookupCustomerTrustFromSources(
+    @Param('shopId') shopId: string,
+    @Param('customerId') customerId: string,
+    @Body() dto: LookupPhoneTrustFromSourcesDto,
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.refreshCustomerTrustLookup({
+      shopId,
+      customerId,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Refreshed customer delivery trust and report metrics from sources successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/customers/:customerId/report-abuse')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_BLACKLIST_TOGGLE)
+  @ApiOperation({
+    summary: 'F04.3: Báo xấu SĐT khách bom hàng / Ghi nhận lượt bị báo cáo và đồng bộ cảnh báo đỏ',
+  })
+  async reportCustomerPhoneAbuse(
+    @Param('shopId') shopId: string,
+    @Param('customerId') customerId: string,
+    @Body() dto: ReportCustomerPhoneAbuseDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.reportCustomerPhoneAbuse({
+      shopId,
+      customerId,
+      actorUserId: req.user?.id || 'system',
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Reported customer phone abuse successfully',
       data,
     };
   }

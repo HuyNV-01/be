@@ -71,6 +71,7 @@ import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity'
 import { ContactEntity } from 'src/entity/contact.entity';
 import { ConversationParticipantEntity } from 'src/entity/conversation-participant.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { FileEntity } from 'src/entity/file.entity';
 import { MediaEntity } from 'src/entity/media.entity';
 import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
@@ -83,6 +84,8 @@ import {
   MessageMetadata,
   MessageReplyPreview,
 } from 'src/interface/message.interface';
+import { Customer360Service } from 'src/modules/crm/services/customer-360.service';
+import { VietnameseCommerceNerService } from 'src/modules/crm/services/vietnamese-commerce-ner.service';
 import { PaginationOptions } from 'src/types/query.types';
 import { DataSource, In, Repository } from 'typeorm';
 import { LessThanOrEqual } from 'typeorm';
@@ -116,6 +119,8 @@ export class ChatService {
     private shopMemberRepository: Repository<ShopMemberEntity>,
     @InjectRepository(ChannelIntegrationEntity)
     private channelRepository: Repository<ChannelIntegrationEntity>,
+    @InjectRepository(CustomerProfileEntity)
+    private customerRepository: Repository<CustomerProfileEntity>,
     @InjectRedis() private readonly redis: Redis,
     private dataSource: DataSource,
     private readonly userService: UserService,
@@ -124,6 +129,8 @@ export class ChatService {
     private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly messageCryptoService: MessageCryptoService,
     private readonly linkPreviewService: LinkPreviewService,
+    private readonly nerService: VietnameseCommerceNerService,
+    private readonly customer360Service: Customer360Service,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -278,6 +285,7 @@ export class ChatService {
           'type',
           'disappearingTtl',
           'shopId',
+          'customerId',
           'channelIntegrationId',
           'channelType',
           'externalThreadId',
@@ -342,6 +350,32 @@ export class ChatService {
       }
 
       const cleanContent = (dto.content || '').trim();
+      const maskedCleanText = this.nerService.maskPhonesInText(cleanContent);
+      const hasPhoneMaskedInClean = maskedCleanText !== cleanContent;
+      const extractedForMsg = conversation?.shopId
+        ? this.nerService.extractCommerceEntities(cleanContent)
+        : null;
+      const hasExtractedEntities = Boolean(
+        extractedForMsg &&
+          ((extractedForMsg.phones && extractedForMsg.phones.length > 0) ||
+            extractedForMsg.hasAddressDetected ||
+            extractedForMsg.provinceCode ||
+            extractedForMsg.addressLine ||
+            (extractedForMsg.skuCodes && extractedForMsg.skuCodes.length > 0)),
+      );
+      const sanitizedExtractedForMsg =
+        extractedForMsg && hasExtractedEntities
+          ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(extractedForMsg)
+          : null;
+
+      let channelInfoForMsg: ChannelIntegrationEntity | null = null;
+      if (conversation?.channelIntegrationId) {
+        channelInfoForMsg = await queryRunner.manager.findOne(ChannelIntegrationEntity, {
+          where: { id: conversation.channelIntegrationId },
+          select: ['id', 'channelType', 'externalPageId', 'pageShortCode', 'pageName', 'avatarUrl'],
+        });
+      }
+
       const encrypted = this.messageCryptoService.encryptForConversation(
         cleanContent,
         dto.conversationId,
@@ -351,6 +385,17 @@ export class ChatService {
         ...(dto.metadata || {}),
         isEncrypted: encrypted.isEncrypted,
         encryptionAlg: encrypted.algorithm,
+        ...(channelInfoForMsg
+          ? {
+              channelType: channelInfoForMsg.channelType,
+              channelIntegrationId: channelInfoForMsg.id,
+              externalPageId: channelInfoForMsg.externalPageId,
+              pageShortCode: channelInfoForMsg.pageShortCode,
+              pageName: channelInfoForMsg.pageName,
+              channelAvatarUrl: channelInfoForMsg.avatarUrl || null,
+            }
+          : {}),
+        ...(hasPhoneMaskedInClean ? { hasMaskedPhonesInContent: true } : {}),
         ...(dto.isE2EE ? { isE2EE: true, e2eeKeyId: dto.e2eeKeyId } : {}),
         ...(dto.replyToMessageId ? { replyToMessageId: dto.replyToMessageId, replyPreview } : {}),
         ...(attachments ? { attachments } : {}),
@@ -374,6 +419,7 @@ export class ChatService {
         type: dto.type || MessageTypeEnum.TEXT,
         replyToMessageId: dto.replyToMessageId || null,
         clientTempId: dto.tempId ? dto.tempId.slice(0, 64) : null,
+        extractedEntitiesJson: sanitizedExtractedForMsg,
         isPinned: false,
         metadata,
         readBy: [senderId],
@@ -398,7 +444,7 @@ export class ChatService {
       }
 
       const lastMsgRaw =
-        dto.type === MessageTypeEnum.TEXT || !dto.type ? cleanContent : `[${dto.type}]`;
+        dto.type === MessageTypeEnum.TEXT || !dto.type ? maskedCleanText : `[${dto.type}]`;
       const encryptedLastMsg = this.messageCryptoService.encryptForConversation(
         lastMsgRaw,
         dto.conversationId,
@@ -1585,10 +1631,33 @@ export class ChatService {
 
     if (!fullMessage) return null;
 
-    const decryptedContent = this.messageCryptoService.decryptForConversation(
+    const rawDecryptedContent = this.messageCryptoService.decryptForConversation(
       fullMessage.content,
       fullMessage.conversationId,
     );
+    const maskedContentText = this.nerService.maskPhonesInText(rawDecryptedContent);
+    const hasPhoneMaskedInMsg = maskedContentText !== rawDecryptedContent;
+
+    const conv = await this.convRepository.findOne({
+      where: { id: fullMessage.conversationId },
+      select: [
+        'id',
+        'name',
+        'avatar',
+        'shopId',
+        'customerId',
+        'channelIntegrationId',
+        'channelType',
+      ],
+    });
+
+    let channelInfo: ChannelIntegrationEntity | null = null;
+    if (conv?.channelIntegrationId) {
+      channelInfo = await this.channelRepository.findOne({
+        where: { id: conv.channelIntegrationId },
+        select: ['id', 'channelType', 'externalPageId', 'pageShortCode', 'pageName', 'avatarUrl'],
+      });
+    }
 
     let sender = fullMessage.sender as any;
     if (sender) {
@@ -1596,10 +1665,6 @@ export class ChatService {
       delete sender.avatarMedia;
       sender.avatar = avatarUrl;
     } else {
-      const conv = await this.convRepository.findOne({
-        where: { id: fullMessage.conversationId },
-        select: ['id', 'name', 'avatar'],
-      });
       const fallbackExtName =
         (fullMessage.metadata as any)?.externalCustomerName ||
         (fullMessage.metadata as any)?.marketplaceOrder?.buyerUsername ||
@@ -1619,15 +1684,39 @@ export class ChatService {
       };
     }
 
+    const enrichedMeta: MessageMetadata = {
+      ...(fullMessage.metadata || {}),
+      ...(channelInfo
+        ? {
+            channelType: channelInfo.channelType,
+            channelIntegrationId: channelInfo.id,
+            externalPageId: channelInfo.externalPageId,
+            pageShortCode: channelInfo.pageShortCode,
+            pageName: channelInfo.pageName,
+            channelAvatarUrl: channelInfo.avatarUrl || null,
+          }
+        : {}),
+      ...(hasPhoneMaskedInMsg ? { hasMaskedPhonesInContent: true } : {}),
+    };
+
+    const sanitizedEntities = fullMessage.extractedEntitiesJson
+      ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
+          fullMessage.extractedEntitiesJson,
+          fullMessage.extractedEntitiesJson.phoneTrustSummary,
+        )
+      : null;
+
     return {
       ...fullMessage,
+      metadata: enrichedMeta,
+      extractedEntitiesJson: sanitizedEntities,
       createdAt: fullMessage.createdAt
         ? new Date(fullMessage.createdAt).toISOString()
         : new Date().toISOString(),
       updatedAt: fullMessage.updatedAt
         ? new Date(fullMessage.updatedAt).toISOString()
         : new Date().toISOString(),
-      content: decryptedContent,
+      content: maskedContentText,
       sender,
     };
   }
@@ -1643,7 +1732,16 @@ export class ChatService {
       this.ensureParticipant(conversationId, userId),
       this.convRepository.findOne({
         where: { id: conversationId },
-        select: ['id', 'name', 'avatar', 'channelType', 'interactionType'],
+        select: [
+          'id',
+          'name',
+          'avatar',
+          'shopId',
+          'customerId',
+          'channelIntegrationId',
+          'channelType',
+          'interactionType',
+        ],
       }),
       this.partRepository.find({
         where: { conversationId },
@@ -1697,11 +1795,39 @@ export class ChatService {
       }
     });
 
+    const [users, channelInfo, customerProfile] = await Promise.all([
+      readerIds.size > 0
+        ? this.userService.getBasicUsersInfo(Array.from(readerIds))
+        : Promise.resolve([]),
+      convInfo?.channelIntegrationId
+        ? this.channelRepository.findOne({
+            where: { id: convInfo.channelIntegrationId },
+            select: [
+              'id',
+              'channelType',
+              'externalPageId',
+              'pageShortCode',
+              'pageName',
+              'avatarUrl',
+            ],
+          })
+        : Promise.resolve(null),
+      convInfo?.customerId
+        ? this.customerRepository.findOne({
+            where: { id: convInfo.customerId },
+          })
+        : Promise.resolve(null),
+    ]);
+
     const userMap = new Map<string, UserEntity>();
-    if (readerIds.size > 0) {
-      const users = await this.userService.getBasicUsersInfo(Array.from(readerIds));
-      users.forEach((u) => userMap.set(u.id, u));
-    }
+    users.forEach((u) => userMap.set(u.id, u));
+
+    const enrichedCustomerForTrust = customerProfile
+      ? this.customer360Service.enrichCustomerWithTrustEvaluation(customerProfile)
+      : null;
+    const conversationTrustSummary = enrichedCustomerForTrust
+      ? this.customer360Service.buildPhoneTrustSummaryForMessage(enrichedCustomerForTrust)
+      : undefined;
 
     let finalData = result.data.map((msg: any) => {
       const sender = msg.sender;
@@ -1740,10 +1866,47 @@ export class ChatService {
         Boolean(myPart.readReceiptsEnabled && !myPart.isRestricted),
         privacyHideReadSet,
       );
-      const decryptedContent = this.messageCryptoService.decryptForConversation(
+      const rawDecryptedContent = this.messageCryptoService.decryptForConversation(
         msg.content as string,
         conversationId,
       );
+      const maskedContentText = this.nerService.maskPhonesInText(rawDecryptedContent);
+      const hasPhoneMasked = maskedContentText !== rawDecryptedContent;
+
+      let rawEntities = msg.extractedEntitiesJson;
+      if (!rawEntities && convInfo?.shopId && (hasPhoneMasked || rawDecryptedContent.length >= 6)) {
+        const onTheFlyNer = this.nerService.extractCommerceEntities(rawDecryptedContent);
+        if (
+          (onTheFlyNer.phones && onTheFlyNer.phones.length > 0) ||
+          onTheFlyNer.hasAddressDetected ||
+          onTheFlyNer.provinceCode ||
+          onTheFlyNer.addressLine
+        ) {
+          rawEntities = onTheFlyNer;
+        }
+      }
+
+      const sanitizedEntities = rawEntities
+        ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
+            rawEntities,
+            rawEntities.phoneTrustSummary || conversationTrustSummary,
+          )
+        : null;
+
+      const enrichedMetadata = {
+        ...(msg.metadata || {}),
+        ...(channelInfo
+          ? {
+              channelType: channelInfo.channelType,
+              channelIntegrationId: channelInfo.id,
+              externalPageId: channelInfo.externalPageId,
+              pageShortCode: channelInfo.pageShortCode,
+              pageName: channelInfo.pageName,
+              channelAvatarUrl: channelInfo.avatarUrl || null,
+            }
+          : {}),
+        ...(hasPhoneMasked ? { hasMaskedPhonesInContent: true } : {}),
+      };
 
       let readByUsers: { id: string; name: string; avatar: string | null }[] = [];
 
@@ -1780,10 +1943,12 @@ export class ChatService {
 
       return {
         ...msg,
+        metadata: enrichedMetadata,
+        extractedEntitiesJson: sanitizedEntities,
         createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
         updatedAt: msg.updatedAt ? new Date(msg.updatedAt).toISOString() : new Date().toISOString(),
         expiresAt: msg.expiresAt ? new Date(msg.expiresAt).toISOString() : null,
-        content: decryptedContent,
+        content: maskedContentText,
         sender: cleanSender,
         status: computedStatus,
         readByUsers,
@@ -1986,7 +2151,15 @@ export class ChatService {
       .filter((c: any) => c.type === ConversationTypeEnum.DIRECT && c.partnerUser)
       .map((c: any) => String(c.partnerUser.id));
 
-    const [onlineSet, allConvParticipants, blockRecords] = await Promise.all([
+    const channelIdsInInbox = Array.from(
+      new Set(
+        result.data
+          .map((c: any) => c.channelIntegrationId)
+          .filter((cid: unknown): cid is string => typeof cid === 'string' && cid.length > 0),
+      ),
+    );
+
+    const [onlineSet, allConvParticipants, blockRecords, channelsInInbox] = await Promise.all([
       this.socketStateService.getOnlineUsers(partnerIds),
       convIds.length > 0
         ? this.partRepository.find({
@@ -2003,7 +2176,24 @@ export class ChatService {
             select: ['userId', 'contactId', 'status'],
           })
         : Promise.resolve([]),
+      channelIdsInInbox.length > 0
+        ? this.channelRepository.find({
+            where: { id: In(channelIdsInInbox) },
+            select: [
+              'id',
+              'channelType',
+              'externalPageId',
+              'pageShortCode',
+              'pageName',
+              'avatarUrl',
+            ],
+          })
+        : Promise.resolve([]),
     ]);
+
+    const inboxChannelMap = new Map<string, ChannelIntegrationEntity>(
+      channelsInInbox.map((ch) => [ch.id, ch]),
+    );
 
     const partnerPartMap = new Map<string, ConversationParticipantEntity>();
     const privacyHideReadByConv = new Map<string, Set<string>>();
@@ -2110,14 +2300,15 @@ export class ChatService {
           validLatestMsg.content,
           String(conv.id),
         );
+        const maskedRawDecrypted = this.nerService.maskPhonesInText(rawDecrypted);
         decryptedLastMessage =
           validLatestMsg.status === MessageStatusEnum.REMOVED
             ? '[Tin nhắn đã được thu hồi]'
             : validLatestMsg.type === MessageTypeEnum.TEXT ||
                 validLatestMsg.type === MessageTypeEnum.CALL ||
                 validLatestMsg.type === MessageTypeEnum.POLL
-              ? rawDecrypted
-              : `[${validLatestMsg.type}] ${rawDecrypted || ''}`.trim();
+              ? maskedRawDecrypted
+              : `[${validLatestMsg.type}] ${maskedRawDecrypted || ''}`.trim();
         effectiveLastMessageAt = validLatestMsg.createdAt
           ? new Date(validLatestMsg.createdAt).toISOString()
           : effectiveLastMessageAt;
@@ -2134,12 +2325,20 @@ export class ChatService {
         );
       }
 
+      const boundChannel = conv.channelIntegrationId
+        ? inboxChannelMap.get(String(conv.channelIntegrationId))
+        : undefined;
+
       delete conv.partner;
       delete conv.partnerUser;
       delete conv.participants;
 
       return {
         ...conv,
+        pageName: boundChannel?.pageName || conv.pageName || null,
+        pageShortCode: boundChannel?.pageShortCode || conv.pageShortCode || null,
+        channelAvatarUrl: boundChannel?.avatarUrl || conv.channelAvatarUrl || null,
+        externalPageId: boundChannel?.externalPageId || null,
         originalName,
         partnerNickname,
         partnerEmail,
@@ -3008,6 +3207,14 @@ export class ChatService {
       }
     }
 
+    let boundChannel: ChannelIntegrationEntity | null = null;
+    if (conv.channelIntegrationId) {
+      boundChannel = await this.channelRepository.findOne({
+        where: { id: conv.channelIntegrationId },
+        select: ['id', 'channelType', 'externalPageId', 'pageShortCode', 'pageName', 'avatarUrl'],
+      });
+    }
+
     const resolvedAvatar =
       conv.avatar ||
       partnerMember?.avatar ||
@@ -3020,8 +3227,13 @@ export class ChatService {
       avatar: resolvedAvatar,
       disappearingTtl: conv.disappearingTtl,
       shopId: conv.shopId,
+      customerId: conv.customerId || null,
       channelType: conv.channelType,
       channelIntegrationId: conv.channelIntegrationId,
+      pageName: boundChannel?.pageName || null,
+      pageShortCode: boundChannel?.pageShortCode || null,
+      channelAvatarUrl: boundChannel?.avatarUrl || null,
+      externalPageId: boundChannel?.externalPageId || null,
       interactionType: conv.interactionType,
       supportStatus: conv.supportStatus,
       assignedAgentId: conv.assignedAgentId,

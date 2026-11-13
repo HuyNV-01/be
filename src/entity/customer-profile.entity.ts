@@ -1,4 +1,10 @@
-import { ChannelTypeEnum, CustomerTierEnum, RfmSegmentCodeEnum } from 'src/common/enum';
+import {
+  ChannelTypeEnum,
+  CustomerTierEnum,
+  PhoneTrustLookupSourceEnum,
+  RfmSegmentCodeEnum,
+  ShopBusinessCategoryEnum,
+} from 'src/common/enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
@@ -25,6 +31,24 @@ export interface CustomerRecentOrderSnapshotItem {
   carrierCode?: string | null;
   trackingNumber?: string | null;
   createdAt: string;
+}
+
+export interface CustomerAbuseReportItem {
+  reportId: string;
+  reason: string;
+  reasonCode?: string;
+  reasonNote?: string;
+  carrierCode?: string | null;
+  orderCode?: string | null;
+  source: 'SHOP_INTERNAL' | 'PANCAKE_COMMUNITY' | 'CARRIER_3PL_GHN' | 'CARRIER_3PL_GHTK';
+  reportedByName: string;
+  reportedAt: string;
+}
+
+export interface CustomerCustomAttributeItem {
+  key: string;
+  label: string;
+  value: string;
 }
 
 @Entity('customer_profiles')
@@ -149,6 +173,33 @@ export class CustomerProfileEntity extends BaseModel {
   @Column({ name: 'returned_orders_count', type: 'int', default: 0 })
   returnedOrdersCount: number;
 
+  // Chỉ số nhận thành công tổng hợp từ mạng lưới liên shop (Pancake Community) & Đối tác vận chuyển 3PL (GHN/GHTK/VTP/J&T)
+  @Column({ name: 'network_delivered_count', type: 'int', default: 0 })
+  networkDeliveredCount: number;
+
+  // Chỉ số hoàn hàng tổng hợp từ mạng lưới liên shop & Đối tác vận chuyển 3PL
+  @Column({ name: 'network_returned_count', type: 'int', default: 0 })
+  networkReturnedCount: number;
+
+  // Số lần khách hàng / SĐT này bị các nhà bán hàng báo cáo xấu (Bom hàng / Không nghe máy / Tráo hàng)
+  @Column({ name: 'reported_count', type: 'int', default: 0 })
+  reportedCount: number;
+
+  @Column({ name: 'reported_reasons_json', type: 'json', nullable: true, default: null })
+  reportedReasonsJson: CustomerAbuseReportItem[] | null;
+
+  @Column({
+    name: 'trust_lookup_source',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
+  })
+  trustLookupSource: string | null;
+
+  @Column({ name: 'last_trust_lookup_at', type: 'datetime', nullable: true, default: null })
+  lastTrustLookupAt: Date | null;
+
   @Column({ name: 'delivery_trust_score', type: 'int', default: 80 })
   deliveryTrustScore: number;
 
@@ -179,6 +230,16 @@ export class CustomerProfileEntity extends BaseModel {
   })
   walletCreditBalance: number;
 
+  // Ngành hàng áp dụng cho hồ sơ khách hàng (Thời trang, Mỹ phẩm, Điện tử, F&B, Mẹ & Bé, Đa ngành)
+  @Column({
+    name: 'industry_category',
+    type: 'varchar',
+    length: 48,
+    nullable: true,
+    default: ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY,
+  })
+  industryCategory: string | null;
+
   @Column({ name: 'height_cm', type: 'int', nullable: true, default: null })
   heightCm: number | null;
 
@@ -187,6 +248,10 @@ export class CustomerProfileEntity extends BaseModel {
 
   @Column({ name: 'preferred_size', type: 'varchar', length: 32, nullable: true, default: null })
   preferredSize: string | null;
+
+  // Thuộc tính tùy chỉnh đa ngành hàng (VD: Loại da, Tình trạng dị ứng, Dòng máy đang dùng, IMEI bảo hành, Khẩu vị...)
+  @Column({ name: 'custom_attributes_json', type: 'json', nullable: true, default: null })
+  customAttributesJson: CustomerCustomAttributeItem[] | null;
 
   @Column({ name: 'notes', type: 'text', nullable: true, default: null })
   notes: string | null;

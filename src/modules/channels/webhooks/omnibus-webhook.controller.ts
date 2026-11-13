@@ -8,6 +8,7 @@ import {
   Param,
   Post,
   Query,
+  Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
@@ -16,7 +17,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import Redis from 'ioredis';
 import { ChannelTypeEnum, PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { DBaseRes } from 'src/dto/base-res.dto';
@@ -106,6 +107,7 @@ export class OmnibusWebhookController {
     @Param('channelType') channelTypeParam: string,
     @Headers() headers: Record<string, string>,
     @Body() payload: Record<string, unknown>,
+    @Req() req?: Request & { rawBody?: Buffer },
   ): Promise<{
     received: true;
     idempotencyKey: string;
@@ -169,6 +171,8 @@ export class OmnibusWebhookController {
       };
     }
 
+    const rawBodyBuffer = req?.rawBody;
+
     const executeDispatch = async () => {
       this.inFlightWebhookCount += 1;
       try {
@@ -177,6 +181,7 @@ export class OmnibusWebhookController {
           channelType,
           headers: headers || {},
           payload: payload || {},
+          rawBody: rawBodyBuffer,
         });
 
         const resolvedShopId = result.shopId || preResolvedChannel?.shopId || null;

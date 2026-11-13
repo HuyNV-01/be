@@ -21,6 +21,7 @@ import {
   CustomerWalletTransactionTypeEnum,
   RfmSegmentCodeEnum,
   SecurityAuditActionCodeEnum,
+  ShopBusinessCategoryEnum,
 } from 'src/common/enum';
 
 export class ExtractVietnameseNerDto {
@@ -136,22 +137,34 @@ export class UpsertCustomerProfileDto {
   @IsEnum(CustomerTierEnum)
   tier?: CustomerTierEnum;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: ShopBusinessCategoryEnum })
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  heightCm?: number;
+  @IsString()
+  industryCategory?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  weightKg?: number;
+  heightCm?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  weightKg?: number | null;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  preferredSize?: string;
+  preferredSize?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Danh sách thuộc tính tùy chỉnh theo ngành hàng (Loại da, IMEI, Khẩu vị...)',
+  })
+  @IsOptional()
+  @IsArray()
+  customAttributesJson?: Array<{ key: string; label: string; value: string }>;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -204,10 +217,248 @@ export class OverrideDeliveryTrustScoreDto {
   @Min(0)
   returnedOrdersCount?: number;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  networkDeliveredCount?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  networkReturnedCount?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  reportedCount?: number;
+
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
   reason: string;
+}
+
+export class ReportCustomerPhoneAbuseDto {
+  @ApiPropertyOptional({
+    description: 'Lý do báo cáo xấu / bom hàng đối với SĐT khách hàng này',
+    example: 'Đặt 2 đơn COD liên tiếp nhưng shipper gọi tắt máy không nhận hàng',
+  })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Mã nhóm nguyên nhân báo xấu (BOM_HANG | BOOM_AO_SPAM | TU_CHOI_NHAN_NHIEU_LAN | SAI_SO_DIEN_THOAI | OTHER)',
+  })
+  @IsOptional()
+  @IsString()
+  reasonCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Chi tiết ghi chú báo xấu từ người bán',
+  })
+  @IsOptional()
+  @IsString()
+  reasonNote?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  carrierCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  orderCode?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Nguồn ghi nhận báo cáo (SHOP_INTERNAL | PANCAKE_COMMUNITY | CARRIER_3PL_GHN | CARRIER_3PL_GHTK)',
+  })
+  @IsOptional()
+  @IsString()
+  source?: 'SHOP_INTERNAL' | 'PANCAKE_COMMUNITY' | 'CARRIER_3PL_GHN' | 'CARRIER_3PL_GHTK';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  additionalReturnedOrders?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoBlacklist?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  markBlacklisted?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  conversationId?: string;
+}
+
+export class LookupPhoneTrustFromSourcesDto {
+  @ApiPropertyOptional({
+    description: 'ID cuộc hội thoại cần cập nhật lại thẻ chỉ số nhận/hoàn/báo cáo',
+  })
+  @IsOptional()
+  @IsString()
+  conversationId?: string;
+
+  @ApiPropertyOptional({ description: 'SĐT gốc tùy chọn nếu muốn tra cứu trực tiếp' })
+  @IsOptional()
+  @IsString()
+  rawPhone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  sources?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customWebhookUrl?: string;
+}
+
+export class UpdateShopCrmConfigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableAutoTrustLookupOnPhone?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  useInternalPosHistory?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  usePancakeCommunityNetwork?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  useCarrier3plLookup?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  enabledCarriers?: Array<'GHN' | 'GHTK' | 'VTP' | 'JT'>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customLookupWebhookUrl?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customLookupApiKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(5)
+  @Max(100)
+  highRiskReturnRateThresholdPercent?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  highRiskReportedCountThreshold?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoMaskBuyerPhoneInChat?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoExtractAddressFromChat?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requireDepositOnHighRisk?: boolean;
+
+  @ApiPropertyOptional({ enum: ShopBusinessCategoryEnum })
+  @IsOptional()
+  @IsEnum(ShopBusinessCategoryEnum)
+  businessCategory?: ShopBusinessCategoryEnum;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  showApparelMeasurementsInProfile?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  customAttributeTemplates?: Array<{
+    key: string;
+    label: string;
+    placeholder?: string;
+  }>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableCommunityTrustLookup?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableCarrier3plTrustLookup?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  enabledLookupSources?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoMaskPhoneInChatMessages?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoExtractPhoneAndAddressInChat?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  autoRequireDepositBelowTrustScore?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableCustomAttributesInProfile?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  defaultCustomAttributeKeys?: string[];
 }
 
 export class MergeCustomerProfilesDto {
