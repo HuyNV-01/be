@@ -15,11 +15,37 @@ export enum MessageDirectionEnum {
 
 export interface ExtractedCommerceEntitiesPayload {
   phones?: string[];
+  normalizedPhones?: Array<{
+    rawMatch: string;
+    localPhone: string;
+    e164Phone: string;
+    carrierName: string;
+  }>;
   provinceCode?: string | null;
+  provinceName?: string | null;
   districtCode?: string | null;
+  districtName?: string | null;
   wardCode?: string | null;
+  wardName?: string | null;
   addressLine?: string | null;
+  fullFormattedAddress?: string | null;
+  carrierCodes?: {
+    ghnProvinceId?: number;
+    ghnDistrictId?: number;
+    ghnWardCode?: string;
+    ghtkProvince?: string;
+    ghtkDistrict?: string;
+    ghtkWard?: string;
+    vtpProvinceId?: number;
+    jtCityCode?: string;
+  } | null;
   skuCodes?: string[];
+  colors?: string[];
+  sizes?: string[];
+  heightCm?: number | null;
+  weightKg?: number | null;
+  quantities?: number[];
+  processingTimeMs?: number;
 }
 
 @Entity('messages')
@@ -98,10 +124,6 @@ export class MessageEntity extends BaseModel {
   @Column({ name: 'expires_at', type: 'datetime', nullable: true, default: null })
   @Index()
   expiresAt: Date | null;
-
-  // ============================================================================
-  // OMNICHANNEL SELLER OS EXTENSIONS (Zero-Config DatabaseEvolutionService Safe)
-  // ============================================================================
 
   @Column({ name: 'shop_id', type: 'varchar', length: 36, nullable: true, default: null })
   shopId: string | null;

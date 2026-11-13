@@ -14,7 +14,12 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     timestamp: true,
   });
 
-  private readonly PARTITIONED_TABLES = ['messages', 'call_participants', 'channel_webhook_logs'];
+  private readonly PARTITIONED_TABLES = [
+    'messages',
+    'call_participants',
+    'channel_webhook_logs',
+    'security_audit_logs',
+  ];
   private readonly MONTHS_AHEAD = 3;
 
   constructor(private readonly dataSource: DataSource) {}
@@ -69,9 +74,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     }
   }
 
-  /**
-   * Lấy danh sách tên các phân vùng hiện có của một bảng từ INFORMATION_SCHEMA.PARTITIONS.
-   */
   private async getExistingPartitions(
     queryRunner: QueryRunner,
     tableName: string,
@@ -91,10 +93,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     return rows.map((r) => r.partitionName).filter((name): name is string => Boolean(name));
   }
 
-  /**
-   * Chuẩn bị cấu trúc khóa chính (id, created_at), gỡ Foreign Key vật lý,
-   * và kích hoạt PARTITION BY RANGE (FLOOR(UNIX_TIMESTAMP(created_at))) lần đầu tiên.
-   */
   private async initializeTableMonthlyPartitioning(
     queryRunner: QueryRunner,
     tableName: string,
@@ -103,7 +101,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
       `[TablePartitionManager] Initializing monthly partitions for "${tableName}"...`,
     );
 
-    // 1. Gỡ bỏ các Foreign Key vật lý trên bảng (nếu có từ các bản migration cũ)
     const fks: Array<{ constraintName: string }> = await queryRunner.query(
       `
       SELECT CONSTRAINT_NAME AS constraintName
@@ -121,7 +118,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
       );
     }
 
-    // 2. Đảm bảo có Index đơn trên cột `id` trước khi đổi PRIMARY KEY sang (id, created_at)
     const idIndexes: Array<{ indexName: string }> = await queryRunner.query(
       `
       SELECT INDEX_NAME AS indexName
@@ -140,7 +136,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
       );
     }
 
-    // 3. Chuyển PRIMARY KEY sang khóa phức hợp (id, created_at) nếu chưa có created_at
     const pkCols: Array<{ columnName: string }> = await queryRunner.query(
       `
       SELECT COLUMN_NAME AS columnName
@@ -159,7 +154,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
       );
     }
 
-    // 4. Khởi tạo dải phân vùng từ tháng trước đến +3 tháng tới + p_future
     const specs = this.buildMonthlyPartitionSpecs(-1, this.MONTHS_AHEAD);
     const partitionDefs = [
       ...specs.map((s) => `PARTITION \`${s.name}\` VALUES LESS THAN (${s.lessThanUnix})`),
@@ -178,10 +172,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     );
   }
 
-  /**
-   * Mở rộng phân vùng cho các tháng mới bằng lệnh REORGANIZE PARTITION p_future
-   * mà không cần rebuild lại dữ liệu các tháng cũ.
-   */
   private async extendFutureMonthlyPartitions(
     queryRunner: QueryRunner,
     tableName: string,
@@ -212,10 +202,6 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     );
   }
 
-  /**
-   * Sinh danh sách mốc phân vùng tháng theo chuẩn UTC:
-   * Ví dụ phân vùng `p_2026_10` chứa toàn bộ bản ghi có `created_at < 2026-11-01 00:00:00 UTC`.
-   */
   private buildMonthlyPartitionSpecs(
     startMonthOffset: number,
     endMonthOffset: number,

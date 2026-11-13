@@ -121,6 +121,15 @@ export interface MessageMetadata {
   platformEditedExternalId?: string | null;
   platformEditSyncedAt?: string;
   platformErrorMessage?: string | null;
+  buyerDeliveredAt?: string | null;
+  buyerReadAt?: string | null;
+  platformSeenSyncedAt?: string | null;
+  viewerReadBy?: Array<{
+    id: string;
+    name: string;
+    avatar: string | null;
+    readAt: string;
+  }>;
 }
 
 export interface MessagePollOptionMeta {

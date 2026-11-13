@@ -19,6 +19,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ChannelsModule } from './modules/channels/channels.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
+import { CrmModule } from './modules/crm/crm.module';
 import { FilesModule } from './modules/files/files.module';
 import { IamModule } from './modules/iam/iam.module';
 import { MailModule } from './modules/mail/mail.module';
@@ -62,6 +63,7 @@ import { parseExpiresIn } from './utils';
     MediaModule,
     IamModule,
     ChannelsModule,
+    CrmModule,
     TagsModule,
     AuthModule,
     UserModule,

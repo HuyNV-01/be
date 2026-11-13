@@ -44,6 +44,8 @@ import { MessageDirectionEnum, MessageEntity } from 'src/entity/message.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { SaasAppProfileItem, ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
+import { Customer360Service } from 'src/modules/crm/services/customer-360.service';
+import { VietnameseCommerceNerService } from 'src/modules/crm/services/vietnamese-commerce-ner.service';
 import { DataScopeQueryHelper } from 'src/modules/iam/helpers/data-scope-query.helper';
 import { EffectiveMemberContext } from 'src/modules/iam/iam.service';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
@@ -288,6 +290,8 @@ export class ChannelsService {
     private readonly routingEngine: ConversationRoutingEngine,
     private readonly tokenDoctorService: ChannelTokenDoctorService,
     private readonly marketplaceBridge: MarketplaceBridgeService,
+    private readonly nerService: VietnameseCommerceNerService,
+    private readonly customer360Service: Customer360Service,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly eventEmitter: EventEmitter2,
@@ -3782,7 +3786,9 @@ export class ChannelsService {
     conversationId: string | null;
     assignedAgentId: string | null;
   }> {
-    // 0. Xử lý sự kiện Khách hàng Đã nhận / Đã xem tin nhắn của Shop (DELIVERY_RECEIPT / READ_RECEIPT)
+    // 0. Xử lý sự kiện Người mua Đã nhận / Đã xem tin nhắn của Shop (DELIVERY_RECEIPT / READ_RECEIPT)
+    // Lưu bền vững trạng thái vào MySQL (status, deliveredTo, readBy) và phát Socket Realtime kèm đầy đủ
+    // thông tin user (id, name, avatar) tới cả phòng hội thoại và danh sách nhân sự của Shop.
     if (
       normalized.eventSubtype === 'READ_RECEIPT' ||
       normalized.eventSubtype === 'DELIVERY_RECEIPT'
@@ -3795,35 +3801,141 @@ export class ChannelsService {
         },
       });
       if (targetConv) {
-        const nextStatus =
-          normalized.eventSubtype === 'READ_RECEIPT'
-            ? MessageStatusEnum.READ
-            : MessageStatusEnum.DELIVERED;
-        const readIso = new Date(normalized.watermarkTimestampMs || Date.now()).toISOString();
+        const isReadEvent = normalized.eventSubtype === 'READ_RECEIPT';
+        const nextStatus = isReadEvent ? MessageStatusEnum.READ : MessageStatusEnum.DELIVERED;
+        const watermarkDate = new Date(normalized.watermarkTimestampMs || Date.now());
+        const readIso = watermarkDate.toISOString();
+        const buyerReaderId = `ext:${channel.channelType.toLowerCase()}:${normalized.externalThreadId.slice(0, 18)}`;
+        const buyerReaderUser = {
+          id: buyerReaderId,
+          name: targetConv.name || normalized.customerName || 'Khách hàng',
+          avatar:
+            targetConv.avatar ||
+            this.buildFallbackCustomerAvatarUrl(
+              targetConv.name || normalized.customerName,
+              normalized.externalCustomerPsid,
+            ),
+        };
 
-        this.realtimeEmitter.emitToConversation(
-          SOCKET_CONFIG.namespaces.CHAT,
-          targetConv.id,
-          SOCKET_CONFIG.events.CHAT.MESSAGE_READ,
-          {
+        const outboundMessages = await this.messageRepo.find({
+          where: {
             conversationId: targetConv.id,
-            userId: `customer:${normalized.externalCustomerPsid || 'guest'}`,
-            lastReadAt: readIso,
-            status: nextStatus,
+            direction: MessageDirectionEnum.OUTBOUND,
           },
-        );
+          order: { createdAt: 'DESC' },
+          take: 40,
+        });
+
+        const affectedMessageIds: string[] = [];
+        for (const outMsg of outboundMessages) {
+          if (outMsg.status === MessageStatusEnum.REMOVED) continue;
+          const msgCreatedMs = new Date(outMsg.createdAt).getTime();
+          const isMatchedByWatermark = msgCreatedMs <= watermarkDate.getTime() + 5000;
+          const isMatchedByMids =
+            Array.isArray(normalized.deliveredMessageIds) &&
+            normalized.deliveredMessageIds.length > 0 &&
+            Boolean(
+              outMsg.externalMessageId &&
+                normalized.deliveredMessageIds.includes(outMsg.externalMessageId),
+            );
+
+          if (!isMatchedByWatermark && !isMatchedByMids) continue;
+
+          const deliveredSet = new Set(Array.isArray(outMsg.deliveredTo) ? outMsg.deliveredTo : []);
+          deliveredSet.add(buyerReaderId);
+          const readSet = new Set(Array.isArray(outMsg.readBy) ? outMsg.readBy : []);
+          if (isReadEvent) {
+            readSet.add(buyerReaderId);
+          }
+
+          const nextMsgStatus = isReadEvent
+            ? MessageStatusEnum.READ
+            : outMsg.status === MessageStatusEnum.READ
+              ? MessageStatusEnum.READ
+              : MessageStatusEnum.DELIVERED;
+
+          const updatedMeta = {
+            ...(outMsg.metadata || {}),
+            buyerDeliveredAt: outMsg.metadata?.buyerDeliveredAt || readIso,
+            ...(isReadEvent ? { buyerReadAt: readIso } : {}),
+          };
+
+          await this.messageRepo.update(
+            { id: outMsg.id, createdAt: outMsg.createdAt },
+            {
+              status: nextMsgStatus,
+              deliveredTo: Array.from(deliveredSet),
+              readBy: Array.from(readSet),
+              metadata: updatedMeta as any,
+            },
+          );
+          affectedMessageIds.push(outMsg.id);
+        }
+
+        if (isReadEvent) {
+          const readPayload = {
+            conversationId: targetConv.id,
+            userId: buyerReaderId,
+            user: buyerReaderUser,
+            lastReadAt: readIso,
+            status: MessageStatusEnum.READ,
+            isBuyerReceipt: true,
+          };
+
+          this.realtimeEmitter.emitToConversation(
+            SOCKET_CONFIG.namespaces.CHAT,
+            targetConv.id,
+            SOCKET_CONFIG.events.CHAT.MESSAGE_READ,
+            readPayload,
+          );
+          await this.broadcastChannelEventToShop(
+            channel.shopId,
+            SOCKET_CONFIG.events.CHAT.MESSAGE_READ,
+            readPayload,
+          );
+        } else if (affectedMessageIds.length > 0) {
+          const batchDeliveredPayload = {
+            conversationId: targetConv.id,
+            messageIds: affectedMessageIds,
+            status: MessageStatusEnum.DELIVERED,
+            userId: buyerReaderId,
+            updatedAt: readIso,
+          };
+          this.realtimeEmitter.emitToConversation(
+            SOCKET_CONFIG.namespaces.CHAT,
+            targetConv.id,
+            SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH,
+            batchDeliveredPayload,
+          );
+          await this.broadcastChannelEventToShop(
+            channel.shopId,
+            SOCKET_CONFIG.events.CHAT.MESSAGE_STATUS_BATCH,
+            batchDeliveredPayload,
+          );
+        }
+
+        const deliveryStatusPayload = {
+          conversationId: targetConv.id,
+          platformDeliveryStatus: 'DISPATCHED',
+          customerReceiptStatus: nextStatus,
+          deliveredMessageIds:
+            affectedMessageIds.length > 0
+              ? affectedMessageIds
+              : normalized.deliveredMessageIds || [],
+          buyerReaderUser,
+          timestamp: readIso,
+        };
 
         this.realtimeEmitter.emitToConversation(
           SOCKET_CONFIG.namespaces.CHAT,
           targetConv.id,
           SOCKET_CONFIG.events.OMNICHANNEL_INBOX.OUTBOUND_DELIVERY_STATUS,
-          {
-            conversationId: targetConv.id,
-            platformDeliveryStatus: 'DISPATCHED',
-            customerReceiptStatus: nextStatus,
-            deliveredMessageIds: normalized.deliveredMessageIds || [],
-            timestamp: readIso,
-          },
+          deliveryStatusPayload,
+        );
+        await this.broadcastChannelEventToShop(
+          channel.shopId,
+          SOCKET_CONFIG.events.OMNICHANNEL_INBOX.OUTBOUND_DELIVERY_STATUS,
+          deliveryStatusPayload,
         );
       }
 
@@ -4113,9 +4225,9 @@ export class ChannelsService {
       }
     }
 
-    const hasPhoneMatch = /(?:\+84|84|0)(?:3|5|7|8|9)\d{8}\b/.test(
-      normalized.messageText.replace(/[\s.-]/g, ''),
-    );
+    // F04.1 (Công cụ T05): Bóc tách thực thể thương mại tiếng Việt (SĐT lách luật, địa chỉ 3 cấp, SKU, size, màu)
+    const extractedNer = this.nerService.extractCommerceEntities(normalized.messageText);
+    const hasPhoneMatch = Boolean(extractedNer.phones && extractedNer.phones.length > 0);
 
     const isCommentOrLive =
       normalized.interactionType === 'COMMENT' || normalized.interactionType === 'LIVESTREAM';
@@ -4292,6 +4404,87 @@ export class ChannelsService {
       savedConversation.avatar ||
       this.buildFallbackCustomerAvatarUrl(normalized.customerName, normalized.externalCustomerPsid);
 
+    // Khi người mua gửi tin nhắn phản hồi mới (INBOUND), đồng bộ toàn bộ tin nhắn OUTBOUND trước đó của Shop
+    // trong cuộc hội thoại này sang trạng thái Đã xem (READ) bởi người mua
+    const unreadPreviousOutbounds = await this.messageRepo.find({
+      where: {
+        conversationId: savedConversation.id,
+        direction: MessageDirectionEnum.OUTBOUND,
+      },
+      order: { createdAt: 'DESC' },
+      take: 25,
+    });
+    let hasMarkedPrevOutboundRead = false;
+    for (const prevOut of unreadPreviousOutbounds) {
+      const readSet = new Set(Array.isArray(prevOut.readBy) ? prevOut.readBy : []);
+      const deliveredSet = new Set(Array.isArray(prevOut.deliveredTo) ? prevOut.deliveredTo : []);
+      if (!readSet.has(inboundSenderId) || prevOut.status !== MessageStatusEnum.READ) {
+        readSet.add(inboundSenderId);
+        deliveredSet.add(inboundSenderId);
+        await this.messageRepo.update(
+          { id: prevOut.id, createdAt: prevOut.createdAt },
+          {
+            status: MessageStatusEnum.READ,
+            readBy: Array.from(readSet),
+            deliveredTo: Array.from(deliveredSet),
+            metadata: {
+              ...(prevOut.metadata || {}),
+              buyerReadAt: nowIso,
+            } as any,
+          },
+        );
+        hasMarkedPrevOutboundRead = true;
+      }
+    }
+
+    if (hasMarkedPrevOutboundRead) {
+      const implicitReadPayload = {
+        conversationId: savedConversation.id,
+        userId: inboundSenderId,
+        user: {
+          id: inboundSenderId,
+          name: normalized.customerName,
+          avatar: resolvedCustomerAvatar,
+        },
+        lastReadAt: nowIso,
+        status: MessageStatusEnum.READ,
+        isBuyerReceipt: true,
+      };
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        savedConversation.id,
+        SOCKET_CONFIG.events.CHAT.MESSAGE_READ,
+        implicitReadPayload,
+      );
+      for (const uid of new Set(participantUserIds)) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.MESSAGE_READ,
+          implicitReadPayload,
+        );
+      }
+    }
+
+    // F04.2, F04.5 & F11.1: Tự động phân giải & hợp nhất Hồ sơ Khách hàng CRM 360° đa kênh
+    // và tự động đẩy sự kiện LeadSubmitted lên Meta CAPI nếu khách đến từ quảng cáo và vừa để lại SĐT
+    await this.customer360Service
+      .resolveOrUpsertCustomerFromOmnichannelEvent({
+        shopId: channel.shopId,
+        conversation: savedConversation,
+        channelType: channel.channelType,
+        channelIntegrationId: channel.id,
+        pageShortCode: channel.pageShortCode,
+        pageName: channel.pageName,
+        externalUserId: normalized.externalCustomerPsid || normalized.externalThreadId,
+        customerName: normalized.customerName,
+        customerAvatarUrl: resolvedCustomerAvatar,
+        extractedNer,
+      })
+      .catch((crmErr) => {
+        this.logger.warn(`CRM 360 auto-resolve warning: ${String(crmErr)}`);
+      });
+
     const inboundMessage = this.messageRepo.create({
       conversationId: savedConversation.id,
       senderId: inboundSenderId,
@@ -4303,6 +4496,7 @@ export class ChannelsService {
       status: MessageStatusEnum.SENT,
       readBy: [],
       deliveredTo: participantUserIds,
+      extractedEntitiesJson: extractedNer,
       isPinned: false,
       metadata: {
         isEncrypted: encryptedMsg.isEncrypted,
@@ -4349,6 +4543,39 @@ export class ChannelsService {
         conversationId: savedConversation.id,
         messageContent: normalized.messageText,
       });
+    }
+    if (extractedNer.provinceCode) {
+      this.eventEmitter.emit('ner.address.extracted', {
+        shopId: channel.shopId,
+        conversationId: savedConversation.id,
+        messageContent: normalized.messageText,
+      });
+    }
+    if (
+      hasPhoneMatch ||
+      Boolean(extractedNer.provinceCode) ||
+      Boolean(extractedNer.skuCodes && extractedNer.skuCodes.length > 0)
+    ) {
+      const nerDetectedPayload = {
+        shopId: channel.shopId,
+        conversationId: savedConversation.id,
+        messageId: savedMsg.id,
+        extractedEntities: extractedNer,
+      };
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        savedConversation.id,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.NER_ENTITIES_DETECTED,
+        nerDetectedPayload,
+      );
+      for (const uid of new Set(participantUserIds)) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.OMNICHANNEL_INBOX.NER_ENTITIES_DETECTED,
+          nerDetectedPayload,
+        );
+      }
     }
 
     const enrichedRealtimeMessage = {

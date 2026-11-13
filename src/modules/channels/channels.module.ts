@@ -13,6 +13,7 @@ import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { UserEntity } from 'src/entity/user.entity';
 import { ChatModule } from 'src/modules/chat/chat.module';
+import { CrmModule } from 'src/modules/crm/crm.module';
 import { IamModule } from 'src/modules/iam/iam.module';
 import { NotificationsModule } from 'src/modules/notifications/notifications.module';
 
@@ -43,6 +44,7 @@ import { OmnibusWebhookController } from './webhooks/omnibus-webhook.controller'
     WebSocketModule,
     IamModule,
     ChatModule,
+    CrmModule,
     NotificationsModule,
   ],
   controllers: [ChannelsController, OmnibusWebhookController],

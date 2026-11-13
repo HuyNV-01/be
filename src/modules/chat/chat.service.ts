@@ -1751,6 +1751,19 @@ export class ChatService {
         readByUsers = (msg.readBy as string[])
           .filter((id) => !privacyHideReadSet.has(id))
           .map((id: string) => {
+            if (id.startsWith('ext:') || id.startsWith('customer:')) {
+              const buyerName =
+                (msg.metadata as any)?.externalCustomerName || convInfo?.name || 'Khách hàng';
+              const buyerAvatar =
+                (msg.metadata as any)?.externalCustomerAvatar ||
+                convInfo?.avatar ||
+                this.buildCustomerFallbackAvatarUrl(buyerName);
+              return {
+                id,
+                name: buyerName,
+                avatar: buyerAvatar,
+              };
+            }
             const u = userMap.get(id);
             if (!u) return null;
             const userWithAvatar = u as any;
@@ -2353,22 +2366,40 @@ export class ChatService {
 
   async markConversationAsRead(payload: { userId: string; conversationId: string }) {
     const { conversationId, userId } = payload;
-    const participant = await this.ensureParticipant(conversationId, userId);
+    const [participant, conv] = await Promise.all([
+      this.ensureParticipant(conversationId, userId),
+      this.convRepository.findOne({
+        where: { id: conversationId },
+        select: [
+          'id',
+          'name',
+          'shopId',
+          'channelType',
+          'channelIntegrationId',
+          'externalThreadId',
+          'interactionType',
+          'firstSeenAt',
+        ],
+      }),
+    ]);
     const now = new Date();
+    const nowIso = now.toISOString();
 
     await this.partRepository.update({ conversationId, userId }, { lastReadAt: now });
 
-    await this.convRepository
-      .createQueryBuilder()
-      .update(ConversationEntity)
-      .set({
-        firstSeenAt: now,
-        firstSeenByAgentId: userId,
-      })
-      .where('id = :conversationId', { conversationId })
-      .andWhere('shop_id IS NOT NULL')
-      .andWhere('first_seen_at IS NULL')
-      .execute();
+    if (conv?.shopId && !conv.firstSeenAt) {
+      await this.convRepository
+        .createQueryBuilder()
+        .update(ConversationEntity)
+        .set({
+          firstSeenAt: now,
+          firstSeenByAgentId: userId,
+        })
+        .where('id = :conversationId', { conversationId })
+        .andWhere('shop_id IS NOT NULL')
+        .andWhere('first_seen_at IS NULL')
+        .execute();
+    }
 
     this.eventEmitter.emit(
       NotificationEventEnum.MARK_CONVERSATION_READ,
@@ -2390,19 +2421,22 @@ export class ChatService {
     if (!participant.readReceiptsEnabled || participant.isRestricted) {
       return {
         success: true,
-        lastReadAt: now.toISOString(),
+        lastReadAt: nowIso,
         readReceiptSent: false,
       };
     }
 
+    // Cập nhật readBy và nâng trạng thái status = READ cho toàn bộ tin nhắn đối phương/người mua gửi tới
     await this.msgRepository
       .createQueryBuilder()
       .update(MessageEntity)
       .set({
+        status: MessageStatusEnum.READ,
         readBy: () => `JSON_ARRAY_APPEND(COALESCE(readBy, JSON_ARRAY()), '$', :userId)`,
       })
       .where('conversationId = :conversationId', { conversationId })
       .andWhere('senderId != :userId', { userId })
+      .andWhere('status != :removedStatus', { removedStatus: MessageStatusEnum.REMOVED })
       .andWhere(`NOT JSON_CONTAINS(COALESCE(readBy, JSON_ARRAY()), JSON_QUOTE(:userId), '$')`)
       .setParameters({ userId, conversationId })
       .execute();
@@ -2421,13 +2455,36 @@ export class ChatService {
         }
       : { id: userId, name: 'Unknown', avatar: null };
 
-    const event = new ChatMessageReadEvent(conversationId, userId, now, userReaderInfo, memberIds);
+    // Đồng bộ trạng thái "Đã xem" (sender_action: "mark_seen") ra nền tảng ngoại vi (Messenger / Instagram / Zalo)
+    // để người mua biết ngay lập tức người xem đã xem tin nhắn của họ trong lúc chat
+    let platformSeenSynced = false;
+    if (conv?.shopId && conv.channelIntegrationId && conv.interactionType === 'INBOX') {
+      platformSeenSynced = true;
+      void this.dispatchOutboundSenderActionToPlatform({
+        conversation: conv,
+        senderAction: 'mark_seen',
+        viewerUser: userReaderInfo,
+      }).catch((err) => {
+        this.logger.debug(`Platform mark_seen dispatch skipped: ${String(err)}`);
+      });
+    }
+
+    const event = new ChatMessageReadEvent(
+      conversationId,
+      userId,
+      now,
+      userReaderInfo,
+      memberIds,
+      false,
+      platformSeenSynced,
+    );
     this.eventEmitter.emit(ChatEventEnum.MESSAGE_READ, event);
 
     return {
       success: true,
-      lastReadAt: now.toISOString(),
+      lastReadAt: nowIso,
       readReceiptSent: true,
+      platformSeenSynced,
     };
   }
 
@@ -2470,16 +2527,26 @@ export class ChatService {
     if (msg.status === MessageStatusEnum.REMOVED) return MessageStatusEnum.REMOVED;
     if (msg.status === MessageStatusEnum.FAILED) return MessageStatusEnum.FAILED;
 
-    if (msg.senderId !== currentUserId) return MessageStatusEnum.READ;
+    const isOutboundOrMine =
+      msg.senderId === currentUserId || msg.direction === MessageDirectionEnum.OUTBOUND;
 
     const hasVisibleRead =
       canSeeReadReceipts &&
-      msg.readBy?.some((id) => id !== currentUserId && !privacyHideReadSet?.has(id));
+      (msg.status === MessageStatusEnum.READ ||
+        Boolean((msg.metadata as any)?.buyerReadAt) ||
+        msg.readBy?.some((id) => id !== msg.senderId && !privacyHideReadSet?.has(id)));
+
+    if (!isOutboundOrMine) {
+      return hasVisibleRead ? MessageStatusEnum.READ : MessageStatusEnum.DELIVERED;
+    }
+
     if (hasVisibleRead) return MessageStatusEnum.READ;
 
     const hasDelivered =
-      msg.deliveredTo?.some((id) => id !== currentUserId) ||
-      msg.readBy?.some((id) => id !== currentUserId);
+      msg.status === MessageStatusEnum.DELIVERED ||
+      Boolean((msg.metadata as any)?.buyerDeliveredAt) ||
+      msg.deliveredTo?.some((id) => id !== msg.senderId) ||
+      msg.readBy?.some((id) => id !== msg.senderId);
     if (hasDelivered) return MessageStatusEnum.DELIVERED;
 
     return MessageStatusEnum.SENT;
@@ -3619,6 +3686,7 @@ export class ChatService {
     shopId?: string | null;
     actionType:
       | 'SEND_INBOX_MESSAGE'
+      | 'SEND_SENDER_ACTION'
       | 'REPLY_PUBLIC_COMMENT'
       | 'EDIT_COMMENT'
       | 'SEND_PRIVATE_REPLY'
@@ -4127,6 +4195,24 @@ export class ChatService {
               };
             }
             break;
+          } else if (params.actionType === 'SEND_SENDER_ACTION') {
+            const senderAction = String(params.bodyPayload?.senderAction || 'mark_seen');
+            const actionRes = await runWithProofFallback({
+              ver,
+              endpointPath: `${encodeURIComponent(channel.externalPageId)}/messages`,
+              method: 'POST',
+              bodyObj: {
+                recipient: { id: cleanTargetId },
+                sender_action: senderAction,
+              },
+            });
+            if (actionRes.ok) {
+              return {
+                deliveryStatus: 'DISPATCHED',
+                externalId: actionRes.externalId || `action_${senderAction}_${Date.now()}`,
+              };
+            }
+            break;
           }
         }
       } else if (
@@ -4211,6 +4297,55 @@ export class ChatService {
    * Điều phối gửi tin nhắn trả lời của nhân viên Sale ra đúng kênh ngoại vi (Inbox hoặc Trả lời Bình luận công khai)
    * và tự động ẩn bình luận gốc của khách nếu bật cờ autoHideCommentOnReply.
    */
+  /**
+   * Đồng bộ trạng thái "Đã xem" (`mark_seen`) hoặc "Đang gõ phím" (`typing_on` / `typing_off`)
+   * từ Người xem / Nhân viên Sale ra nền tảng ngoại vi (Messenger / Instagram / Zalo)
+   * giúp Người mua biết ngay tin nhắn của họ đã được xem hoặc đang được phản hồi trong lúc chat.
+   */
+  public async dispatchOutboundSenderActionToPlatform(params: {
+    conversation: ConversationEntity;
+    senderAction: 'mark_seen' | 'typing_on' | 'typing_off';
+    viewerUser?: { id: string; name: string; avatar: string | null };
+  }): Promise<void> {
+    const { conversation, senderAction, viewerUser } = params;
+    if (!conversation.channelIntegrationId || !conversation.shopId) return;
+    if (conversation.interactionType !== 'INBOX') return;
+
+    const debounceKey = `sender_action:${conversation.id}:${senderAction}`;
+    const ttlSeconds = senderAction === 'mark_seen' ? 3 : 4;
+    const canSend = await this.redis
+      .set(debounceKey, '1', 'EX', ttlSeconds, 'NX')
+      .catch(() => 'OK');
+    if (!canSend) return;
+
+    const { recipientPsid } = await this.resolveCustomerRecipientForConversation(conversation);
+    const targetExternalId = recipientPsid || conversation.externalThreadId || conversation.id;
+
+    const dispatchRes = await this.executePlatformHttpCall({
+      channelIntegrationId: conversation.channelIntegrationId,
+      shopId: conversation.shopId,
+      actionType: 'SEND_SENDER_ACTION',
+      targetExternalId,
+      bodyPayload: { senderAction },
+    });
+
+    if (senderAction === 'mark_seen') {
+      const nowIso = new Date().toISOString();
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        conversation.id,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.BUYER_SEEN_SYNCED,
+        {
+          conversationId: conversation.id,
+          senderAction: 'mark_seen',
+          platformDeliveryStatus: dispatchRes.deliveryStatus,
+          viewerUser: viewerUser || null,
+          syncedAt: nowIso,
+        },
+      );
+    }
+  }
+
   private async dispatchOutboundConversationMessageToPlatform(params: {
     conversation: ConversationEntity;
     savedMessage: MessageEntity;
