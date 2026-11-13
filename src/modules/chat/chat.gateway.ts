@@ -1,5 +1,5 @@
 import { HttpStatus } from '@nestjs/common';
-import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+import { OnEvent } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
 import { ConnectedSocket, MessageBody, SubscribeMessage, WsException } from '@nestjs/websockets';
 
@@ -37,6 +37,7 @@ import { ClosePollDto, SendMessageDto, VotePollDto } from 'src/dto/chat/chat.dto
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
 
 import { ChatService } from './chat.service';
+import { AgentCollisionLockService } from './services/agent-collision-lock.service';
 import { CallSignalingService } from './services/call-signaling.service';
 
 @AppGateway(SOCKET_CONFIG.namespaces.CHAT)
@@ -48,6 +49,7 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     jwtService: JwtService,
     private readonly chatService: ChatService,
     private readonly callSignalingService: CallSignalingService,
+    private readonly agentCollisionLockService: AgentCollisionLockService,
   ) {
     super(
       socketStateService,
@@ -190,10 +192,18 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     }
 
     await client.join(`conversation:${conversationId}`);
+    const collisionLock = await this.agentCollisionLockService
+      .acquireOrHeartbeatLock({
+        conversationId,
+        userId,
+      })
+      .catch(() => null);
+
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data: { collisionLock },
     };
   }
 
@@ -202,6 +212,12 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     @MessageBody('conversationId') conversationId: string,
     @ConnectedSocket() client: AuthenticatedSocket,
   ) {
+    const userId = client.data?.user?.id;
+    if (userId && conversationId) {
+      await this.agentCollisionLockService
+        .releaseLock({ conversationId, userId })
+        .catch(() => undefined);
+    }
     await client.leave(`conversation:${conversationId}`);
     return {
       status: HttpStatus.OK,
@@ -224,6 +240,10 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     });
 
     if (!isDuplicate) {
+      this.server
+        .to(`conversation:${dto.conversationId}`)
+        .emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
+
       const uniqueTargets = new Set([senderId, ...recipientIds]);
       uniqueTargets.forEach((userId) => {
         this.server.to(`user:${userId}`).emit(SOCKET_CONFIG.events.CHAT.NEW_MESSAGE, message);
@@ -401,7 +421,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
         });
       });
 
-      // Tự động kết thúc cuộc gọi nếu sau 60s không ai bắt máy
       this.callSignalingService.scheduleRingingTimeout(session.callId, async (staleSession) => {
         const outcome = await this.callSignalingService.rejectOrLeaveCall({
           callId: staleSession.callId,
@@ -496,7 +515,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       .emit(SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
     this.emitToUser(session.initiatorId, SOCKET_CONFIG.events.CALL.ACCEPTED, acceptedPayload);
 
-    // Thông báo cho tất cả thành viên đang trong cuộc gọi để tạo kết nối P2P Mesh với thành viên mới
     client.to(`call:${session.callId}`).emit(SOCKET_CONFIG.events.CALL.PARTICIPANT_JOINED, {
       callId: session.callId,
       conversationId: session.conversationId,
@@ -603,7 +621,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       throw new WsException('Call session does not exist or has ended');
     }
 
-    // Xác thực người gửi và người nhận đều thuộc cuộc gọi
     const allowedUsers = new Set([session.initiatorId, ...session.invitedUserIds]);
     if (!allowedUsers.has(senderId) || !allowedUsers.has(dto.targetUserId)) {
       throw new WsException('Forbidden: Unauthorized WebRTC signal target');
@@ -868,7 +885,6 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       .to(`user:${event.blockerId}`)
       .emit(SOCKET_CONFIG.events.CONTACT.USER_BLOCKED, payload);
 
-    // Lý do nghiệp vụ: Ẩn trạng thái online từ cả 2 phía ngay lập tức khi có hành động chặn
     this.emitToUser(event.targetId, SOCKET_CONFIG.events.USER_STATUS, {
       userId: event.blockerId,
       isOnline: false,

@@ -189,6 +189,12 @@ export class UpdateMemberRoleAndPermissionsDto {
   @Min(0)
   unmaskPhoneHourlyLimit: number;
 
+  @ApiPropertyOptional({ example: 'TEAM_CA_SANG' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  teamCode?: string;
+
   @ApiPropertyOptional({ example: 25 })
   @IsOptional()
   @IsNumber()

@@ -30,6 +30,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
+import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { FileValidators } from 'src/common/pipes/file-validation.pipe';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
@@ -58,17 +59,45 @@ import {
   VotePollDto,
 } from 'src/dto/chat/chat.dto';
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
+import {
+  CreateInternalNoteDto,
+  CreateQuickReplyTemplateDto,
+  FinalizeMaskedVoipCallDto,
+  InitiateMaskedVoipCallDto,
+  OmnichannelInboxFilterDto,
+  SendPrivateReplyFromCommentDto,
+  SnoozeConversationDto,
+  ToggleCommentLikeDto,
+  ToggleCommentVisibilityDto,
+  TransferConversationDto,
+  TranslateChatMessageDto,
+  UpdateQuickReplyTemplateDto,
+} from 'src/dto/chat/omnichannel-inbox.dto';
+import {
+  RequireShopPermissions,
+  ShopPermissionGuard,
+} from 'src/modules/iam/guards/shop-permission.guard';
+import { FieldLevelSecurityInterceptor } from 'src/modules/iam/interceptors/field-level-security.interceptor';
 import * as queryTypes from 'src/types/query.types';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { GranularIamService } from '../iam/iam.service';
 import { ChatService } from './chat.service';
+import { AccountabilityTimelineService } from './services/accountability-timeline.service';
+import { AgentCollisionLockService } from './services/agent-collision-lock.service';
 import { CallSignalingService } from './services/call-signaling.service';
+import { ConversationSnoozeService } from './services/conversation-snooze.service';
 import { LinkPreviewService } from './services/link-preview.service';
+import { MaskedVoipCallService } from './services/masked-voip-call.service';
+import { OmnichannelInboxQueryService } from './services/omnichannel-inbox-query.service';
+import { QuickReplyService } from './services/quick-reply.service';
+import { RealtimeChatTranslationService } from './services/realtime-chat-translation.service';
 
 @ApiTags('Chat & Real-Time Communication')
 @Controller('chat')
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(FieldLevelSecurityInterceptor)
 export class ChatController {
   private readonly logger = new Logger(ChatController.name, {
     timestamp: true,
@@ -79,6 +108,14 @@ export class ChatController {
     private readonly realtimeEmitter: RealtimeEmitterService,
     private readonly linkPreviewService: LinkPreviewService,
     private readonly callSignalingService: CallSignalingService,
+    private readonly granularIamService: GranularIamService,
+    private readonly omnichannelInboxQueryService: OmnichannelInboxQueryService,
+    private readonly agentCollisionLockService: AgentCollisionLockService,
+    private readonly conversationSnoozeService: ConversationSnoozeService,
+    private readonly quickReplyService: QuickReplyService,
+    private readonly accountabilityTimelineService: AccountabilityTimelineService,
+    private readonly maskedVoipCallService: MaskedVoipCallService,
+    private readonly realtimeChatTranslationService: RealtimeChatTranslationService,
   ) {}
 
   @ApiOperation({
@@ -874,6 +911,611 @@ export class ChatController {
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
       code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
       data: results.map((r) => r.message),
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.1 & F03.2: Truy vấn Hộp thư bán hàng đa kênh 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT',
+  })
+  @Post('omnichannel/query')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async queryOmnichannelInbox(@Req() req, @Body() dto: OmnichannelInboxFilterDto) {
+    const memberCtx = await this.granularIamService.getEffectiveMemberContext(
+      dto.shopId,
+      req.user.id,
+    );
+    const data = await this.omnichannelInboxQueryService.queryMergedConversations(dto, memberCtx);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.5: Tạo Ghi chú nội bộ (Alt+N) & @mention đồng nghiệp (Không gửi ra Facebook/Zalo bên ngoài)',
+  })
+  @Post('conversations/:id/internal-note')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_INTERNAL_NOTE_WRITE)
+  @HttpCode(HttpStatus.CREATED)
+  async createInternalNote(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: CreateInternalNoteDto,
+  ) {
+    const { message, recipientIds } = await this.chatService.createInternalNote({
+      senderId: req.user.id,
+      conversationId,
+      content: dto.content,
+      mentionedUserIds: dto.mentionedUserIds,
+      replyToMessageId: dto.replyToMessageId,
+    });
+
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+      message,
+    );
+
+    recipientIds.forEach((uid) => {
+      if (uid !== req.user.id) {
+        this.realtimeEmitter.emitToUser(
+          SOCKET_CONFIG.namespaces.CHAT,
+          uid,
+          SOCKET_CONFIG.events.CHAT.NEW_MESSAGE,
+          message,
+        );
+      }
+    });
+
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data: message,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.6: Đặt lịch hẹn nhắc chăm sóc lại (Snooze Conversation)',
+  })
+  @Post('conversations/:id/snooze')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE)
+  @HttpCode(HttpStatus.OK)
+  async snoozeConversation(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: SnoozeConversationDto,
+  ) {
+    const data = await this.conversationSnoozeService.snoozeConversation({
+      conversationId,
+      actorUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.6: Hủy hẹn giờ Snooze để đưa hội thoại về danh sách chờ trả lời ngay',
+  })
+  @Delete('conversations/:id/snooze')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_SNOOZE)
+  @HttpCode(HttpStatus.OK)
+  async cancelSnooze(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.conversationSnoozeService.cancelSnooze({
+      conversationId,
+      actorUserId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.8 & F03.9: Chuyển giao hội thoại cho đồng nghiệp & ghi nhận Dòng thời gian Trách nhiệm',
+  })
+  @Post('conversations/:id/transfer')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_TRANSFER)
+  @HttpCode(HttpStatus.OK)
+  async transferConversation(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: TransferConversationDto,
+  ) {
+    const data = await this.accountabilityTimelineService.transferConversation({
+      conversationId,
+      actorUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Kiểm tra trạng thái Khóa chống đụng độ nhân viên (Collision Lock)',
+  })
+  @Get('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async getCollisionLock(@Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.getLockStatus(conversationId);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Giữ hoặc gia hạn Khóa chống đụng độ nhân viên (Heartbeat 30s)',
+  })
+  @Post('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async acquireCollisionLock(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.acquireOrHeartbeatLock({
+      conversationId,
+      userId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.7 & T03: Giải phóng Khóa chống đụng độ khi nhân viên rời hội thoại',
+  })
+  @Delete('conversations/:id/collision-lock')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async releaseCollisionLock(@Req() req, @Param('id') conversationId: string) {
+    const data = await this.agentCollisionLockService.releaseLock({
+      conversationId,
+      userId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.7: Quản lý / Trưởng ca chiếm quyền xử lý cuộc hội thoại đang bị khóa (Force Takeover)',
+  })
+  @Post('conversations/:id/collision-lock/takeover')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_COLLISION_FORCE_TAKEOVER)
+  @HttpCode(HttpStatus.OK)
+  async forceTakeoverCollisionLock(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body('shopId') shopId: string,
+  ) {
+    const data = await this.agentCollisionLockService.forceTakeOverLock({
+      shopId,
+      conversationId,
+      requesterUserId: req.user.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Khởi tạo cuộc gọi chốt đơn ẩn SĐT (Masked WebRTC-to-SIP VoIP — Sale chỉ thấy 098***678)',
+  })
+  @Post('conversations/:id/masked-call')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_CALL_MASKED)
+  @HttpCode(HttpStatus.CREATED)
+  async initiateMaskedVoipCall(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: InitiateMaskedVoipCallDto,
+  ) {
+    const data = await this.maskedVoipCallService.initiateMaskedPstnCall({
+      conversationId,
+      agentUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Kết thúc cuộc gọi VoIP ẩn SĐT & đính kèm bong bóng ghi âm cuộc gọi (AudioWaveformPlayer)',
+  })
+  @Post('conversations/:id/masked-call/finalize')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_CALL_MASKED)
+  @HttpCode(HttpStatus.OK)
+  async finalizeMaskedVoipCall(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Body() dto: FinalizeMaskedVoipCallDto,
+  ) {
+    const data = await this.maskedVoipCallService.finalizeCallAndAttachRecordingBubble({
+      conversationId,
+      agentUserId: req.user.id,
+      dto,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.11: Dịch tự động đa ngôn ngữ hai chiều trong khung chat',
+  })
+  @Post('translate')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_TRANSLATION_USE)
+  @HttpCode(HttpStatus.OK)
+  async translateChatMessage(@Body() dto: TranslateChatMessageDto) {
+    const data = await this.realtimeChatTranslationService.translateMessageOrDraft(dto);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Lấy danh sách thư viện mẫu câu trả lời nhanh (/shortcut) của cửa hàng',
+  })
+  @Get('quick-replies/:shopId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
+    const data = await this.quickReplyService.listTemplates(shopId, search);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Tạo mẫu câu trả lời nhanh (/shortcut) kèm biến động & thẻ sản phẩm',
+  })
+  @Post('quick-replies/:shopId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.CREATED)
+  async createQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateQuickReplyTemplateDto,
+  ) {
+    const data = await this.quickReplyService.createTemplate(shopId, dto);
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Cập nhật mẫu câu trả lời nhanh (/shortcut)',
+  })
+  @Patch('quick-replies/:shopId/:templateId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  async updateQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+    @Body() dto: UpdateQuickReplyTemplateDto,
+  ) {
+    const data = await this.quickReplyService.updateTemplate(shopId, templateId, dto);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Xóa mẫu câu trả lời nhanh (/shortcut)',
+  })
+  @Delete('quick-replies/:shopId/:templateId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  async deleteQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+  ) {
+    const data = await this.quickReplyService.deleteTemplate(shopId, templateId);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Nội suy biến động ({{customer_name}}, {{salutation}}, {{agent_name}}, {{shop_name}})',
+  })
+  @Post('quick-replies/:shopId/:templateId/interpolate')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async interpolateQuickReplyTemplate(
+    @Param('shopId') shopId: string,
+    @Param('templateId') templateId: string,
+    @Body()
+    body: {
+      customerName?: string;
+      salutation?: string;
+      agentName?: string;
+      pageName?: string;
+      trackingLink?: string;
+    },
+  ) {
+    const data = await this.quickReplyService.interpolateTemplate({
+      shopId,
+      templateId,
+      ...body,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Ẩn hoặc hiện bình luận của khách trên nền tảng gốc để chống đối thủ cướp SĐT',
+  })
+  @Post('conversations/:id/messages/:messageId/comment-visibility')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async toggleCommentVisibility(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: ToggleCommentVisibilityDto,
+  ) {
+    const data = await this.chatService.toggleCommentVisibilityOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+      isHidden: dto.isHidden,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
+      data,
+    );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_VISIBILITY_UPDATED,
+        data,
+      );
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Thả tim / Thích bình luận của khách hàng dưới tư cách Fanpage',
+  })
+  @Post('conversations/:id/messages/:messageId/comment-like')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async toggleCommentLike(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: ToggleCommentLikeDto,
+  ) {
+    const data = await this.chatService.toggleCommentLikeOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+      isLiked: dto.isLiked,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_LIKE_UPDATED,
+      data,
+    );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_LIKE_UPDATED,
+        data,
+      );
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Xóa bình luận trên nền tảng gốc (DELETE /{comment_id}) nhưng bảo toàn bản ghi trong DB để lưu vết kiểm toán',
+  })
+  @Delete('conversations/:id/messages/:messageId/comment-platform')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async deleteCommentOnPlatform(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const data = await this.chatService.deleteCommentOnPlatform({
+      userId: req.user.id,
+      conversationId,
+      messageId,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_DELETED_ON_PLATFORM,
+      data,
+    );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_DELETED_ON_PLATFORM,
+        data,
+      );
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Gửi tin nhắn riêng (Private Reply Inbox) từ bình luận bài viết/Livestream trong hạn 7 ngày',
+  })
+  @Post('conversations/:id/messages/:messageId/private-reply')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_REPLY)
+  @HttpCode(HttpStatus.OK)
+  async sendPrivateReplyFromComment(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: SendPrivateReplyFromCommentDto,
+  ) {
+    const data = await this.chatService.sendPrivateReplyFromComment({
+      senderId: req.user.id,
+      conversationId,
+      commentMessageId: messageId,
+      content: dto.content,
+      autoHideComment: dto.autoHideComment,
+      autoLikeComment: dto.autoLikeComment,
+    });
+    this.realtimeEmitter.emitToConversation(
+      SOCKET_CONFIG.namespaces.CHAT,
+      conversationId,
+      SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_PRIVATE_REPLY_SENT,
+      data,
+    );
+    data.recipientIds?.forEach((uid) => {
+      this.realtimeEmitter.emitToUser(
+        SOCKET_CONFIG.namespaces.CHAT,
+        uid,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.COMMENT_PRIVATE_REPLY_SENT,
+        data,
+      );
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.10 & T04: Kiểm tra quyền nghe hoặc tải file ghi âm cuộc gọi VoIP (INBOX_VOIP_LISTEN_RECORDING / INBOX_VOIP_DOWNLOAD_RECORDING)',
+  })
+  @Get('conversations/:id/masked-call/:callSessionId/recording')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_VOIP_LISTEN_RECORDING)
+  @HttpCode(HttpStatus.OK)
+  async getMaskedCallRecordingAccess(
+    @Req() req,
+    @Param('id') conversationId: string,
+    @Param('callSessionId') callSessionId: string,
+    @Query('download') download?: string,
+  ) {
+    const wantsDownload = download === 'true' || download === '1';
+    if (wantsDownload) {
+      await this.granularIamService.assertConversationPermission(
+        conversationId,
+        req.user.id,
+        PermissionCodeEnum.INBOX_VOIP_DOWNLOAD_RECORDING,
+      );
+    }
+    const data = await this.maskedVoipCallService.getCallRecordingAccess({
+      conversationId,
+      callSessionId,
+      download: wantsDownload,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
     };
   }
 }

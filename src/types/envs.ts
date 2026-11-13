@@ -52,4 +52,30 @@ export type EnvConfig = {
   WEBRTC_TURN_URLS?: string;
   WEBRTC_TURN_SECRET?: string;
   WEBRTC_TURN_TTL?: number;
+
+  // Cấu hình SaaS mặc định cho các kênh mạng xã hội & sàn TMĐT
+  META_GRAPH_API_VERSION?: string;
+  META_APP_ID?: string;
+  META_APP_SECRET?: string;
+  META_WEBHOOK_VERIFY_TOKEN?: string;
+  ZALO_OA_API_VERSION?: string;
+  ZALO_APP_ID?: string;
+  ZALO_APP_SECRET?: string;
+  ZALO_WEBHOOK_VERIFY_TOKEN?: string;
+  TIKTOK_SHOP_APP_KEY?: string;
+  TIKTOK_SHOP_APP_SECRET?: string;
+  SHOPEE_PARTNER_ID?: string;
+  SHOPEE_PARTNER_KEY?: string;
+
+  PUBLIC_TUNNEL_PROVIDER?: string;
+  PUBLIC_TUNNEL_ENABLED?: boolean;
+  PUBLIC_WEBHOOK_BASE_URL?: string;
+  PUBLIC_FRONTEND_URL?: string;
+  NGROK_DOMAIN?: string;
+  NGROK_AUTHTOKEN?: string;
+  NGROK_INSPECT_URL?: string;
+  PUBLIC_TUNNEL_AUTO_DETECT?: boolean;
+  PUBLIC_TUNNEL_ALLOW_WILDCARD_ORIGIN?: boolean;
+  CORS_ALLOWED_ORIGINS?: string;
+  CORS_ALLOWED_DOMAIN_SUFFIXES?: string;
 };

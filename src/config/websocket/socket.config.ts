@@ -1,9 +1,19 @@
 import { envs } from '../envs/envs';
+import { TUNNEL_ALLOWED_HEADERS, createDynamicCorsOriginValidator } from '../tunnel/tunnel.config';
 
 export const SOCKET_CONFIG = {
   cors: {
-    origin: [envs.feUrl],
+    origin: createDynamicCorsOriginValidator({
+      feUrl: envs.feUrl,
+      appUrl: envs.appUrl,
+      publicWebhookBaseUrl: envs.tunnel.publicWebhookBaseUrl,
+      publicFrontendUrl: envs.tunnel.publicFrontendUrl,
+      extraAllowedOrigins: envs.tunnel.extraAllowedOrigins,
+      allowedDomainSuffixes: envs.tunnel.allowedDomainSuffixes,
+      allowWildcardTunnelOrigin: envs.tunnel.allowWildcardTunnelOrigin,
+    }),
     credentials: true,
+    allowedHeaders: TUNNEL_ALLOWED_HEADERS,
   },
   pingInterval: 25000,
   pingTimeout: 20000,
@@ -88,20 +98,30 @@ export const SOCKET_CONFIG = {
       TOKEN_HEALTH_CHECKED: 'channels:token_health_checked',
       WEBHOOK_LOG_UPDATED: 'channels:webhook_log_updated',
       MARKETPLACE_ORDER_SYNCED: 'channels:marketplace_order_synced',
+      METADATA_RESOLVED: 'channels:metadata_resolved',
     },
     OMNICHANNEL_INBOX: {
       AGENT_COLLISION_LOCK: 'inbox:agent_collision_lock',
       AGENT_COLLISION_UNLOCK: 'inbox:agent_collision_unlock',
       CONVERSATION_ASSIGNED: 'inbox:conversation_assigned',
       CONVERSATION_RECLAIMED: 'inbox:conversation_reclaimed',
+      CONVERSATION_TRANSFERRED: 'inbox:conversation_transferred',
+      CONVERSATION_SNOOZED: 'inbox:conversation_snoozed',
+      SNOOZE_WAKEUP: 'inbox:snooze_wakeup',
       SLA_WARNING_TICK: 'inbox:sla_warning_tick',
       GHOSTED_ALERT: 'inbox:ghosted_alert',
       TAGS_UPDATED: 'inbox:tags_updated',
       MESSAGE_TAGGED: 'inbox:message_tagged',
+      MESSAGE_TRANSLATED: 'inbox:message_translated',
       NER_ENTITIES_DETECTED: 'inbox:ner_entities_detected',
       AI_COPILOT_DRAFT_READY: 'inbox:ai_copilot_draft_ready',
       MASKED_PSTN_CALL_INITIATE: 'inbox:masked_pstn_call_initiate',
       MASKED_PSTN_CALL_STATUS: 'inbox:masked_pstn_call_status',
+      COMMENT_VISIBILITY_UPDATED: 'inbox:comment_visibility_updated',
+      COMMENT_LIKE_UPDATED: 'inbox:comment_like_updated',
+      COMMENT_PRIVATE_REPLY_SENT: 'inbox:comment_private_reply_sent',
+      COMMENT_DELETED_ON_PLATFORM: 'inbox:comment_deleted_on_platform',
+      OUTBOUND_DELIVERY_STATUS: 'inbox:outbound_delivery_status',
     },
   },
 } as const;

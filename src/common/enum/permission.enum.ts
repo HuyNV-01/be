@@ -69,6 +69,13 @@ export enum ConversationSupportStatusEnum {
   RESOLVED = 'RESOLVED',
 }
 
+export enum ConversationInteractionTypeEnum {
+  INBOX = 'INBOX',
+  COMMENT = 'COMMENT',
+  LIVESTREAM = 'LIVESTREAM',
+  MARKETPLACE = 'MARKETPLACE',
+}
+
 export enum AiHandlingModeEnum {
   AUTOPILOT = 'AUTOPILOT',
   COPILOT = 'COPILOT',

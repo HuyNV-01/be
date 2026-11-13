@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import * as crypto from 'crypto';
@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import { dirname, join, normalize, resolve } from 'path';
 import { FileProviderEnum } from 'src/common/enum';
+import { PublicTunnelService } from 'src/config/tunnel/public-tunnel.service';
 import {
   DownloadStreamOptions,
   IStorageProvider,
@@ -29,7 +30,10 @@ export class LocalStorageProvider implements IStorageProvider, OnModuleInit {
   private readonly signingSecret: string;
   private readonly logger = new Logger(LocalStorageProvider.name);
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly publicTunnelService?: PublicTunnelService,
+  ) {
     const localDir = this.configService.get<string>('STORAGE_LOCAL_DIR') || 'uploads';
     this.rootDir = resolve(process.cwd(), localDir);
     this.defaultBucket =
@@ -52,6 +56,15 @@ export class LocalStorageProvider implements IStorageProvider, OnModuleInit {
     this.logger.log(`Local Storage initialized at: ${bucketPath}`);
   }
 
+  /**
+   * Tự động ưu tiên Public Tunnel Base URL (Ngrok / Cloudflare / Custom Domain) khi có kích hoạt
+   * để ảnh và tệp đính kèm gửi ra Facebook Messenger / Zalo OA tải được trên Internet.
+   */
+  private getEffectiveBaseUrl(): string {
+    const tunnelUrl = this.publicTunnelService?.getEffectivePublicBaseUrlSync();
+    return (tunnelUrl || this.appUrl).replace(/\/+$/, '');
+  }
+
   private resolveSafePath(bucket: string, key: string): { fullPath: string; cleanKey: string } {
     const cleanBucket = bucket.replace(/[^a-zA-Z0-9._-]/g, '');
     const cleanKey = normalize(key)
@@ -70,7 +83,7 @@ export class LocalStorageProvider implements IStorageProvider, OnModuleInit {
   }
 
   private buildPublicUrl(bucket: string, cleanKey: string): string {
-    return `${this.appUrl}/api/${bucket}/${cleanKey}`;
+    return `${this.getEffectiveBaseUrl()}/api/${bucket}/${cleanKey}`;
   }
 
   async upload(buffer: Buffer, options: UploadFileOptions): Promise<UploadResponse> {
@@ -205,7 +218,7 @@ export class LocalStorageProvider implements IStorageProvider, OnModuleInit {
     const expiresAt = Math.floor(Date.now() / 1000) + expiresIn;
     const signature = this.signToken('GET', targetBucket, cleanKey, expiresAt);
 
-    return `${this.appUrl}/api/files/local-download/${targetBucket}/${cleanKey}?expires=${expiresAt}&signature=${signature}`;
+    return `${this.getEffectiveBaseUrl()}/api/files/local-download/${targetBucket}/${cleanKey}?expires=${expiresAt}&signature=${signature}`;
   }
 
   async getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUploadResponse> {
@@ -215,7 +228,7 @@ export class LocalStorageProvider implements IStorageProvider, OnModuleInit {
     const expiresAt = Math.floor(Date.now() / 1000) + expiresIn;
     const signature = this.signToken('PUT', targetBucket, cleanKey, expiresAt, options.mimeType);
 
-    const uploadUrl = `${this.appUrl}/api/files/local-upload/${targetBucket}/${cleanKey}?expires=${expiresAt}&mimeType=${encodeURIComponent(options.mimeType)}&signature=${signature}`;
+    const uploadUrl = `${this.getEffectiveBaseUrl()}/api/files/local-upload/${targetBucket}/${cleanKey}?expires=${expiresAt}&mimeType=${encodeURIComponent(options.mimeType)}&signature=${signature}`;
 
     return {
       uploadUrl,

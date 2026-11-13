@@ -499,11 +499,20 @@ export class GranularIamService {
       dto.orderCloserWeight !== undefined ||
       dto.deductOnReturnedOrder !== undefined
     ) {
+      const rawLeadWeight = Number(
+        dto.leadCollectorWeight ?? shop.commissionSplitConfigJson?.leadCollectorWeight ?? 0.4,
+      );
+      const rawCloserWeight = Number(
+        dto.orderCloserWeight ?? shop.commissionSplitConfigJson?.orderCloserWeight ?? 0.6,
+      );
+      const weightSum = rawLeadWeight + rawCloserWeight;
+      const normalizedLeadWeight =
+        weightSum > 0 ? Number((rawLeadWeight / weightSum).toFixed(2)) : 0.4;
+      const normalizedCloserWeight = Number((1 - normalizedLeadWeight).toFixed(2));
+
       shop.commissionSplitConfigJson = {
-        leadCollectorWeight:
-          dto.leadCollectorWeight ?? shop.commissionSplitConfigJson?.leadCollectorWeight ?? 0.4,
-        orderCloserWeight:
-          dto.orderCloserWeight ?? shop.commissionSplitConfigJson?.orderCloserWeight ?? 0.6,
+        leadCollectorWeight: normalizedLeadWeight,
+        orderCloserWeight: normalizedCloserWeight,
         deductOnReturnedOrder:
           dto.deductOnReturnedOrder ??
           shop.commissionSplitConfigJson?.deductOnReturnedOrder ??
@@ -583,5 +592,47 @@ export class GranularIamService {
     }
 
     return saved;
+  }
+
+  async resolveShopIdFromConversation(conversationId: string): Promise<string | null> {
+    if (!conversationId) return null;
+    const conv = await this.conversationRepo.findOne({
+      where: { id: conversationId },
+      select: ['id', 'shopId'],
+    });
+    return conv?.shopId || null;
+  }
+
+  async assertHasPermission(
+    shopId: string,
+    userId: string,
+    requiredPermission: PermissionCodeEnum,
+  ): Promise<EffectiveMemberContext> {
+    const ctx = await this.getEffectiveMemberContext(shopId, userId);
+    if (ctx.membershipStatus !== MembershipStatusEnum.ACTIVE) {
+      throw new ForbiddenException({
+        code: 'MEMBERSHIP_NOT_ACTIVE',
+        membershipStatus: ctx.membershipStatus,
+      });
+    }
+    if (ctx.role !== ShopRoleEnum.SHOP_OWNER && !ctx.permissions.includes(requiredPermission)) {
+      throw new ForbiddenException({
+        code: 'INSUFFICIENT_SHOP_PERMISSIONS',
+        requiredPermission,
+      });
+    }
+    return ctx;
+  }
+
+  async assertConversationPermission(
+    conversationId: string,
+    userId: string,
+    requiredPermission: PermissionCodeEnum,
+  ): Promise<EffectiveMemberContext | null> {
+    const shopId = await this.resolveShopIdFromConversation(conversationId);
+    if (!shopId) {
+      return null;
+    }
+    return this.assertHasPermission(shopId, userId, requiredPermission);
   }
 }

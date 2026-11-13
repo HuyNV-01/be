@@ -8,6 +8,7 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
+import type { Response } from 'express';
 import Redis from 'ioredis';
 import { ChannelTypeEnum, PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { DBaseRes } from 'src/dto/base-res.dto';
@@ -28,9 +30,12 @@ import { Repository } from 'typeorm';
 
 import { ChannelsService } from '../channels.service';
 
-@ApiTags('Sprint 1 — Omnichannel Webhooks & Replay Inspector (T01)')
+@ApiTags('Sprint 1 — Omnichannel Webhooks & High-Throughput Replay Inspector (T01)')
 @Controller('webhooks/omnichannel')
 export class OmnibusWebhookController {
+  private inFlightWebhookCount = 0;
+  private readonly MAX_SYNC_INFLIGHT_CONCURRENCY = 20;
+
   constructor(
     @InjectRepository(ChannelWebhookLogEntity)
     private readonly webhookLogRepo: Repository<ChannelWebhookLogEntity>,
@@ -42,23 +47,52 @@ export class OmnibusWebhookController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Xác thực Webhook Challenge (hub.challenge / challenge) cho Facebook, Instagram, Zalo OA, TikTok Shop',
+      'Xác thực Webhook Challenge (hub.challenge / hub.verify_token / challenge) chuẩn Meta Graph API, Zalo OA, TikTok Shop, Shopee',
   })
-  verifyWebhookSubscription(
-    @Param('channelType') _channelTypeParam: string,
+  async verifyWebhookSubscription(
+    @Param('channelType') channelTypeParam: string,
     @Query('hub.mode') hubMode?: string,
+    @Query('hub.verify_token') hubVerifyToken?: string,
     @Query('hub.challenge') hubChallenge?: string,
     @Query('challenge') challenge?: string,
-  ): string | { verified: true; mode: string } {
-    if (hubChallenge) {
-      return hubChallenge;
+    @Query('shopId') shopId?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ): Promise<string | { verified: boolean; mode: string; channelType: string }> {
+    const channelType = channelTypeParam.toUpperCase() as ChannelTypeEnum;
+
+    if (hubVerifyToken) {
+      const isValidVerifyToken = await this.channelsService.verifyWebhookChallengeToken({
+        channelType,
+        verifyToken: hubVerifyToken,
+        shopId,
+      });
+
+      if (!isValidVerifyToken) {
+        if (res) {
+          res.status(HttpStatus.FORBIDDEN);
+        }
+        return 'WEBHOOK_VERIFY_TOKEN_MISMATCH';
+      }
     }
-    if (challenge) {
-      return challenge;
+
+    if (hubChallenge !== undefined && hubChallenge !== '') {
+      if (res) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      }
+      return String(hubChallenge);
     }
+
+    if (challenge !== undefined && challenge !== '') {
+      if (res) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      }
+      return String(challenge);
+    }
+
     return {
       verified: true,
       mode: hubMode || 'ACTIVE',
+      channelType,
     };
   }
 
@@ -66,13 +100,18 @@ export class OmnibusWebhookController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Cổng nhận Webhook hợp nhất cho FB, IG, Zalo OA, TikTok Shop, Shopee, Lazada (Khử trùng Redis SETNX)',
+      'Cổng nhận Webhook hợp nhất chịu tải cao cho FB, IG, Zalo OA, TikTok Shop, Shopee, Lazada (Khử trùng Redis SETNX, hỗ trợ batch entry[] & Adaptive Backpressure)',
   })
   async handleIncomingWebhook(
     @Param('channelType') channelTypeParam: string,
     @Headers() headers: Record<string, string>,
     @Body() payload: Record<string, unknown>,
-  ): Promise<{ received: true; idempotencyKey: string; status: string }> {
+  ): Promise<{
+    received: true;
+    idempotencyKey: string;
+    status: string;
+    processedEventsCount?: number;
+  }> {
     const startTime = Date.now();
     const channelType = channelTypeParam.toUpperCase() as ChannelTypeEnum;
 
@@ -83,8 +122,13 @@ export class OmnibusWebhookController {
       .slice(0, 40);
     const idempotencyKey = `${channelType}:${rawHash}`;
 
-    const dedupeRedisKey = `webhook:dedupe:${idempotencyKey}`;
-    const isFirstSeen = await this.redis.set(dedupeRedisKey, '1', 'EX', 86400, 'NX');
+    let isFirstSeen: string | null = 'OK';
+    try {
+      const dedupeRedisKey = `webhook:dedupe:${idempotencyKey}`;
+      isFirstSeen = await this.redis.set(dedupeRedisKey, '1', 'EX', 86400, 'NX');
+    } catch {
+      isFirstSeen = 'OK';
+    }
 
     const preResolvedChannel = await this.channelsService
       .resolveChannelByWebhookPayload(channelType, payload || {})
@@ -95,7 +139,13 @@ export class OmnibusWebhookController {
       channelIntegrationId: preResolvedChannel?.id || null,
       channelType,
       idempotencyKey,
-      eventType: String(payload?.object || payload?.event || payload?.type || 'MESSAGE_INBOUND'),
+      eventType: String(
+        payload?.object ||
+          payload?.event_name ||
+          payload?.event ||
+          payload?.type ||
+          'MESSAGE_INBOUND',
+      ),
       headersJson: headers || {},
       rawPayloadJson: payload || {},
       processingStatus: isFirstSeen ? 'RECEIVED' : 'DUPLICATE_SKIPPED',
@@ -119,65 +169,86 @@ export class OmnibusWebhookController {
       };
     }
 
-    try {
-      const result = await this.channelsService.dispatchInboundWebhookPayload({
-        logId: savedLog.id,
-        channelType,
-        headers: headers || {},
-        payload: payload || {},
-      });
+    const executeDispatch = async () => {
+      this.inFlightWebhookCount += 1;
+      try {
+        const result = await this.channelsService.dispatchInboundWebhookPayload({
+          logId: savedLog.id,
+          channelType,
+          headers: headers || {},
+          payload: payload || {},
+        });
 
-      const resolvedShopId = result.shopId || preResolvedChannel?.shopId || null;
-      const resolvedChannelId = result.channelIntegrationId || preResolvedChannel?.id || null;
+        const resolvedShopId = result.shopId || preResolvedChannel?.shopId || null;
+        const resolvedChannelId = result.channelIntegrationId || preResolvedChannel?.id || null;
 
-      await this.webhookLogRepo.update(
-        { id: savedLog.id, createdAt: savedLog.createdAt },
-        {
-          shopId: resolvedShopId,
-          channelIntegrationId: resolvedChannelId,
+        await this.webhookLogRepo.update(
+          { id: savedLog.id, createdAt: savedLog.createdAt },
+          {
+            shopId: resolvedShopId,
+            channelIntegrationId: resolvedChannelId,
+            processingStatus: 'PROCESSED',
+            processingDurationMs: Date.now() - startTime,
+          },
+        );
+
+        await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
+          id: savedLog.id,
+          channelType,
+          eventType: savedLog.eventType,
           processingStatus: 'PROCESSED',
-          processingDurationMs: Date.now() - startTime,
-        },
-      );
+          replayedCount: 0,
+        });
 
-      await this.channelsService.notifyWebhookLogUpdated(resolvedShopId, {
-        id: savedLog.id,
-        channelType,
-        eventType: savedLog.eventType,
-        processingStatus: 'PROCESSED',
-        replayedCount: 0,
-      });
+        return {
+          received: true as const,
+          idempotencyKey,
+          status: 'PROCESSED',
+          processedEventsCount: result.processedEventsCount || 1,
+        };
+      } catch (err: unknown) {
+        const errorStack = err instanceof Error ? err.stack || err.message : String(err);
+        await this.webhookLogRepo.update(
+          { id: savedLog.id, createdAt: savedLog.createdAt },
+          {
+            processingStatus: 'FAILED_DLQ',
+            processingDurationMs: Date.now() - startTime,
+            errorStack,
+          },
+        );
 
-      return {
-        received: true,
-        idempotencyKey,
-        status: 'PROCESSED',
-      };
-    } catch (err: unknown) {
-      const errorStack = err instanceof Error ? err.stack || err.message : String(err);
-      await this.webhookLogRepo.update(
-        { id: savedLog.id, createdAt: savedLog.createdAt },
-        {
+        await this.channelsService.notifyWebhookLogUpdated(preResolvedChannel?.shopId || null, {
+          id: savedLog.id,
+          channelType,
+          eventType: savedLog.eventType,
           processingStatus: 'FAILED_DLQ',
-          processingDurationMs: Date.now() - startTime,
-          errorStack,
-        },
-      );
+          replayedCount: 0,
+        });
 
-      await this.channelsService.notifyWebhookLogUpdated(preResolvedChannel?.shopId || null, {
-        id: savedLog.id,
-        channelType,
-        eventType: savedLog.eventType,
-        processingStatus: 'FAILED_DLQ',
-        replayedCount: 0,
+        return {
+          received: true as const,
+          idempotencyKey,
+          status: 'FAILED_DLQ',
+        };
+      } finally {
+        this.inFlightWebhookCount = Math.max(0, this.inFlightWebhookCount - 1);
+      }
+    };
+
+    // Chế độ Adaptive Backpressure: Khi số lượng Webhook đồng thời vượt ngưỡng 20 req cùng lúc,
+    // giải phóng HTTP 200 OK ngay lập tức (< 15ms) để nền tảng Meta/Zalo/TikTok không timeout và xử lý ngầm.
+    if (this.inFlightWebhookCount >= this.MAX_SYNC_INFLIGHT_CONCURRENCY) {
+      setImmediate(() => {
+        void executeDispatch();
       });
-
       return {
         received: true,
         idempotencyKey,
-        status: 'FAILED_DLQ',
+        status: 'QUEUED_ASYNC_HIGH_LOAD',
       };
     }
+
+    return executeDispatch();
   }
 
   @Post('replay/:logId')

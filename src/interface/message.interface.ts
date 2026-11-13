@@ -9,6 +9,7 @@ export interface MessageAttachmentMeta {
   size: number;
   width?: number;
   height?: number;
+  e2ee?: AttachmentE2EEMeta;
 }
 
 export interface MessageReplyPreview {
@@ -28,7 +29,34 @@ export interface MessageCallInfoMeta {
   participantIds: string[];
   startedAt?: string;
   endedAt?: string;
+  callDirection?: 'INTERNAL_WEBRTC' | 'OUTBOUND_SIP_PSTN' | 'INBOUND_SIP_PSTN';
+  maskedPhoneDisplay?: string | null;
+  recordingFileId?: string | null;
+  recordingFileUrl?: string | null;
+  callDispositionTag?: string | null;
+  callNotes?: string | null;
+  waveformPeaks?: number[];
 }
+
+export interface MessageProductCardMeta {
+  skuCode: string;
+  name: string;
+  retailPrice: number;
+  imageUrl?: string | null;
+  availableQty?: number;
+}
+
+export interface MessageTranslationMeta {
+  translatedText: string;
+  sourceLang: string;
+  targetLang: string;
+  translatedAt: string;
+}
+
+export type CommentReplyModeType =
+  | 'REPLY_COMMENT_ONLY'
+  | 'SEND_PRIVATE_REPLY_ONLY'
+  | 'REPLY_COMMENT_AND_PRIVATE_INBOX';
 
 export interface MessageMetadata {
   fileName?: string;
@@ -47,6 +75,11 @@ export interface MessageMetadata {
   pinnedAt?: string;
   replyToMessageId?: string;
   replyPreview?: MessageReplyPreview;
+  forwardedFrom?: {
+    messageId: string;
+    senderId: string;
+    senderName: string;
+  };
   reactions?: Record<string, string[]>;
   attachments?: MessageAttachmentMeta[];
   callInfo?: MessageCallInfoMeta;
@@ -56,6 +89,38 @@ export interface MessageMetadata {
   mentionAll?: boolean;
   expiresAt?: string;
   disappearingTtl?: number;
+  isInternalNote?: boolean;
+  quickReplyShortcutUsed?: string;
+  productCards?: MessageProductCardMeta[];
+  translation?: MessageTranslationMeta;
+  externalCustomerName?: string;
+  externalCustomerAvatar?: string | null;
+  externalCustomerPsid?: string | null;
+  skipPlatformDispatch?: boolean;
+  marketplaceOrder?: Record<string, any>;
+  externalCommentId?: string;
+  externalPostId?: string;
+  parentCommentId?: string | null;
+  isHiddenOnPlatform?: boolean;
+  hiddenByAgentId?: string;
+  hiddenAt?: string;
+  isLikedByPage?: boolean;
+  likedByAgentId?: string;
+  isDeletedOnPlatform?: boolean;
+  deletedOnPlatformAt?: string;
+  deletedByActor?: 'CUSTOMER' | 'AGENT';
+  deletedByAgentId?: string | null;
+  originalTextBeforePlatformEdit?: string;
+  privateReplySentAt?: string;
+  privateReplyByAgentId?: string;
+  linkedInboxConversationId?: string;
+  commentReplyMode?: CommentReplyModeType;
+  autoHideCommentOnReply?: boolean;
+  platformDeliveryStatus?: 'DISPATCHED' | 'SIMULATED_SANDBOX' | 'FAILED';
+  platformExternalId?: string | null;
+  platformEditedExternalId?: string | null;
+  platformEditSyncedAt?: string;
+  platformErrorMessage?: string | null;
 }
 
 export interface MessagePollOptionMeta {
@@ -96,16 +161,4 @@ export interface AttachmentE2EEMeta {
   senderPublicKeyB64: string;
   senderKeyId: string;
   wrappedKeys: Record<string, AttachmentE2EEWrappedKey>;
-}
-
-export interface MessageAttachmentMeta {
-  fileId: string;
-  url: string;
-  thumbnailUrl?: string;
-  fileName: string;
-  mimeType: string;
-  size: number;
-  width?: number;
-  height?: number;
-  e2ee?: AttachmentE2EEMeta;
 }

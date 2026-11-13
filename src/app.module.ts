@@ -1,4 +1,3 @@
-// File: src/app.module.ts
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
@@ -15,6 +14,7 @@ import { DatabaseModule } from './config/databases/database.module';
 import { envs } from './config/envs';
 import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
+import { TunnelGatewayModule } from './config/tunnel/tunnel.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ChannelsModule } from './modules/channels/channels.module';
 import { ChatModule } from './modules/chat/chat.module';
@@ -25,6 +25,7 @@ import { MailModule } from './modules/mail/mail.module';
 import { MediaModule } from './modules/media/media.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { StorageModule } from './modules/storage/storage.module';
+import { TagsModule } from './modules/tags/tags.module';
 import { UserModule } from './modules/user/user.module';
 import { parseExpiresIn } from './utils';
 
@@ -54,12 +55,14 @@ import { parseExpiresIn } from './utils';
       wildcard: true,
       delimiter: '.',
     }),
+    TunnelGatewayModule,
     DatabaseModule,
     StorageModule,
     FilesModule,
     MediaModule,
     IamModule,
     ChannelsModule,
+    TagsModule,
     AuthModule,
     UserModule,
     MailModule,
