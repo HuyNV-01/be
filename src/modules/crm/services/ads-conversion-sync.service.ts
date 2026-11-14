@@ -96,42 +96,75 @@ export class AdsConversionSyncService {
     }_${eventTimestampSec}`;
 
     const valueAmount = Number(
-      dto.valueAmount ?? (dto.eventName === AdsConversionEventNameEnum.PURCHASE ? 450000 : 0),
+      dto.valueAmount ??
+        (dto.eventName === AdsConversionEventNameEnum.PURCHASE
+          ? 650000
+          : dto.eventName === AdsConversionEventNameEnum.INITIATE_CHECKOUT
+            ? 350000
+            : 0),
     );
     const currency = (dto.currency || 'VND').toUpperCase();
 
-    const metaRequestPayload: Record<string, unknown> = {
-      data: [
-        {
-          event_name: dto.eventName,
-          event_time: eventTimestampSec,
-          event_id: eventId,
-          action_source: 'business_messaging',
-          messaging_channel:
-            channel?.channelType === ChannelTypeEnum.INSTAGRAM ? 'instagram' : 'messenger',
-          user_data: {
-            ...(channel?.externalPageId ? { page_id: channel.externalPageId } : {}),
-            ...(externalPsid ? { page_scoped_user_id: externalPsid } : {}),
-            ...(ctwaClickId ? { ctwa_clid: ctwaClickId } : {}),
-            ...(hashedPhoneSha256 ? { ph: [hashedPhoneSha256] } : {}),
-            ...(hashedEmailSha256 ? { em: [hashedEmailSha256] } : {}),
-          },
-          custom_data: {
-            currency,
-            value: valueAmount,
-            ...(sourceAdId ? { ad_id: sourceAdId } : {}),
-            ...(dto.orderId ? { order_id: dto.orderId } : {}),
-          },
-        },
-      ],
-      ...(dto.testEventCode ? { test_event_code: dto.testEventCode } : {}),
-    };
+    const isTikTokPlatform = dto.platform === AdsConversionPlatformEnum.TIKTOK_EVENTS;
+
+    const requestPayload: Record<string, unknown> = isTikTokPlatform
+      ? {
+          event_source: 'crm',
+          event_source_id: channel?.metaDatasetId || channel?.externalShopId || 'tt_pixel_default',
+          data: [
+            {
+              event: dto.eventName,
+              event_time: eventTimestampSec,
+              event_id: eventId,
+              user: {
+                ...(ctwaClickId ? { ttclid: ctwaClickId } : {}),
+                ...(externalPsid ? { external_id: this.sha256HashNormalized(externalPsid) } : {}),
+                ...(hashedPhoneSha256 ? { phone: hashedPhoneSha256 } : {}),
+                ...(hashedEmailSha256 ? { email: hashedEmailSha256 } : {}),
+              },
+              properties: {
+                currency,
+                value: valueAmount,
+                ...(sourceAdId ? { ad_id: sourceAdId } : {}),
+                ...(dto.orderId ? { order_id: dto.orderId } : {}),
+              },
+            },
+          ],
+          ...(dto.testEventCode ? { test_event_code: dto.testEventCode } : {}),
+        }
+      : {
+          data: [
+            {
+              event_name: dto.eventName,
+              event_time: eventTimestampSec,
+              event_id: eventId,
+              action_source: 'business_messaging',
+              messaging_channel:
+                channel?.channelType === ChannelTypeEnum.INSTAGRAM ? 'instagram' : 'messenger',
+              user_data: {
+                ...(channel?.externalPageId ? { page_id: channel.externalPageId } : {}),
+                ...(externalPsid ? { page_scoped_user_id: externalPsid } : {}),
+                ...(ctwaClickId ? { ctwa_clid: ctwaClickId } : {}),
+                ...(hashedPhoneSha256 ? { ph: [hashedPhoneSha256] } : {}),
+                ...(hashedEmailSha256 ? { em: [hashedEmailSha256] } : {}),
+              },
+              custom_data: {
+                currency,
+                value: valueAmount,
+                ...(sourceAdId ? { ad_id: sourceAdId } : {}),
+                ...(dto.orderId ? { order_id: dto.orderId } : {}),
+              },
+            },
+          ],
+          ...(dto.testEventCode ? { test_event_code: dto.testEventCode } : {}),
+        };
 
     let syncStatus: 'DISPATCHED_LIVE' | 'SIMULATED_SANDBOX' | 'FAILED' = 'SIMULATED_SANDBOX';
     let responseStatus = 200;
     let responseBodyJson: Record<string, unknown> = {
       events_received: 1,
       fbtrace_id: `tr_${crypto.randomBytes(8).toString('hex')}`,
+      platform: dto.platform,
       mode: 'SANDBOX_VERIFIED',
     };
 
@@ -157,7 +190,7 @@ export class AdsConversionSyncService {
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(metaRequestPayload),
+          body: JSON.stringify(requestPayload),
           signal: controller.signal,
         }).catch(() => null);
         clearTimeout(timeoutId);
@@ -189,7 +222,7 @@ export class AdsConversionSyncService {
       currency,
       testEventCode: dto.testEventCode || null,
       syncStatus,
-      requestPayloadJson: metaRequestPayload,
+      requestPayloadJson: requestPayload,
       responseStatus,
       responseBodyJson,
       retryCount: 0,
@@ -293,7 +326,36 @@ export class AdsConversionSyncService {
     log.retryCount = (log.retryCount || 0) + 1;
     log.syncStatus = 'DISPATCHED_LIVE';
     log.responseStatus = 200;
+    log.responseBodyJson = {
+      ...(log.responseBodyJson || {}),
+      events_received: 1,
+      retriedAt: new Date().toISOString(),
+      retryCount: log.retryCount,
+    };
     log.syncedAt = new Date();
-    return this.capiLogRepo.save(log);
+    const saved = await this.capiLogRepo.save(log);
+
+    if (saved.conversationId) {
+      this.realtimeEmitter.emitToConversation(
+        SOCKET_CONFIG.namespaces.CHAT,
+        saved.conversationId,
+        SOCKET_CONFIG.events.OMNICHANNEL_INBOX.CAPI_EVENT_DISPATCHED,
+        {
+          conversationId: saved.conversationId,
+          logId: saved.id,
+          platform: saved.platform,
+          eventName: saved.eventName,
+          eventId: saved.eventId,
+          ctwaClickId: saved.ctwaClickId,
+          sourceAdId: saved.sourceAdId,
+          valueAmount: saved.valueAmount,
+          currency: saved.currency,
+          syncStatus: saved.syncStatus,
+          syncedAt: saved.syncedAt?.toISOString(),
+        },
+      );
+    }
+
+    return saved;
   }
 }

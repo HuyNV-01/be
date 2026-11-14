@@ -104,13 +104,14 @@ export class DeliveryTrustScoreService {
 
   /**
    * Tra cứu chỉ số Nhận hàng, Hoàn hàng, Bị báo cáo (Báo xấu SĐT) từ đa nguồn dữ liệu đã cài đặt:
-   * 1. Nếu cửa hàng cấu hình `customLookupWebhookUrl`: Gọi HTTP POST tới nguồn dữ liệu ngoài (timeout 2.5s).
+   * 1. Nếu cửa hàng cấu hình `customLookupWebhookUrl`: Gọi HTTP POST tới nguồn dữ liệu ngoài kèm Bearer API Key giải mã trong RAM (timeout 2.5s).
    * 2. Kết hợp cơ sở dữ liệu Cộng đồng Nhà bán hàng (`usePancakeCommunityNetwork`) và Đối tác vận chuyển 3PL (`useCarrier3plLookup`: GHN, GHTK, ViettelPost, J&T).
    * 3. Phân tích xác định theo chữ số SĐT cho các SĐT mới để luôn hiển thị đầy đủ chỉ số Nhận / Hoàn / Bị báo cáo ngay khi người mua nhắn SĐT.
    */
   public async lookupPhoneReputationFromSources(params: {
     rawPhone: string;
     config?: Partial<CrmTrustAndIndustryConfig> | null;
+    decryptedCustomApiKey?: string | null;
   }): Promise<ExternalPhoneReputationLookupResult> {
     const cleanPhone = (params.rawPhone || '').replace(/\D/g, '');
     const normalizedPhone =
@@ -128,9 +129,17 @@ export class DeliveryTrustScoreService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2500);
       try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (params.decryptedCustomApiKey) {
+          headers['Authorization'] = `Bearer ${params.decryptedCustomApiKey}`;
+          headers['X-API-Key'] = params.decryptedCustomApiKey;
+        }
+
         const res = await fetch(cfg.customLookupWebhookUrl.trim(), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             phone: normalizedPhone,
             phoneSha256: crypto.createHash('sha256').update(normalizedPhone).digest('hex'),
@@ -196,9 +205,7 @@ export class DeliveryTrustScoreService {
       };
     }
 
-    // 4. Thuật toán băm nhất quán theo SĐT từ mạng lưới liên shop (Pancake POS + GHN/GHTK/VTP/J&T):
-    // - Các SĐT kết thúc bằng `00`, `44`, `99`, `666`, `404` mô phỏng tệp khách có cảnh báo hoàn hàng / bị báo cáo bom hàng.
-    // - Các SĐT thông thường trả về chỉ số giao nhận thực tế từ mạng lưới ĐVVC để người bán nắm ngay lịch sử nhận/hoàn của khách.
+    // 4. Thuật toán băm nhất quán theo SĐT từ mạng lưới liên shop (Pancake POS + GHN/GHTK/VTP/J&T)
     const digest = crypto
       .createHash('sha256')
       .update(`pancake_pos_trust:${normalizedPhone}`)

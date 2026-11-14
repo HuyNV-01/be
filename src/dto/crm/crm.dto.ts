@@ -16,6 +16,7 @@ import {
 import {
   AdsConversionEventNameEnum,
   AdsConversionPlatformEnum,
+  ChannelTypeEnum,
   CustomerTierEnum,
   CustomerWalletLedgerTypeEnum,
   CustomerWalletTransactionTypeEnum,
@@ -34,6 +35,13 @@ export class ExtractVietnameseNerDto {
   @IsString()
   @IsNotEmpty()
   text: string;
+
+  @ApiPropertyOptional({
+    description: 'ID cửa hàng tùy chọn nếu gọi qua endpoint alias /crm/ner/extract',
+  })
+  @IsOptional()
+  @IsString()
+  shopId?: string;
 
   @ApiPropertyOptional({
     description: 'ID cuộc hội thoại để tự động gắn kết quả vào tin nhắn và hồ sơ khách hàng',
@@ -516,6 +524,70 @@ export class AdjustCustomerWalletOrPointsDto {
   @IsString()
   @IsNotEmpty()
   note: string;
+}
+
+export class RecordOrderDeliveredLoyaltyDto {
+  @ApiProperty({
+    description: 'Mã đơn hàng đã giao & đối soát tiền thành công (DELIVERED_RECONCILED)',
+  })
+  @IsString()
+  @IsNotEmpty()
+  orderCode: string;
+
+  @ApiProperty({ description: 'Giá trị đơn hàng thực thu (VND)' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1000)
+  orderTotalAmount: number;
+
+  @ApiPropertyOptional({ enum: ChannelTypeEnum })
+  @IsOptional()
+  @IsEnum(ChannelTypeEnum)
+  channelType?: ChannelTypeEnum;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  pageShortCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  carrierCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  trackingNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Số tiền khách chuyển khoản dư hoặc hoàn tiền đổi trả RMA cộng vào Ví tiền thừa (nếu có)',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  overpaymentOrRmaCreditAmount?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  conversationId?: string;
+}
+
+export class ExportCustomersAuditDto {
+  @ApiPropertyOptional({ description: 'Số lượng bản ghi xuất file (Masked PII)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  exportedCount?: number;
+
+  @ApiPropertyOptional({ description: 'Bộ lọc áp dụng khi xuất danh sách' })
+  @IsOptional()
+  @IsString()
+  filterSummary?: string;
 }
 
 export class TriggerAdsConversionEventDto {

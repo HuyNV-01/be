@@ -13,16 +13,16 @@ import {
 } from '../dictionaries/vn-administrative-units.constant';
 
 const VIETNAMESE_NUMBER_WORDS_MAP: Array<{ pattern: RegExp; digit: string }> = [
-  { pattern: /\b(không|khong)\b/gi, digit: '0' },
-  { pattern: /\b(một|mốt|mot)\b/gi, digit: '1' },
-  { pattern: /\b(hai)\b/gi, digit: '2' },
-  { pattern: /\b(ba)\b/gi, digit: '3' },
-  { pattern: /\b(bốn|tư|bon|tu)\b/gi, digit: '4' },
-  { pattern: /\b(năm|lăm|nam|lam)\b/gi, digit: '5' },
-  { pattern: /\b(sáu|sau)\b/gi, digit: '6' },
-  { pattern: /\b(bảy|bẩy|bay)\b/gi, digit: '7' },
-  { pattern: /\b(tám|tam)\b/gi, digit: '8' },
-  { pattern: /\b(chín|chin)\b/gi, digit: '9' },
+  { pattern: /\b(không|khong|k0|zero|zê\s*rô)\b/gi, digit: '0' },
+  { pattern: /\b(một|mốt|mot|nhất|nhat)\b/gi, digit: '1' },
+  { pattern: /\b(hai|nhị|nhi)\b/gi, digit: '2' },
+  { pattern: /\b(ba|tam)\b/gi, digit: '3' },
+  { pattern: /\b(bốn|tư|bon|tu|tứ)\b/gi, digit: '4' },
+  { pattern: /\b(năm|lăm|nam|lam|ngũ|ngu)\b/gi, digit: '5' },
+  { pattern: /\b(sáu|sau|lục|luc)\b/gi, digit: '6' },
+  { pattern: /\b(bảy|bẩy|bay|thất|that)\b/gi, digit: '7' },
+  { pattern: /\b(tám|tam|bát|bat)\b/gi, digit: '8' },
+  { pattern: /\b(chín|chin|cửu|cuu)\b/gi, digit: '9' },
 ];
 
 const VIETNAMESE_COLOR_KEYWORDS = [
@@ -38,10 +38,14 @@ const VIETNAMESE_COLOR_KEYWORDS = [
   'xanh lá',
   'xanh rêu',
   'xanh pastel',
+  'xanh cốm',
+  'xanh than',
   'vàng',
   'tím',
   'xám',
   'ghi',
+  'cam',
+  'bạc',
 ];
 
 @Injectable()
@@ -54,6 +58,13 @@ export class VietnameseCommerceNerService {
       .toLowerCase();
   }
 
+  private normalizeUnicodeDigits(input: string): string {
+    return input
+      .replace(/[\uFF10-\uFF19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xff10 + 48))
+      .replace(/[\u2460-\u2468]/g, (ch) => String(ch.charCodeAt(0) - 0x2460 + 1))
+      .replace(/\u24EA/g, '0');
+  }
+
   /**
    * Che SĐT chuẩn bảo mật PII (`098***456`)
    */
@@ -64,7 +75,7 @@ export class VietnameseCommerceNerService {
   }
 
   /**
-   * Chuẩn hóa văn bản chứa SĐT lách luật (viết bằng chữ tiếng Việt, thay 0 bằng O/o, thay 1 bằng I/l, chèn dấu chấm/gạch)
+   * Chuẩn hóa văn bản chứa SĐT lách luật (viết bằng chữ tiếng Việt, thay 0 bằng O/o, thay 1 bằng I/l, chèn dấu chấm/gạch/ký tự fullwidth)
    */
   public extractEvasionResistantPhones(rawText: string): Array<{
     rawMatch: string;
@@ -75,7 +86,7 @@ export class VietnameseCommerceNerService {
   }> {
     if (!rawText || !rawText.trim()) return [];
 
-    let normalizedForPhone = ` ${rawText} `;
+    let normalizedForPhone = ` ${this.normalizeUnicodeDigits(rawText)} `;
     for (const item of VIETNAMESE_NUMBER_WORDS_MAP) {
       normalizedForPhone = normalizedForPhone.replace(item.pattern, item.digit);
     }
@@ -158,7 +169,7 @@ export class VietnameseCommerceNerService {
     // 2. Nếu câu gốc còn chứa SĐT viết bằng chữ tiếng Việt (VD: "không chín tám tám 123 bốn năm sáu"),
     // thay thế chuỗi từ chỉ số bằng SĐT đã che tương ứng
     const wordNumberSequencePattern =
-      /(?:(?:\b(?:không|khong|một|mốt|mot|hai|ba|bốn|tư|bon|tu|năm|lăm|nam|lam|sáu|sau|bảy|bẩy|bay|tám|tam|chín|chin)\b|\d)[\s._\-]*){9,11}/gi;
+      /(?:(?:\b(?:không|khong|k0|zero|một|mốt|mot|nhất|nhat|hai|nhị|nhi|ba|bốn|tư|bon|tu|tứ|năm|lăm|nam|lam|ngũ|ngu|sáu|sau|lục|luc|bảy|bẩy|bay|thất|that|tám|tam|bát|bat|chín|chin|cửu|cuu)\b|\d)[\s._\-]*){9,11}/gi;
     maskedText = maskedText.replace(wordNumberSequencePattern, (seqMatch) => {
       const phonesInSeq = this.extractEvasionResistantPhones(seqMatch);
       if (phonesInSeq.length > 0) {
@@ -229,11 +240,17 @@ export class VietnameseCommerceNerService {
     const vinaphone = new Set(['088', '091', '094', '081', '082', '083', '084', '085']);
     const mobifone = new Set(['089', '090', '093', '070', '079', '077', '076', '078']);
     const vietnamobile = new Set(['092', '056', '058']);
+    const wintel = new Set(['055']);
+    const itelecom = new Set(['087']);
+    const gmobile = new Set(['099', '059']);
 
     if (viettel.has(prefix3)) return 'Viettel';
     if (vinaphone.has(prefix3)) return 'VinaPhone';
     if (mobifone.has(prefix3)) return 'MobiFone';
     if (vietnamobile.has(prefix3)) return 'Vietnamobile';
+    if (wintel.has(prefix3)) return 'Wintel';
+    if (itelecom.has(prefix3)) return 'Itelecom';
+    if (gmobile.has(prefix3)) return 'Gmobile';
     return 'VN Telecom';
   }
 
@@ -434,7 +451,7 @@ export class VietnameseCommerceNerService {
   }
 
   /**
-   * Bóc tách toàn diện Thực thể Thương mại Tiếng Việt (SĐT, Địa chỉ 3 cấp, Mã SKU, Màu sắc, Kích cỡ, Chiều cao, Cân nặng)
+   * Bóc tách toàn diện Thực thể Thương mại Tiếng Việt (SĐT, Địa chỉ 3 cấp, Mã SKU, Màu sắc, Kích cỡ, Số lượng, Chiều cao, Cân nặng, Ý định thanh toán)
    */
   public extractCommerceEntities(rawText: string): ExtractedCommerceEntitiesPayload {
     const startTime = performance.now();
@@ -465,7 +482,7 @@ export class VietnameseCommerceNerService {
       ),
     );
 
-    // Bóc tách Size (S, M, L, XL, XXL, 2XL, 3XL, Freesize)
+    // Bóc tách Size (XS, S, M, L, XL, XXL, 2XL, 3XL, Freesize)
     const sizeMatches = Array.from(
       new Set(
         (rawText.match(/\b(?:size|sz|cỡ)\s*(xs|s|m|l|xl|xxl|2xl|3xl|freesize)\b/gi) || []).map(
@@ -479,6 +496,23 @@ export class VietnameseCommerceNerService {
     const detectedColors = VIETNAMESE_COLOR_KEYWORDS.filter((color) =>
       new RegExp(`(^|\\s|màu\\s+)${color}(\\s|,|\\.|$)`, 'i').test(lowerText),
     );
+
+    // Bóc tách Số lượng đặt mua (VD: "cho chị 2 đầm", "sl 3", "x2", "3 cái", "2 chiếc")
+    const quantityCandidates: number[] = [];
+    const qtyPatterns = [
+      /\b(?:sl|số\s*lượng)[:\s]*(\d{1,2})\b/gi,
+      /\bx(\d{1,2})\b/gi,
+      /\b(\d{1,2})\s*(?:cái|chiếc|bộ|set|đầm|váy|áo|quần|hộp|chai|lọ|tuýp|đôi)\b/gi,
+    ];
+    for (const pattern of qtyPatterns) {
+      let m: RegExpExecArray | null = null;
+      while ((m = pattern.exec(rawText)) !== null) {
+        const val = Number(m[1]);
+        if (val >= 1 && val <= 50 && !quantityCandidates.includes(val)) {
+          quantityCandidates.push(val);
+        }
+      }
+    }
 
     // Bóc tách Chiều cao (VD: "1m60", "160cm", "cao 1m62") & Cân nặng (VD: "52kg", "nặng 50 kí")
     let heightCm: number | null = null;
@@ -495,6 +529,27 @@ export class VietnameseCommerceNerService {
     const weightMatch = rawText.match(/\b([3-9]\d|1[0-2]\d)\s*(?:kg|kí|ký|cân)\b/i);
     if (weightMatch) {
       weightKg = Number(weightMatch[1]);
+    }
+
+    // Bóc tách Ý định thanh toán & Lưu ý khung giờ nhận hàng
+    let paymentIntent: 'BANK_TRANSFER' | 'COD' | null = null;
+    if (
+      /\b(chuyển\s*khoản|chuyen\s*khoan|ck\s*trước|ck\s*luôn|vietqr|qr\s*code)\b/i.test(rawText)
+    ) {
+      paymentIntent = 'BANK_TRANSFER';
+    } else if (
+      /\b(ship\s*cod|thu\s*hộ|nhận\s*hàng\s*thanh\s*toán|trả\s*tiền\s*mặt)\b/i.test(rawText)
+    ) {
+      paymentIntent = 'COD';
+    }
+
+    let deliveryTimeNote: string | null = null;
+    if (/\b(giờ\s*hành\s*chính|gio\s*hanh\s*chinh|hc)\b/i.test(rawText)) {
+      deliveryTimeNote = 'Giao giờ hành chính (08:30 - 17:30)';
+    } else if (/\b(ngoài\s*giờ|buổi\s*tối|sau\s*18h|cuối\s*tuần)\b/i.test(rawText)) {
+      deliveryTimeNote = 'Giao ngoài giờ hành chính / Buổi tối';
+    } else if (/\b(giao\s*gấp|hỏa\s*tốc|hoa\s*toc|ship\s*ngay)\b/i.test(rawText)) {
+      deliveryTimeNote = 'Ưu tiên giao nhanh / Hỏa tốc';
     }
 
     const processingTimeMs = Number((performance.now() - startTime).toFixed(2));
@@ -527,8 +582,11 @@ export class VietnameseCommerceNerService {
       skuCodes: skuMatches,
       colors: detectedColors,
       sizes: sizeMatches,
+      quantities: quantityCandidates,
       heightCm,
       weightKg,
+      paymentIntent,
+      deliveryTimeNote,
       processingTimeMs,
     };
   }

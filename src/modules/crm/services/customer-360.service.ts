@@ -16,6 +16,7 @@ import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.se
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import {
   CustomerListQueryDto,
+  ExportCustomersAuditDto,
   LookupPhoneTrustFromSourcesDto,
   MergeCustomerProfilesDto,
   OverrideDeliveryTrustScoreDto,
@@ -35,9 +36,11 @@ import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.en
 import {
   ExtractedCommerceEntitiesPayload,
   ExtractedPhoneTrustSummary,
+  MessageDirectionEnum,
   MessageEntity,
 } from 'src/entity/message.entity';
 import { CrmTrustAndIndustryConfig, ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
+import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 import { Repository } from 'typeorm';
 
 import { AdsConversionSyncService } from './ads-conversion-sync.service';
@@ -145,6 +148,7 @@ export class Customer360Service {
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly rfmService: CustomerRfmAndLoyaltyService,
     private readonly adsConversionSyncService: AdsConversionSyncService,
+    private readonly messageCryptoService: MessageCryptoService,
     private readonly realtimeEmitter: RealtimeEmitterService,
   ) {}
 
@@ -154,12 +158,25 @@ export class Customer360Service {
     return `KH-${suffix}-${rand}`;
   }
 
+  private decryptCustomLookupApiKeyInRam(
+    shopId: string,
+    encryptedKey?: string | null,
+  ): string | null {
+    if (!encryptedKey) return null;
+    return (
+      this.messageCryptoService.decryptForConversation(encryptedKey, `pii_vault:${shopId}`) || null
+    );
+  }
+
   /**
    * Lấy cấu hình Nguồn dữ liệu Tra cứu Uy tín SĐT (Nhận / Hoàn / Bị báo cáo) & Cấu hình Ngành hàng của Cửa hàng
    */
-  public async getShopCrmTrustAndIndustryConfig(
-    shopId: string,
-  ): Promise<CrmTrustAndIndustryConfig & { requireDepositOnHighRisk: boolean }> {
+  public async getShopCrmTrustAndIndustryConfig(shopId: string): Promise<
+    CrmTrustAndIndustryConfig & {
+      requireDepositOnHighRisk: boolean;
+      hasCustomLookupApiKey: boolean;
+    }
+  > {
     const shop = await this.shopRepo.findOne({ where: { id: shopId } });
     const raw = shop?.crmTrustAndIndustryConfigJson;
     const category = raw?.businessCategory || ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY;
@@ -174,6 +191,8 @@ export class Customer360Service {
           ? raw.enabledCarriers
           : ['GHN', 'GHTK', 'VTP', 'JT'],
       customLookupWebhookUrl: raw?.customLookupWebhookUrl || null,
+      customLookupApiKeyEncrypted: raw?.customLookupApiKeyEncrypted || null,
+      hasCustomLookupApiKey: Boolean(raw?.customLookupApiKeyEncrypted),
       highRiskReturnRateThresholdPercent: Number(raw?.highRiskReturnRateThresholdPercent ?? 30),
       highRiskReportedCountThreshold: Number(raw?.highRiskReportedCountThreshold ?? 1),
       autoMaskBuyerPhoneInChat: raw?.autoMaskBuyerPhoneInChat ?? true,
@@ -198,7 +217,12 @@ export class Customer360Service {
     shopId: string;
     actorUserId: string;
     dto: UpdateShopCrmConfigDto;
-  }): Promise<CrmTrustAndIndustryConfig & { requireDepositOnHighRisk: boolean }> {
+  }): Promise<
+    CrmTrustAndIndustryConfig & {
+      requireDepositOnHighRisk: boolean;
+      hasCustomLookupApiKey: boolean;
+    }
+  > {
     const shop = await this.shopRepo.findOne({ where: { id: params.shopId } });
     if (!shop) {
       throw new NotFoundException('SHOP_WORKSPACE_NOT_FOUND');
@@ -209,6 +233,14 @@ export class Customer360Service {
     const categoryChanged =
       params.dto.businessCategory !== undefined &&
       params.dto.businessCategory !== current.businessCategory;
+
+    const encryptedCustomApiKey =
+      params.dto.customLookupApiKey && params.dto.customLookupApiKey.trim()
+        ? this.messageCryptoService.encryptForConversation(
+            params.dto.customLookupApiKey.trim(),
+            `pii_vault:${params.shopId}`,
+          ).ciphertext
+        : current.customLookupApiKeyEncrypted || null;
 
     const nextConfig: CrmTrustAndIndustryConfig = {
       enableAutoTrustLookupOnPhone:
@@ -227,6 +259,7 @@ export class Customer360Service {
         params.dto.customLookupWebhookUrl !== undefined
           ? params.dto.customLookupWebhookUrl?.trim() || null
           : current.customLookupWebhookUrl,
+      customLookupApiKeyEncrypted: encryptedCustomApiKey,
       highRiskReturnRateThresholdPercent:
         params.dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
       highRiskReportedCountThreshold:
@@ -268,7 +301,10 @@ export class Customer360Service {
       targetResourceType: 'SHOP_CRM_CONFIG',
       targetResourceId: params.shopId,
       afterSnapshotJson: {
-        ...nextConfig,
+        businessCategory: nextConfig.businessCategory,
+        usePancakeCommunityNetwork: nextConfig.usePancakeCommunityNetwork,
+        useCarrier3plLookup: nextConfig.useCarrier3plLookup,
+        hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
         requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
       },
     });
@@ -276,6 +312,7 @@ export class Customer360Service {
     return {
       ...nextConfig,
       requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
+      hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
     };
   }
 
@@ -419,11 +456,16 @@ export class Customer360Service {
     }
 
     // 3. Tra cứu tự động chỉ số Nhận / Hoàn / Bị báo cáo từ nguồn dữ liệu (Pancake Community + 3PL GHN/GHTK + Custom API)
+    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
+      shopId,
+      crmConfig.customLookupApiKeyEncrypted,
+    );
     const externalTrustLookup =
       firstExtractedPhone && crmConfig.enableAutoTrustLookupOnPhone !== false
         ? await this.trustScoreService.lookupPhoneReputationFromSources({
             rawPhone: firstExtractedPhone,
             config: crmConfig,
+            decryptedCustomApiKey: decryptedCustomKey,
           })
         : null;
 
@@ -473,6 +515,7 @@ export class Customer360Service {
         weightKg: extractedNer.weightKg || null,
         preferredSize: extractedNer.sizes?.[0] || null,
         customAttributesJson: [],
+        notes: extractedNer.deliveryTimeNote || null,
         linkedExternalIdentitiesJson: externalUserId
           ? [
               {
@@ -548,6 +591,9 @@ export class Customer360Service {
       }
       if (extractedNer.sizes?.[0]) {
         customer.preferredSize = extractedNer.sizes[0];
+      }
+      if (extractedNer.deliveryTimeNote && !customer.notes) {
+        customer.notes = extractedNer.deliveryTimeNote;
       }
 
       if (externalUserId) {
@@ -693,9 +739,15 @@ export class Customer360Service {
       customer.phoneMasked ||
       '0988123456';
 
+    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
+      params.shopId,
+      crmConfig.customLookupApiKeyEncrypted,
+    );
+
     const lookupRes = await this.trustScoreService.lookupPhoneReputationFromSources({
       rawPhone: decryptedPhone,
       config: crmConfig,
+      decryptedCustomApiKey: decryptedCustomKey,
     });
 
     customer.networkDeliveredCount = Math.max(
@@ -877,6 +929,38 @@ export class Customer360Service {
     }
 
     return enriched;
+  }
+
+  /**
+   * Ghi nhận kiểm toán bảo mật khi người dùng xuất danh sách khách hàng (`EXPORT_CUSTOMERS`)
+   */
+  public async recordCustomerExportAudit(params: {
+    shopId: string;
+    actorUserId: string;
+    dto: ExportCustomersAuditDto;
+    ipAddress?: string;
+    userAgent?: string;
+  }) {
+    const log = await this.piiVaultService.recordSecurityAuditLog({
+      shopId: params.shopId,
+      actorUserId: params.actorUserId,
+      actionCode: SecurityAuditActionCodeEnum.EXPORT_CUSTOMERS,
+      targetResourceType: 'CUSTOMER_DIRECTORY',
+      targetResourceId: params.shopId,
+      afterSnapshotJson: {
+        exportedCount: params.dto.exportedCount ?? 0,
+        filterSummary: params.dto.filterSummary || 'ALL',
+        piiProtectionMode: 'MASKED_PHONE_ONLY',
+      },
+      ipAddress: params.ipAddress,
+      userAgent: params.userAgent,
+    });
+
+    return {
+      auditLogId: log.id,
+      entryHmacHash: log.entryHmacHash,
+      recordedAt: log.createdAt,
+    };
   }
 
   /**
@@ -1223,7 +1307,10 @@ export class Customer360Service {
     customer: CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult };
     walletLedgers: CustomerWalletLedgerEntity[];
     linkedConversations: ConversationEntity[];
-    crmConfig: CrmTrustAndIndustryConfig & { requireDepositOnHighRisk: boolean };
+    crmConfig: CrmTrustAndIndustryConfig & {
+      requireDepositOnHighRisk: boolean;
+      hasCustomLookupApiKey: boolean;
+    };
   }> {
     const [customer, crmConfig] = await Promise.all([
       this.customerRepo.findOne({ where: { id: customerId, shopId } }),
@@ -1260,6 +1347,66 @@ export class Customer360Service {
   }
 
   /**
+   * Quét lịch sử các tin nhắn gần nhất trong cuộc hội thoại để tổng hợp SĐT & Địa chỉ 3 cấp mà khách đã nhắn
+   */
+  private async aggregateNerFromConversationMessages(
+    conversationId: string,
+    fallbackText: string,
+  ): Promise<ExtractedCommerceEntitiesPayload> {
+    const recentMsgs = await this.messageRepo.find({
+      where: { conversationId },
+      order: { createdAt: 'DESC' },
+      take: 20,
+    });
+
+    const combinedTexts: string[] = [];
+    for (const msg of recentMsgs) {
+      if (msg.direction === MessageDirectionEnum.OUTBOUND || msg.isInternalNote) {
+        continue;
+      }
+      if (msg.content) {
+        const decrypted = this.messageCryptoService.decryptForConversation(
+          msg.content,
+          conversationId,
+        );
+        if (decrypted) {
+          combinedTexts.push(decrypted);
+        }
+      }
+    }
+    if (fallbackText) {
+      combinedTexts.push(fallbackText);
+    }
+
+    const mergedRawText = combinedTexts.join('\n');
+    const aggregateNer = this.nerService.extractCommerceEntities(mergedRawText);
+
+    // Kết hợp thêm các thực thể đã được lưu sẵn trong extractedEntitiesJson của từng tin nhắn
+    for (const msg of recentMsgs) {
+      const ext = msg.extractedEntitiesJson;
+      if (!ext) continue;
+      if (!aggregateNer.provinceCode && ext.provinceCode) {
+        aggregateNer.hasAddressDetected = true;
+        aggregateNer.provinceCode = ext.provinceCode;
+        aggregateNer.provinceName = ext.provinceName;
+        aggregateNer.districtCode = ext.districtCode;
+        aggregateNer.districtName = ext.districtName;
+        aggregateNer.wardCode = ext.wardCode;
+        aggregateNer.wardName = ext.wardName;
+      }
+      if (!aggregateNer.addressLine && (ext.addressLine || ext.fullFormattedAddress)) {
+        aggregateNer.hasAddressDetected = true;
+        aggregateNer.addressLine = ext.addressLine || ext.fullFormattedAddress;
+        aggregateNer.fullFormattedAddress = ext.fullFormattedAddress || ext.addressLine;
+      }
+      if (!aggregateNer.heightCm && ext.heightCm) aggregateNer.heightCm = ext.heightCm;
+      if (!aggregateNer.weightKg && ext.weightKg) aggregateNer.weightKg = ext.weightKg;
+    }
+
+    return aggregateNer;
+  }
+
+  /**
    * Lấy Hồ sơ Khách hàng CRM 360° gắn với một cuộc hội thoại (`conversationId`) để hiển thị ngay trên `Customer360Panel` bên phải khung Chat.
    * Quét lịch sử các tin nhắn gần nhất trong cuộc hội thoại để đảm bảo không bỏ sót SĐT hoặc Địa chỉ nào mà khách đã nhắn.
    */
@@ -1270,7 +1417,10 @@ export class Customer360Service {
     customer: (CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }) | null;
     walletLedgers: CustomerWalletLedgerEntity[];
     linkedConversations: ConversationEntity[];
-    crmConfig: CrmTrustAndIndustryConfig & { requireDepositOnHighRisk: boolean };
+    crmConfig: CrmTrustAndIndustryConfig & {
+      requireDepositOnHighRisk: boolean;
+      hasCustomLookupApiKey: boolean;
+    };
   }> {
     const conv = await this.conversationRepo.findOne({
       where: { id: conversationId },
@@ -1285,12 +1435,38 @@ export class Customer360Service {
         where: { id: conv.customerId, shopId: effectiveShopId },
       });
       if (existing) {
+        // Nếu hồ sơ đã tồn tại nhưng chưa có Địa chỉ 3 cấp hoặc chưa có SĐT, quét lại 20 tin nhắn gần nhất để tự động bổ sung
+        if (!existing.defaultProvinceCode || !existing.phoneSearchHash) {
+          const retroNer = await this.aggregateNerFromConversationMessages(
+            conversationId,
+            conv.lastMessage || '',
+          );
+          if (
+            retroNer.hasAddressDetected ||
+            retroNer.provinceCode ||
+            (retroNer.phones && retroNer.phones.length > 0)
+          ) {
+            await this.resolveOrUpsertCustomerFromOmnichannelEvent({
+              shopId: effectiveShopId,
+              conversation: conv,
+              channelType: conv.channelType,
+              channelIntegrationId: conv.channelIntegrationId,
+              externalUserId: conv.externalThreadId || conv.id,
+              customerName: conv.name || existing.fullName,
+              customerAvatarUrl: conv.avatar || existing.avatarUrl,
+              extractedNer: retroNer,
+            });
+          }
+        }
         return this.getCustomer360ById(effectiveShopId, existing.id);
       }
     }
 
-    // Tự động khởi tạo hồ sơ CRM 360° từ thông tin cuộc hội thoại nếu chưa có
-    const extractedNer = this.nerService.extractCommerceEntities(conv.lastMessage || '');
+    // Tự động khởi tạo hồ sơ CRM 360° từ thông tin cuộc hội thoại và lịch sử tin nhắn
+    const extractedNer = await this.aggregateNerFromConversationMessages(
+      conversationId,
+      conv.lastMessage || '',
+    );
     const resolved = await this.resolveOrUpsertCustomerFromOmnichannelEvent({
       shopId: effectiveShopId,
       conversation: conv,
@@ -1329,11 +1505,16 @@ export class Customer360Service {
       });
     }
 
+    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
+      shopId,
+      crmConfig.customLookupApiKeyEncrypted,
+    );
     const externalTrustLookup =
       dto.rawPhone && dto.rawPhone.trim() && crmConfig.enableAutoTrustLookupOnPhone !== false
         ? await this.trustScoreService.lookupPhoneReputationFromSources({
             rawPhone: dto.rawPhone.trim(),
             config: crmConfig,
+            decryptedCustomApiKey: decryptedCustomKey,
           })
         : null;
 
@@ -1614,11 +1795,13 @@ export class Customer360Service {
       },
     });
 
-    return this.enrichCustomerWithTrustEvaluation(
+    const enriched = this.enrichCustomerWithTrustEvaluation(
       saved,
       crmConfig.requireDepositOnHighRisk,
       crmConfig,
     );
+    enriched.trustEvaluation.score = saved.deliveryTrustScore;
+    return enriched;
   }
 
   /**

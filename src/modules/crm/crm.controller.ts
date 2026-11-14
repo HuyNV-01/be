@@ -23,10 +23,12 @@ import { DBaseRes } from 'src/dto/base-res.dto';
 import {
   AdjustCustomerWalletOrPointsDto,
   CustomerListQueryDto,
+  ExportCustomersAuditDto,
   ExtractVietnameseNerDto,
   LookupPhoneTrustFromSourcesDto,
   MergeCustomerProfilesDto,
   OverrideDeliveryTrustScoreDto,
+  RecordOrderDeliveredLoyaltyDto,
   ReportCustomerPhoneAbuseDto,
   SecurityAuditQueryDto,
   ToggleCustomerBlacklistDto,
@@ -129,6 +131,22 @@ export class CrmController {
     };
   }
 
+  @Post('ner/extract')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F04.1 & Công cụ T05 (Direct Endpoint): Bóc tách SĐT chống lách luật & Địa chỉ 3 cấp (< 3ms)',
+  })
+  async extractVietnameseCommerceNerDirect(
+    @Body() dto: ExtractVietnameseNerDto,
+    @Req() req: Request & { user?: { lastActiveShopId?: string } },
+  ): Promise<DBaseRes> {
+    const resolvedShopId =
+      dto.shopId ||
+      String(req.headers['x-shop-id'] || req.user?.lastActiveShopId || 'default_shop');
+    return this.extractVietnameseCommerceNer(resolvedShopId, dto);
+  }
+
   @Post(':shopId/ner/extract')
   @HttpCode(HttpStatus.OK)
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
@@ -227,6 +245,33 @@ export class CrmController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Fetched CRM 360 customers successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/customers/export-audit')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_EXPORT_FILE)
+  @ApiOperation({
+    summary:
+      'F04.4 & F04.6: Ghi nhật ký Chuỗi Băm Kiểm Toán khi xuất danh sách khách hàng (Masked PII Safe)',
+  })
+  async recordCustomerExportAudit(
+    @Param('shopId') shopId: string,
+    @Body() dto: ExportCustomersAuditDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.recordCustomerExportAudit({
+      shopId,
+      actorUserId: req.user?.id || 'system',
+      dto,
+      ipAddress: String(req.headers['x-forwarded-for'] || req.ip || '127.0.0.1'),
+      userAgent: String(req.headers['user-agent'] || 'PancakeSellerOS-Browser'),
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Recorded customer export security audit log successfully',
       data,
     };
   }
@@ -481,17 +526,63 @@ export class CrmController {
     @Body() dto: AdjustCustomerWalletOrPointsDto,
     @Req() req: Request & { user?: { id: string } },
   ): Promise<DBaseRes> {
-    const data = await this.rfmAndLoyaltyService.adjustCustomerWalletOrPoints({
+    const rawResult = await this.rfmAndLoyaltyService.adjustCustomerWalletOrPoints({
       shopId,
       customerId,
       actorUserId: req.user?.id || 'system',
       dto,
     });
+    const crmConfig = await this.customer360Service.getShopCrmTrustAndIndustryConfig(shopId);
+    const enrichedCustomer = this.customer360Service.enrichCustomerWithTrustEvaluation(
+      rawResult.customer,
+      crmConfig.requireDepositOnHighRisk,
+      crmConfig,
+    );
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Adjusted customer loyalty/wallet balance successfully',
-      data,
+      data: {
+        customer: enrichedCustomer,
+        ledgerEntry: rawResult.ledgerEntry,
+      },
+    };
+  }
+
+  @Post(':shopId/customers/:customerId/record-order-delivered')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_LOYALTY_WALLET_ADJUST)
+  @ApiOperation({
+    summary:
+      'F11.4: Ghi nhận đơn hàng DELIVERED_RECONCILED, tự động cộng điểm thưởng (100.000đ = 10 điểm), nâng hạng thẻ & cập nhật RFM',
+  })
+  async recordOrderDeliveredLoyalty(
+    @Param('shopId') shopId: string,
+    @Param('customerId') customerId: string,
+    @Body() dto: RecordOrderDeliveredLoyaltyDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const rawResult = await this.rfmAndLoyaltyService.recordOrderDeliveredAndAwardLoyaltyPoints({
+      shopId,
+      customerId,
+      actorUserId: req.user?.id || 'system',
+      dto,
+    });
+    const crmConfig = await this.customer360Service.getShopCrmTrustAndIndustryConfig(shopId);
+    const enrichedCustomer = this.customer360Service.enrichCustomerWithTrustEvaluation(
+      rawResult.customer,
+      crmConfig.requireDepositOnHighRisk,
+      crmConfig,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Recorded delivered order and awarded loyalty points successfully',
+      data: {
+        customer: enrichedCustomer,
+        awardedPoints: rawResult.awardedPoints,
+        ledgerEntries: rawResult.ledgerEntries,
+      },
     };
   }
 

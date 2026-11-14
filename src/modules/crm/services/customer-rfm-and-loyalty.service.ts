@@ -1,15 +1,23 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import {
+  ChannelTypeEnum,
   CustomerTierEnum,
   CustomerWalletLedgerTypeEnum,
   CustomerWalletTransactionTypeEnum,
   RfmSegmentCodeEnum,
   SecurityAuditActionCodeEnum,
 } from 'src/common/enum';
-import { AdjustCustomerWalletOrPointsDto } from 'src/dto/crm/crm.dto';
-import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
+import {
+  AdjustCustomerWalletOrPointsDto,
+  RecordOrderDeliveredLoyaltyDto,
+} from 'src/dto/crm/crm.dto';
+import {
+  CustomerProfileEntity,
+  CustomerRecentOrderSnapshotItem,
+} from 'src/entity/customer-profile.entity';
 import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.entity';
 import { Repository } from 'typeorm';
 
@@ -24,6 +32,8 @@ export interface RfmSegmentSummaryItem {
 
 @Injectable()
 export class CustomerRfmAndLoyaltyService {
+  private readonly logger = new Logger(CustomerRfmAndLoyaltyService.name);
+
   constructor(
     @InjectRepository(CustomerProfileEntity)
     private readonly customerRepo: Repository<CustomerProfileEntity>,
@@ -31,6 +41,31 @@ export class CustomerRfmAndLoyaltyService {
     private readonly walletLedgerRepo: Repository<CustomerWalletLedgerEntity>,
     private readonly piiVaultService: PiiVaultAndAuditService,
   ) {}
+
+  /**
+   * Cronjob tự động chạy vào 02:00 sáng hàng đêm để chấm điểm lại ma trận R - F - M
+   * và cập nhật phân khúc khách hàng cho toàn bộ cửa hàng (F11.3).
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_2AM)
+  async handleNightlyRfmRecalculationCron(): Promise<void> {
+    try {
+      const distinctShops = await this.customerRepo
+        .createQueryBuilder('c')
+        .select('DISTINCT c.shop_id', 'shopId')
+        .getRawMany<{ shopId: string }>();
+
+      for (const row of distinctShops) {
+        if (row.shopId) {
+          await this.recalculateShopRfmSegments(row.shopId);
+        }
+      }
+      this.logger.log(
+        `[RFM Nightly Cron] Evaluated RFM segments across ${distinctShops.length} shop(s).`,
+      );
+    } catch (err) {
+      this.logger.warn(`[RFM Nightly Cron] Warning: ${String(err)}`);
+    }
+  }
 
   /**
    * Tính điểm R - F - M (1..5) và ánh xạ vào 8 phân khúc chuẩn (F11.3)
@@ -180,6 +215,112 @@ export class CustomerRfmAndLoyaltyService {
       totalCustomersEvaluated: customers.length,
       segments,
       calculatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * F11.4: Khi đơn hàng chuyển sang trạng thái `DELIVERED_RECONCILED` (đã giao & đối soát tiền thành công):
+   * - Tự động cộng điểm thưởng (`loyaltyPointsBalance`) theo tỷ lệ `100.000đ = 10 điểm` (10.000đ = 1 điểm).
+   * - Nếu có tiền thừa chuyển khoản hoặc hoàn tiền RMA (`overpaymentOrRmaCreditAmount`), tự động cộng vào `walletCreditBalance`.
+   * - Tự động nâng hạng thẻ (`NEW` -> `SILVER` -> `GOLD` -> `VIP`) và cập nhật phân khúc `RFM`.
+   */
+  public async recordOrderDeliveredAndAwardLoyaltyPoints(params: {
+    shopId: string;
+    customerId: string;
+    actorUserId: string;
+    dto: RecordOrderDeliveredLoyaltyDto;
+  }): Promise<{
+    customer: CustomerProfileEntity;
+    awardedPoints: number;
+    ledgerEntries: CustomerWalletLedgerEntity[];
+  }> {
+    const customer = await this.customerRepo.findOne({
+      where: { id: params.customerId, shopId: params.shopId },
+    });
+    if (!customer) {
+      throw new NotFoundException('CUSTOMER_PROFILE_NOT_FOUND');
+    }
+
+    const orderAmount = Math.max(0, Number(params.dto.orderTotalAmount || 0));
+    const awardedPoints = Math.max(1, Math.floor(orderAmount / 10_000));
+    const now = new Date();
+
+    customer.totalOrdersCount = Number(customer.totalOrdersCount || 0) + 1;
+    customer.successfulDeliveriesCount = Number(customer.successfulDeliveriesCount || 0) + 1;
+    customer.lifetimeValueAmount = Number(customer.lifetimeValueAmount || 0) + orderAmount;
+    customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) + awardedPoints;
+    customer.lastOrderAt = now;
+
+    const newOrderSnapshot: CustomerRecentOrderSnapshotItem = {
+      orderId: `ord_${Date.now()}`,
+      orderCode: params.dto.orderCode.trim(),
+      channelType: params.dto.channelType || ChannelTypeEnum.FACEBOOK_PAGE,
+      pageShortCode: params.dto.pageShortCode || 'POS',
+      totalAmount: orderAmount,
+      status: 'DELIVERED_RECONCILED',
+      carrierCode: params.dto.carrierCode || 'GHN',
+      trackingNumber: params.dto.trackingNumber || `GHN${String(Date.now()).slice(-7)}`,
+      createdAt: now.toISOString(),
+    };
+    const existingOrders = Array.isArray(customer.recentOrdersSnapshotJson)
+      ? customer.recentOrdersSnapshotJson
+      : [];
+    customer.recentOrdersSnapshotJson = [
+      newOrderSnapshot,
+      ...existingOrders.filter((o) => o.orderCode !== newOrderSnapshot.orderCode),
+    ].slice(0, 15);
+
+    const evaluatedRfm = this.evaluateCustomerRfmScore({
+      lastOrderAt: customer.lastOrderAt,
+      successfulDeliveriesCount: customer.successfulDeliveriesCount,
+      lifetimeValueAmount: customer.lifetimeValueAmount,
+    });
+    customer.rfmScoreR = evaluatedRfm.scoreR;
+    customer.rfmScoreF = evaluatedRfm.scoreF;
+    customer.rfmScoreM = evaluatedRfm.scoreM;
+    customer.rfmSegmentCode = evaluatedRfm.segmentCode;
+    if (!customer.isBlacklisted) {
+      customer.tier = evaluatedRfm.tier;
+    }
+
+    const ledgerEntries: CustomerWalletLedgerEntity[] = [];
+
+    const pointsLedger = this.walletLedgerRepo.create({
+      shopId: params.shopId,
+      customerId: customer.id,
+      ledgerType: CustomerWalletLedgerTypeEnum.LOYALTY_POINT,
+      transactionType: CustomerWalletTransactionTypeEnum.EARN_FROM_ORDER,
+      deltaAmount: awardedPoints,
+      balanceAfter: customer.loyaltyPointsBalance,
+      referenceOrderId: params.dto.orderCode.trim(),
+      note: `Tích điểm tự động (+${awardedPoints} điểm) từ đơn giao thành công ${params.dto.orderCode.trim()}`,
+      actorUserId: params.actorUserId,
+    });
+    ledgerEntries.push(await this.walletLedgerRepo.save(pointsLedger));
+
+    const extraCredit = Math.max(0, Number(params.dto.overpaymentOrRmaCreditAmount || 0));
+    if (extraCredit > 0) {
+      customer.walletCreditBalance = Number(customer.walletCreditBalance || 0) + extraCredit;
+      const creditLedger = this.walletLedgerRepo.create({
+        shopId: params.shopId,
+        customerId: customer.id,
+        ledgerType: CustomerWalletLedgerTypeEnum.WALLET_CREDIT,
+        transactionType: CustomerWalletTransactionTypeEnum.OVERPAYMENT_CREDIT,
+        deltaAmount: extraCredit,
+        balanceAfter: customer.walletCreditBalance,
+        referenceOrderId: params.dto.orderCode.trim(),
+        note: `Cộng tiền dư vào Ví khách hàng từ đơn ${params.dto.orderCode.trim()}`,
+        actorUserId: params.actorUserId,
+      });
+      ledgerEntries.push(await this.walletLedgerRepo.save(creditLedger));
+    }
+
+    const savedCustomer = await this.customerRepo.save(customer);
+
+    return {
+      customer: savedCustomer,
+      awardedPoints,
+      ledgerEntries,
     };
   }
 
