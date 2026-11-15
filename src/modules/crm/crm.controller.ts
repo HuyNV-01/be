@@ -22,7 +22,9 @@ import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import {
   AdjustCustomerWalletOrPointsDto,
+  BuildCarrierAddressPayloadDto,
   CustomerListQueryDto,
+  EstimateMultiCarrierShippingFeeDto,
   ExportCustomersAuditDto,
   ExtractVietnameseNerDto,
   LookupPhoneTrustFromSourcesDto,
@@ -30,7 +32,9 @@ import {
   OverrideDeliveryTrustScoreDto,
   RecordOrderDeliveredLoyaltyDto,
   ReportCustomerPhoneAbuseDto,
+  ResolveAdministrativeCrosswalkDto,
   SecurityAuditQueryDto,
+  SyncAdministrativeUnitsDto,
   ToggleCustomerBlacklistDto,
   TriggerAdsConversionEventDto,
   UnmaskCustomerPhoneDto,
@@ -53,9 +57,10 @@ import { Customer360Service } from './services/customer-360.service';
 import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalty.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
 import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner.service';
+import { VnAdministrativeAddressCarrierService } from './services/vn-administrative-address-carrier.service';
 
 @ApiTags(
-  'Sprint 3 — CRM 360°, Vietnamese Commerce NER (T05), PII Vault & Audit Chain (T06), Meta CAPI & RFM',
+  'Sprint 3 & Sprint 3B — CRM 360°, Vietnamese Commerce NER (T05), 3-Tier/4-Tier Administrative & 3PL Carrier Hub, PII Vault & Meta CAPI',
 )
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard, ShopPermissionGuard)
@@ -68,6 +73,7 @@ export class CrmController {
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
     private readonly nerService: VietnameseCommerceNerService,
+    private readonly addressCarrierService: VnAdministrativeAddressCarrierService,
     private readonly customer360Service: Customer360Service,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly adsConversionService: AdsConversionSyncService,
@@ -92,6 +98,46 @@ export class CrmController {
     };
   }
 
+  @Get(':shopId/administrative-units/stats')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Sprint 3B (T05-Plus): Thống kê tổng quan & kiểm tra độ phủ ánh xạ vận chuyển 3PL (34 Tỉnh 3 Cấp mới & 63 Tỉnh 4 Cấp cũ)',
+  })
+  getAdministrativeCoverageStats(): DBaseRes {
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched administrative 3-tier & 4-tier coverage statistics successfully',
+      data: this.addressCarrierService.getAdministrativeCoverageStats(),
+    };
+  }
+
+  @Get(':shopId/administrative-units/search')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Sprint 3B (T05-Plus): Tìm kiếm nhanh hợp nhất địa giới hành chính 3 cấp mới & 4 cấp cũ kèm mã vùng GHN/GHTK/VTP/J&T (< 3ms)',
+  })
+  searchAdministrativeUnitsFast(
+    @Query('q') query?: string,
+    @Query('mode') mode?: '3_TIER' | '4_TIER' | 'BOTH',
+    @Query('provinceCode') provinceCode?: string,
+    @Query('limit') limit?: number,
+  ): DBaseRes {
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Searched administrative units across 3-tier and 4-tier trees successfully',
+      data: this.addressCarrierService.searchAdministrativeUnitsFast({
+        query: query || '',
+        mode,
+        provinceCode,
+        limit: limit ? Number(limit) : 30,
+      }),
+    };
+  }
+
   @Get(':shopId/administrative-units/hamlets')
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
@@ -101,15 +147,74 @@ export class CrmController {
   async getAdministrativeWardHamlets(
     @Query('wardCode') wardCode?: string,
     @Query('q') searchQuery?: string,
+    @Query('ghtkToken') ghtkToken?: string,
   ): Promise<DBaseRes> {
     const data = await this.nerService.getHamletsForWard({
       wardCode,
       searchQuery,
+      ghtkToken,
     });
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Fetched fourth-tier hamlets for ward successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/administrative-units/crosswalk')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Sprint 3B (T05-Plus): Ánh xạ chéo 2 chiều giữa Địa chỉ 3 Cấp Mới (34 Tỉnh - 3.321 Phường/Xã/Đặc khu) và 4 Cấp Cũ (63 Tỉnh - 704 Quận/Huyện) kèm mã GHN/GHTK/VTP/J&T',
+  })
+  resolveAdministrativeCrosswalk(@Body() dto: ResolveAdministrativeCrosswalkDto): DBaseRes {
+    const data = this.addressCarrierService.resolveBidirectionalAddressCrosswalk(dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Resolved bidirectional 3-tier and 4-tier administrative crosswalk successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/administrative-units/carrier-payload')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Sprint 3B (T05-Plus): Sinh Payload JSON chuẩn hóa để tạo vận đơn & tính phí cho 4 hãng vận chuyển (GHN, GHTK Level-4, ViettelPost, J&T Express)',
+  })
+  async buildCarrierAddressPayloads(
+    @Param('shopId') shopId: string,
+    @Body() dto: BuildCarrierAddressPayloadDto,
+  ): Promise<DBaseRes> {
+    const data = await this.addressCarrierService.buildMultiCarrierOrderPayloads(shopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Built multi-carrier 3PL shipping payloads successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/administrative-units/estimate-shipping-fee')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Sprint 3B (T05-Plus): Ước tính & so sánh phí vận chuyển đa hãng (GHN, GHTK Level-4, ViettelPost, J&T) từ địa chỉ 3 cấp mới hoặc 4 cấp cũ',
+  })
+  async estimateMultiCarrierShippingFee(
+    @Param('shopId') shopId: string,
+    @Body() dto: EstimateMultiCarrierShippingFeeDto,
+  ): Promise<DBaseRes> {
+    const data = await this.addressCarrierService.estimateMultiCarrierShippingFee(shopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Estimated multi-carrier shipping fees successfully',
       data,
     };
   }
@@ -122,14 +227,9 @@ export class CrmController {
       'Công cụ T05: Đối soát & đồng bộ trực tuyến địa giới hành chính đa nguồn (provinces.open-api.vn v1/v2, GHN, GHTK Level-4, ViettelPost)',
   })
   async syncAdministrativeUnitsFromMultiSources(
-    @Body()
-    body?: {
-      ghnToken?: string;
-      ghtkToken?: string;
-      vtpToken?: string;
-    },
+    @Body() body?: SyncAdministrativeUnitsDto,
   ): Promise<DBaseRes> {
-    const report = await this.nerService.syncAdministrativeTreeWithOpenApisAndCarriers(body || {});
+    const report = await this.addressCarrierService.syncMultiSourceAdministrativeUnits(body || {});
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,

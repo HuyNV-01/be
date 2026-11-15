@@ -12,6 +12,7 @@ import { SecurityAuditLogEntity } from 'src/entity/security-audit-log.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { UserEntity } from 'src/entity/user.entity';
+import { WarehouseEntity } from 'src/entity/warehouse.entity';
 
 import { ChatModule } from '../chat/chat.module';
 import { IamModule } from '../iam/iam.module';
@@ -23,6 +24,7 @@ import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalt
 import { DeliveryTrustScoreService } from './services/delivery-trust-score.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
 import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner.service';
+import { VnAdministrativeAddressCarrierService } from './services/vn-administrative-address-carrier.service';
 
 @Module({
   imports: [
@@ -37,6 +39,7 @@ import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner
       ShopWorkspaceEntity,
       ShopMemberEntity,
       UserEntity,
+      WarehouseEntity,
     ]),
     WebSocketModule,
     IamModule,
@@ -46,6 +49,7 @@ import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner
   controllers: [CrmController],
   providers: [
     VietnameseCommerceNerService,
+    VnAdministrativeAddressCarrierService,
     DeliveryTrustScoreService,
     PiiVaultAndAuditService,
     AdsConversionSyncService,
@@ -54,6 +58,7 @@ import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner
   ],
   exports: [
     VietnameseCommerceNerService,
+    VnAdministrativeAddressCarrierService,
     DeliveryTrustScoreService,
     PiiVaultAndAuditService,
     AdsConversionSyncService,

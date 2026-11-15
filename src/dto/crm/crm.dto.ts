@@ -56,6 +56,236 @@ export class ExtractVietnameseNerDto {
   messageId?: string;
 }
 
+export class ResolveAdministrativeCrosswalkDto {
+  @ApiPropertyOptional({
+    description:
+      'Chế độ địa giới hành chính ưu tiên hiển thị (3_TIER: 34 tỉnh mới không cấp huyện | 4_TIER: 63 tỉnh - 704 quận/huyện)',
+    enum: ['3_TIER', '4_TIER'],
+    default: '3_TIER',
+  })
+  @IsOptional()
+  @IsString()
+  preferredMode?: '3_TIER' | '4_TIER';
+
+  @ApiPropertyOptional({ description: 'Mã Tỉnh/Thành phố (thuộc bộ 34 tỉnh mới hoặc 63 tỉnh cũ)' })
+  @IsOptional()
+  @IsString()
+  provinceCode?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Mã Quận/Huyện/Thị xã/TP thuộc tỉnh (tùy chọn, dùng cho 4 cấp cũ hoặc 3PL)',
+  })
+  @IsOptional()
+  @IsString()
+  districtCode?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Mã Phường/Xã/Đặc khu/Thị trấn (thuộc bộ 3.321 xã mới hoặc 9.752+ xã cũ)',
+  })
+  @IsOptional()
+  @IsString()
+  wardCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Thôn/Ấp/Bản/Khu phố/Tổ dân phố/KĐT (cấp cơ sở)' })
+  @IsOptional()
+  @IsString()
+  hamletCode?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Tên Thôn/Ấp/Bản/Khu phố/Tổ dân phố/Đường phố (Level 4 GHTK)',
+  })
+  @IsOptional()
+  @IsString()
+  hamletName?: string | null;
+
+  @ApiPropertyOptional({ description: 'Số nhà, ngõ/ngách, tên đường chi tiết' })
+  @IsOptional()
+  @IsString()
+  addressLine?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Chuỗi địa chỉ tự do để tự động bóc tách nếu chưa truyền mã code',
+  })
+  @IsOptional()
+  @IsString()
+  rawText?: string | null;
+}
+
+export class BuildCarrierAddressPayloadDto {
+  @ApiPropertyOptional({ description: 'Tên người nhận hàng' })
+  @IsOptional()
+  @IsString()
+  receiverName?: string;
+
+  @ApiPropertyOptional({
+    description: 'Số điện thoại người nhận (hoặc truyền customerId để giải mã từ PII Vault)',
+  })
+  @IsOptional()
+  @IsString()
+  receiverPhone?: string;
+
+  @ApiPropertyOptional({
+    description: 'ID khách hàng trong CRM 360 để giải mã SĐT trong RAM khi tạo đơn',
+  })
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
+  @ApiPropertyOptional({ description: 'Mã Tỉnh/Thành người gửi (Kho xuất hàng)' })
+  @IsOptional()
+  @IsString()
+  senderProvinceCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Quận/Huyện người gửi (Kho xuất hàng)' })
+  @IsOptional()
+  @IsString()
+  senderDistrictCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Phường/Xã người gửi (Kho xuất hàng)' })
+  @IsOptional()
+  @IsString()
+  senderWardCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Địa chỉ chi tiết kho gửi hàng' })
+  @IsOptional()
+  @IsString()
+  senderAddressLine?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Tỉnh/Thành người nhận (34 tỉnh mới hoặc 63 tỉnh cũ)' })
+  @IsOptional()
+  @IsString()
+  receiverProvinceCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Quận/Huyện người nhận (nếu có)' })
+  @IsOptional()
+  @IsString()
+  receiverDistrictCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Phường/Xã/Đặc khu người nhận (3 cấp mới hoặc 4 cấp cũ)' })
+  @IsOptional()
+  @IsString()
+  receiverWardCode?: string | null;
+
+  @ApiPropertyOptional({ description: 'Mã Thôn/Ấp/Khu phố/Tổ dân phố người nhận' })
+  @IsOptional()
+  @IsString()
+  receiverHamletCode?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Tên Thôn/Ấp/Khu phố/Tổ dân phố người nhận (bắt buộc cho GHTK Level-4)',
+  })
+  @IsOptional()
+  @IsString()
+  receiverHamletName?: string | null;
+
+  @ApiPropertyOptional({ description: 'Số nhà, tên đường người nhận' })
+  @IsOptional()
+  @IsString()
+  receiverAddressLine?: string | null;
+
+  @ApiPropertyOptional({ description: 'Trọng lượng kiện hàng (gram)', default: 500 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  weightGrams?: number;
+
+  @ApiPropertyOptional({ description: 'Chiều dài kiện hàng (cm)', default: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  lengthCm?: number;
+
+  @ApiPropertyOptional({ description: 'Chiều rộng kiện hàng (cm)', default: 15 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  widthCm?: number;
+
+  @ApiPropertyOptional({ description: 'Chiều cao kiện hàng (cm)', default: 10 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  heightCm?: number;
+
+  @ApiPropertyOptional({ description: 'Số tiền thu hộ COD (VND)', default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  codAmount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Giá trị khai giá / bảo hiểm hàng hóa (VND)',
+    default: 350000,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  insuranceValue?: number;
+}
+
+export class EstimateMultiCarrierShippingFeeDto extends BuildCarrierAddressPayloadDto {
+  @ApiPropertyOptional({
+    description: 'Token API Giao Hàng Nhanh (tùy chọn để gọi trực tiếp cổng GHN)',
+  })
+  @IsOptional()
+  @IsString()
+  ghnToken?: string;
+
+  @ApiPropertyOptional({ description: 'ShopId trên hệ thống Giao Hàng Nhanh' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  ghnShopId?: number;
+
+  @ApiPropertyOptional({
+    description: 'Token API Giao Hàng Tiết Kiệm (tùy chọn để gọi trực tiếp cổng GHTK)',
+  })
+  @IsOptional()
+  @IsString()
+  ghtkToken?: string;
+
+  @ApiPropertyOptional({
+    description: 'Token API ViettelPost (tùy chọn để gọi trực tiếp cổng VTP)',
+  })
+  @IsOptional()
+  @IsString()
+  vtpToken?: string;
+}
+
+export class SyncAdministrativeUnitsDto {
+  @ApiPropertyOptional({
+    description: 'Token API Giao Hàng Nhanh để đồng bộ Master Data Tỉnh/Huyện/Xã',
+  })
+  @IsOptional()
+  @IsString()
+  ghnToken?: string;
+
+  @ApiPropertyOptional({ description: 'Token API Giao Hàng Tiết Kiệm để đồng bộ Địa chỉ Level 4' })
+  @IsOptional()
+  @IsString()
+  ghtkToken?: string;
+
+  @ApiPropertyOptional({
+    description: 'Token API ViettelPost để đồng bộ Danh mục Tỉnh/Huyện/Xã VTP',
+  })
+  @IsOptional()
+  @IsString()
+  vtpToken?: string;
+
+  @ApiPropertyOptional({
+    description: 'Mã Phường/Xã tùy chọn để đồng bộ sâu danh sách Thôn/Ấp Level-4',
+  })
+  @IsOptional()
+  @IsString()
+  wardCode?: string;
+}
+
 export class CustomerListQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
