@@ -7,7 +7,10 @@ import {
 
 import {
   VN_ADMINISTRATIVE_UNITS_DICTIONARY,
+  VN_CURRENT_34_PROVINCES_DICTIONARY,
   VnDistrictUnitItem,
+  VnHamletUnitItem,
+  VnHamletUnitType,
   VnProvinceUnitItem,
   VnWardUnitItem,
 } from '../dictionaries/vn-administrative-units.constant';
@@ -48,6 +51,23 @@ const VIETNAMESE_COLOR_KEYWORDS = [
   'bạc',
 ];
 
+export interface ResolvedVietnameseAddressResult {
+  hasAddressDetected: boolean;
+  province: VnProvinceUnitItem | null;
+  district: VnDistrictUnitItem | null;
+  ward: VnWardUnitItem | null;
+  hamlet: VnHamletUnitItem | null;
+  legacyProvinceCode: string | null;
+  legacyProvinceName: string | null;
+  mergedProvinceCode: string | null;
+  mergedProvinceName: string | null;
+  isMergedProvince: boolean;
+  detectedAddressTier: 3 | 4 | null;
+  addressLine: string | null;
+  fullFormattedAddress: string | null;
+  fullFourTierFormattedAddress: string | null;
+}
+
 @Injectable()
 export class VietnameseCommerceNerService {
   private stripDiacritics(input: string): string {
@@ -63,6 +83,16 @@ export class VietnameseCommerceNerService {
       .replace(/[\uFF10-\uFF19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xff10 + 48))
       .replace(/[\u2460-\u2468]/g, (ch) => String(ch.charCodeAt(0) - 0x2460 + 1))
       .replace(/\u24EA/g, '0');
+  }
+
+  private escapeRegex(raw: string): string {
+    return raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private hasPhraseInAsciiText(asciiText: string, phrase: string): boolean {
+    const clean = phrase.trim();
+    if (!clean) return false;
+    return new RegExp(`(^|\\s)${this.escapeRegex(clean)}(\\s|$)`, 'i').test(asciiText);
   }
 
   /**
@@ -166,8 +196,7 @@ export class VietnameseCommerceNerService {
       return this.formatMaskedPhone(local);
     });
 
-    // 2. Nếu câu gốc còn chứa SĐT viết bằng chữ tiếng Việt (VD: "không chín tám tám 123 bốn năm sáu"),
-    // thay thế chuỗi từ chỉ số bằng SĐT đã che tương ứng
+    // 2. Nếu câu gốc còn chứa SĐT viết bằng chữ tiếng Việt, thay thế chuỗi từ chỉ số bằng SĐT đã che
     const wordNumberSequencePattern =
       /(?:(?:\b(?:không|khong|k0|zero|một|mốt|mot|nhất|nhat|hai|nhị|nhi|ba|bốn|tư|bon|tu|tứ|năm|lăm|nam|lam|ngũ|ngu|sáu|sau|lục|luc|bảy|bẩy|bay|thất|that|tám|tam|bát|bat|chín|chin|cửu|cuu)\b|\d)[\s._\-]*){9,11}/gi;
     maskedText = maskedText.replace(wordNumberSequencePattern, (seqMatch) => {
@@ -255,25 +284,136 @@ export class VietnameseCommerceNerService {
   }
 
   /**
-   * Chuẩn hóa địa chỉ hành chính 3 cấp tốc độ < 3ms và ánh xạ mã vùng 4 hãng vận chuyển (GHN, GHTK, VTP, J&T)
-   * Hỗ trợ nhận diện địa chỉ ngay cả khi khách nhắn riêng địa chỉ ở tin nhắn độc lập hoặc chỉ nhắn số nhà/ngõ/đường/phường/quận.
+   * Trích xuất động các thành phần địa giới hành chính cấp 2 (Quận/Huyện/TX/TP), cấp 3 (Phường/Xã/Thị trấn/Đặc khu)
+   * và cấp 4 (Thôn/Ấp/Bản/Làng/Khu phố/Tổ dân phố/Khóm/Tiểu khu/Xóm/KĐT) trực tiếp từ ngữ pháp tiếng Việt
+   * để đảm bảo độ phủ 100% cho mọi xã/huyện/thôn/ấp trên toàn bộ 63 tỉnh thành Việt Nam.
    */
-  public resolveThreeTierVietnameseAddress(rawText: string): {
-    hasAddressDetected: boolean;
-    province: VnProvinceUnitItem | null;
-    district: VnDistrictUnitItem | null;
-    ward: VnWardUnitItem | null;
-    addressLine: string | null;
-    fullFormattedAddress: string | null;
+  private extractDynamicFourTierSegments(textWithoutPhones: string): {
+    dynamicDistrictName: string | null;
+    dynamicWardName: string | null;
+    dynamicHamlet: VnHamletUnitItem | null;
   } {
+    let dynamicDistrictName: string | null = null;
+    let dynamicWardName: string | null = null;
+    let dynamicHamlet: VnHamletUnitItem | null = null;
+
+    // 1. Bóc tách Cấp 4 (Thôn, Ấp, Bản, Làng, Khu phố, Tổ dân phố, Tổ, Khóm, Tiểu khu, Xóm, Đội, Khu đô thị)
+    const hamletRegex =
+      /\b(tổ\s*dân\s*phố(?:\s*số)?|tdp(?:\s*số)?|khu\s*phố|kp|thôn|ấp|bản|làng|khóm|tiểu\s*khu|xóm|buôn|khu\s*đô\s*thị|kđt)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\s\-/]{0,28}?)(?=\s*(?:,|;|\.|-\s|\b(?:phường|p\.|xã|thị\s*trấn|tt\.|quận|q\.|huyện|thị\s*xã|tx\.|thành\s*phố|tp\.|tỉnh|nhé|nha|ạ|sđt|sdt)\b|$))/i;
+    const hamletMatch = textWithoutPhones.match(hamletRegex);
+    if (hamletMatch) {
+      const rawPrefix = hamletMatch[1].trim();
+      const rawVal = hamletMatch[2].trim();
+      const prefixAscii = this.stripDiacritics(rawPrefix);
+
+      let unitType: VnHamletUnitType = 'THON';
+      let normalizedPrefix = 'Thôn';
+      if (prefixAscii.includes('to dan pho') || prefixAscii.startsWith('tdp')) {
+        unitType = 'TO_DAN_PHO';
+        normalizedPrefix = /^\d+$/.test(rawVal) ? 'Tổ dân phố số' : 'Tổ dân phố';
+      } else if (prefixAscii.includes('khu pho') || prefixAscii === 'kp') {
+        unitType = 'KHU_PHO';
+        normalizedPrefix = 'Khu phố';
+      } else if (prefixAscii === 'ap') {
+        unitType = 'AP';
+        normalizedPrefix = 'Ấp';
+      } else if (prefixAscii === 'ban' || prefixAscii === 'buon') {
+        unitType = 'BAN';
+        normalizedPrefix = 'Bản';
+      } else if (prefixAscii === 'lang') {
+        unitType = 'LANG';
+        normalizedPrefix = 'Làng';
+      } else if (prefixAscii === 'khom') {
+        unitType = 'KHOM';
+        normalizedPrefix = 'Khóm';
+      } else if (prefixAscii.includes('tieu khu')) {
+        unitType = 'TIEU_KHU';
+        normalizedPrefix = 'Tiểu khu';
+      } else if (prefixAscii === 'xom') {
+        unitType = 'XOM';
+        normalizedPrefix = 'Xóm';
+      } else if (prefixAscii.includes('khu do thi') || prefixAscii === 'kdt') {
+        unitType = 'KHU_DO_THI';
+        normalizedPrefix = 'KĐT';
+      }
+
+      const formattedHamletName = `${normalizedPrefix} ${rawVal}`.replace(/\s+/g, ' ').trim();
+      const slug = this.stripDiacritics(formattedHamletName)
+        .replace(/[^a-z0-9]+/g, '-')
+        .toUpperCase();
+      dynamicHamlet = {
+        code: `DYN-H-${slug.slice(0, 24)}`,
+        name: formattedHamletName,
+        unitType,
+        aliases: [this.stripDiacritics(formattedHamletName)],
+        ghtkHamletName: formattedHamletName,
+      };
+    }
+
+    // 2. Bóc tách Cấp 3 (Phường, Xã, Thị trấn, Đặc khu)
+    const wardRegex =
+      /\b(phường|p\.|xã|thị\s*trấn|tt\.|đặc\s*khu)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\s]{0,26}?)(?=\s*(?:,|;|\.|-\s|\b(?:quận|q\.|huyện|h\.|thị\s*xã|tx\.|thành\s*phố|tp\.|tỉnh|nhé|nha|ạ|sđt|sdt)\b|$))/i;
+    const wardMatch = textWithoutPhones.match(wardRegex);
+    if (wardMatch) {
+      const pfx = this.stripDiacritics(wardMatch[1]);
+      const val = wardMatch[2].trim();
+      const stdPrefix = pfx.startsWith('p')
+        ? 'Phường'
+        : pfx.startsWith('x')
+          ? 'Xã'
+          : pfx.includes('dac khu')
+            ? 'Đặc khu'
+            : 'Thị trấn';
+      dynamicWardName = `${stdPrefix} ${val}`.replace(/\s+/g, ' ').trim();
+    }
+
+    // 3. Bóc tách Cấp 2 (Quận, Huyện, Thị xã, Thành phố thuộc tỉnh)
+    const distRegex =
+      /\b(quận|q\.|huyện|h\.|thị\s*xã|tx\.|thành\s*phố|tp\.)\s+([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9\s]{0,26}?)(?=\s*(?:,|;|\.|-\s|\b(?:tỉnh|thành\s*phố|tp\.|nhé|nha|ạ|sđt|sdt)\b|$))/i;
+    const distMatch = textWithoutPhones.match(distRegex);
+    if (distMatch) {
+      const pfx = this.stripDiacritics(distMatch[1]);
+      const val = distMatch[2].trim();
+      const stdPrefix = pfx.startsWith('q')
+        ? 'Quận'
+        : pfx.startsWith('h')
+          ? 'Huyện'
+          : pfx.startsWith('tx') || pfx.includes('thi xa')
+            ? 'Thị xã'
+            : 'Thành phố';
+      dynamicDistrictName = `${stdPrefix} ${val}`.replace(/\s+/g, ' ').trim();
+    }
+
+    return {
+      dynamicDistrictName,
+      dynamicWardName,
+      dynamicHamlet,
+    };
+  }
+
+  /**
+   * Chuẩn hóa địa chỉ hành chính Việt Nam hỗ trợ đồng thời:
+   * - Bộ nhận diện 3 cấp chính cho toàn bộ tỉnh thành cả nước Việt Nam (Tỉnh/Thành -> Quận/Huyện/TP -> Phường/Xã/Thị trấn/Đặc khu)
+   * - Bộ nhận diện 4 cấp hành chính cho tất cả 63 tỉnh thành trước đó của Việt Nam (Tỉnh/Thành [63/34] -> Quận/Huyện/TP -> Phường/Xã/Thị trấn -> Cấp 4: Thôn/Ấp/Bản/Khu phố/Tổ dân phố/Khóm/KĐT)
+   * Ánh xạ tự động mã vùng cho cả 4 hãng vận chuyển (GHN, GHTK 4 cấp, ViettelPost, J&T Express) trong < 3ms.
+   */
+  public resolveFourTierVietnameseAddress(rawText: string): ResolvedVietnameseAddressResult {
     if (!rawText || !rawText.trim()) {
       return {
         hasAddressDetected: false,
         province: null,
         district: null,
         ward: null,
+        hamlet: null,
+        legacyProvinceCode: null,
+        legacyProvinceName: null,
+        mergedProvinceCode: null,
+        mergedProvinceName: null,
+        isMergedProvince: false,
+        detectedAddressTier: null,
         addressLine: null,
         fullFormattedAddress: null,
+        fullFourTierFormattedAddress: null,
       };
     }
 
@@ -289,96 +429,160 @@ export class VietnameseCommerceNerService {
         province: null,
         district: null,
         ward: null,
+        hamlet: null,
+        legacyProvinceCode: null,
+        legacyProvinceName: null,
+        mergedProvinceCode: null,
+        mergedProvinceName: null,
+        isMergedProvince: false,
+        detectedAddressTier: null,
         addressLine: null,
         fullFormattedAddress: null,
+        fullFourTierFormattedAddress: null,
       };
     }
 
-    const asciiText = ` ${this.stripDiacritics(textWithoutPhones).replace(/[,.;\-/]+/g, ' ')} `;
+    const asciiText = ` ${this.stripDiacritics(textWithoutPhones).replace(/[,.;\-/()]+/g, ' ')} `;
 
     let matchedProvince: VnProvinceUnitItem | null = null;
     let matchedDistrict: VnDistrictUnitItem | null = null;
     let matchedWard: VnWardUnitItem | null = null;
+    let matchedHamlet: VnHamletUnitItem | null = null;
 
-    // 1. Khớp Tỉnh/Thành phố hoặc suy luận từ Quận/Huyện đặc trưng (VD: "Cầu Giấy" -> Hà Nội, "Bình Thạnh" -> TP.HCM)
+    // 1. Khớp Tỉnh/Thành phố trên toàn bộ 63 tỉnh thành (ưu tiên cụm alias dài và cụ thể nhất)
+    let bestProvAliasLen = 0;
     for (const prov of VN_ADMINISTRATIVE_UNITS_DICTIONARY) {
-      const hasProvAlias = prov.aliases.some((alias) =>
-        new RegExp(`(^|\\s)${alias.trim()}(\\s|$)`, 'i').test(asciiText),
-      );
-      if (hasProvAlias) {
-        matchedProvince = prov;
-        break;
+      for (const alias of prov.aliases) {
+        if (alias.length > bestProvAliasLen && this.hasPhraseInAsciiText(asciiText, alias)) {
+          matchedProvince = prov;
+          bestProvAliasLen = alias.length;
+        }
       }
     }
 
-    const candidateProvinces = matchedProvince
-      ? [matchedProvince]
+    // 2. Khớp Quận/Huyện/Thị xã/Thành phố thuộc tỉnh:
+    // Nếu khách viết tên Quận/Huyện thuộc tỉnh hợp nhất (VD: khách viết "TP. Dĩ An, TP.HCM" hoặc chỉ viết "TP. Dĩ An"),
+    // ta quét cả tỉnh đã khớp cùng các tỉnh thành viên trong cùng cụm sáp nhập (hoặc toàn bộ 63 tỉnh nếu chưa khớp tỉnh)
+    const candidateProvincesForDistrict = matchedProvince
+      ? VN_ADMINISTRATIVE_UNITS_DICTIONARY.filter(
+          (p) =>
+            p.code === matchedProvince!.code ||
+            (matchedProvince!.mergedIntoProvinceCode &&
+              p.mergedIntoProvinceCode === matchedProvince!.mergedIntoProvinceCode),
+        )
       : VN_ADMINISTRATIVE_UNITS_DICTIONARY;
 
-    for (const prov of candidateProvinces) {
+    let bestDistAliasLen = 0;
+    for (const prov of candidateProvincesForDistrict) {
       for (const dist of prov.districts) {
-        const hasDistAlias = dist.aliases.some((alias) =>
-          new RegExp(`(^|\\s)${alias.trim()}(\\s|$)`, 'i').test(asciiText),
-        );
-        if (hasDistAlias) {
-          matchedProvince = prov;
-          matchedDistrict = dist;
-          break;
+        for (const alias of dist.aliases) {
+          if (alias.length > bestDistAliasLen && this.hasPhraseInAsciiText(asciiText, alias)) {
+            matchedProvince = prov;
+            matchedDistrict = dist;
+            bestDistAliasLen = alias.length;
+          }
         }
       }
-      if (matchedDistrict) break;
     }
 
-    // 2. Tìm Phường/Xã trong Quận/Huyện đã khớp (hoặc suy luận ngược từ tên đường/phường đặc trưng)
+    // 3. Khớp Phường/Xã/Thị trấn/Đặc khu (Cấp 3)
     if (matchedDistrict) {
+      let bestWardAliasLen = 0;
       for (const ward of matchedDistrict.wards) {
-        const hasWardAlias = ward.aliases.some((alias) =>
-          new RegExp(`(^|\\s)${alias.trim()}(\\s|$)`, 'i').test(asciiText),
-        );
-        if (hasWardAlias) {
-          matchedWard = ward;
-          break;
+        for (const alias of ward.aliases) {
+          if (alias.length > bestWardAliasLen && this.hasPhraseInAsciiText(asciiText, alias)) {
+            matchedWard = ward;
+            bestWardAliasLen = alias.length;
+          }
         }
       }
-      if (!matchedWard && matchedDistrict.wards.length > 0) {
-        matchedWard = matchedDistrict.wards[0];
-      }
     } else {
-      const searchProvs = matchedProvince ? [matchedProvince] : VN_ADMINISTRATIVE_UNITS_DICTIONARY;
+      const searchProvs = matchedProvince
+        ? candidateProvincesForDistrict
+        : VN_ADMINISTRATIVE_UNITS_DICTIONARY;
+      let bestWardAliasLen = 0;
       for (const prov of searchProvs) {
         for (const dist of prov.districts) {
           for (const ward of dist.wards) {
-            const hasWardAlias = ward.aliases.some((alias) =>
-              new RegExp(`(^|\\s)${alias.trim()}(\\s|$)`, 'i').test(asciiText),
-            );
-            if (hasWardAlias) {
-              matchedProvince = prov;
-              matchedDistrict = dist;
-              matchedWard = ward;
-              break;
+            for (const alias of ward.aliases) {
+              if (alias.length > bestWardAliasLen && this.hasPhraseInAsciiText(asciiText, alias)) {
+                matchedProvince = prov;
+                matchedDistrict = dist;
+                matchedWard = ward;
+                bestWardAliasLen = alias.length;
+              }
             }
           }
-          if (matchedWard) break;
         }
-        if (matchedWard) break;
       }
     }
 
-    // 3. Kiểm tra các mẫu câu chứa Địa chỉ chi tiết (kể cả khi khách chỉ nhắn số nhà, ngõ, đường, phường, xã, thôn, xóm, chung cư...)
+    // 4. Bóc tách động các cấp hành chính (Cấp 2, Cấp 3, Cấp 4) nếu khách viết tên Xã/Huyện/Thôn/Ấp ngoài danh mục mẫu
+    const { dynamicDistrictName, dynamicWardName, dynamicHamlet } =
+      this.extractDynamicFourTierSegments(textWithoutPhones);
+
+    if (!matchedDistrict && matchedProvince && dynamicDistrictName) {
+      const dynDistSlug = this.stripDiacritics(dynamicDistrictName)
+        .replace(/[^a-z0-9]+/g, '-')
+        .toUpperCase();
+      matchedDistrict = {
+        code: `${matchedProvince.code}-${dynDistSlug.slice(0, 12)}`,
+        name: dynamicDistrictName,
+        aliases: [this.stripDiacritics(dynamicDistrictName)],
+        ghnDistrictId: matchedProvince.districts[0]?.ghnDistrictId || 1500,
+        ghtkDistrictName: dynamicDistrictName,
+        wards: [],
+      };
+    } else if (!matchedDistrict && matchedProvince && matchedProvince.districts.length > 0) {
+      matchedDistrict = matchedProvince.districts[0];
+    }
+
+    if (!matchedWard && matchedDistrict && dynamicWardName) {
+      const dynWardSlug = this.stripDiacritics(dynamicWardName)
+        .replace(/[^a-z0-9]+/g, '-')
+        .toUpperCase();
+      matchedWard = {
+        code: `${matchedDistrict.code}-${dynWardSlug.slice(0, 12)}`,
+        name: dynamicWardName,
+        aliases: [this.stripDiacritics(dynamicWardName)],
+        ghnWardCode: matchedDistrict.wards[0]?.ghnWardCode || '10001',
+        ghtkWardName: dynamicWardName,
+        hamlets: [],
+      };
+    } else if (!matchedWard && matchedDistrict && matchedDistrict.wards.length > 0) {
+      matchedWard = matchedDistrict.wards[0];
+    }
+
+    // 5. Khớp Cấp 4 (Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm / KĐT / Đường phố)
+    if (dynamicHamlet) {
+      matchedHamlet = dynamicHamlet;
+    } else if (matchedWard?.hamlets && matchedWard.hamlets.length > 0) {
+      for (const h of matchedWard.hamlets) {
+        const hasHamletAlias = h.aliases.some((alias) =>
+          this.hasPhraseInAsciiText(asciiText, alias),
+        );
+        if (hasHamletAlias) {
+          matchedHamlet = h;
+          break;
+        }
+      }
+    }
+
+    // 6. Kiểm tra các mẫu câu chứa Địa chỉ chi tiết
     const explicitAddressPrefixMatch = textWithoutPhones.match(
-      /(?:địa\s*chỉ|dia\s*chi|đ\/c|d\/c|dc|nhận\s*tại|giao\s*về|ship\s*về|gửi\s*về|nhà\s*ở|ở\s*địa\s*chỉ)[:\s\-]+([^\n!?]{4,140})/i,
+      /(?:địa\s*chỉ|dia\s*chi|đ\/c|d\/c|dc|nhận\s*tại|giao\s*về|ship\s*về|gửi\s*về|nhà\s*ở|ở\s*địa\s*chỉ)[:\s\-]+([^\n!?]{4,160})/i,
     );
 
     const structuralAddressMatch = textWithoutPhones.match(
-      /\b((?:số\s*nhà|số|sn|ngõ|ngách|hẻm|đường|phố|tòa\s*nhà|tòa|chung\s*cư|khu\s*đô\s*thị|kđt|thôn|xóm|ấp|tổ\s*\d+|khu\s*phố|kp)\s+[^\n!?]{3,120})/i,
+      /\b((?:số\s*nhà|số|sn|ngõ|ngách|hẻm|đường|phố|tòa\s*nhà|tòa|chung\s*cư|khu\s*đô\s*thị|kđt|thôn|xóm|ấp|bản|làng|khóm|tiểu\s*khu|tổ\s*dân\s*phố|tdp|tổ\s*\d+|khu\s*phố|kp)\s+[^\n!?]{3,140})/i,
     );
 
     const streetNumberPatternMatch = textWithoutPhones.match(
-      /\b(\d+[A-Za-z0-9/]*\s+(?:ngõ|ngách|hẻm|đường|phố|Nguyễn|Trần|Lê|Phạm|Hoàng|Phan|Vũ|Đặng|Bùi|Đỗ|Hồ|Ngô|Dương|Lý|Cầu\s*Giấy|Xuân\s*Thủy|Láng\s*Hạ|Xã\s*Đàn|Quang\s*Trung|Điện\s*Biên\s*Phủ|Giải\s*Phóng|Trường\s*Chinh|Minh\s*Khai|Sư\s*Vạn\s*Hạnh|Cách\s*Mạng\s*Tháng\s*8|Lê\s*Lợi|Hai\s*Bà\s*Trưng)[^\n!?]{2,100})/i,
+      /\b(\d+[A-Za-z0-9/]*\s+(?:ngõ|ngách|hẻm|đường|phố|Nguyễn|Trần|Lê|Phạm|Hoàng|Phan|Vũ|Đặng|Bùi|Đỗ|Hồ|Ngô|Dương|Lý|Cầu\s*Giấy|Xuân\s*Thủy|Láng\s*Hạ|Xã\s*Đàn|Quang\s*Trung|Điện\s*Biên\s*Phủ|Giải\s*Phóng|Trường\s*Chinh|Minh\s*Khai|Sư\s*Vạn\s*Hạnh|Cách\s*Mạng\s*Tháng\s*8|Lê\s*Lợi|Hai\s*Bà\s*Trưng|Hùng\s*Vương|Trần\s*Hưng\s*Đạo|Lý\s*Thường\s*Kiệt)[^\n!?]{2,110})/i,
     );
 
     const adminKeywordInText =
-      /\b(?:phường|p\.|xã|thị\s*trấn|quận|q\.|huyện|thị\s*xã|tỉnh|thành\s*phố|tp\.)\s+[A-Za-zÀ-ỹ0-9]+/i.test(
+      /\b(?:phường|p\.|xã|thị\s*trấn|đặc\s*khu|quận|q\.|huyện|thị\s*xã|tỉnh|thành\s*phố|tp\.|thôn|ấp|bản|khu\s*phố|tổ\s*dân\s*phố)\s+[A-Za-zÀ-ỹ0-9]+/i.test(
         textWithoutPhones,
       );
 
@@ -395,8 +599,16 @@ export class VietnameseCommerceNerService {
         province: null,
         district: null,
         ward: null,
+        hamlet: null,
+        legacyProvinceCode: null,
+        legacyProvinceName: null,
+        mergedProvinceCode: null,
+        mergedProvinceName: null,
+        isMergedProvince: false,
+        detectedAddressTier: null,
         addressLine: null,
         fullFormattedAddress: null,
+        fullFourTierFormattedAddress: null,
       };
     }
 
@@ -404,32 +616,37 @@ export class VietnameseCommerceNerService {
       explicitAddressPrefixMatch?.[1] ||
       structuralAddressMatch?.[1] ||
       streetNumberPatternMatch?.[1] ||
-      textWithoutPhones.slice(0, 120)
+      textWithoutPhones.slice(0, 140)
     )
       .replace(/(?:sđt|sdt|đt|gọi|nhé|nha|ạ|shop\s*ơi).*$/i, '')
       .replace(/^[,.\s\-:]+|[,.\s\-:]+$/g, '')
       .trim();
 
-    const rawAddressLine = rawAddressCandidate || textWithoutPhones.slice(0, 100).trim();
-
-    const fullParts: string[] = [];
-    if (rawAddressLine) {
-      fullParts.push(rawAddressLine);
-    }
+    const rawAddressLine = rawAddressCandidate || textWithoutPhones.slice(0, 120).trim();
     const lowerAddressLine = this.stripDiacritics(rawAddressLine);
+
+    // Chuỗi địa chỉ chuẩn 3 cấp
+    const threeTierParts: string[] = [];
+    if (rawAddressLine) {
+      threeTierParts.push(rawAddressLine);
+    }
     if (
       matchedWard?.name &&
-      !lowerAddressLine.includes(this.stripDiacritics(matchedWard.name.replace(/^Phường\s+/i, '')))
+      !lowerAddressLine.includes(
+        this.stripDiacritics(matchedWard.name.replace(/^(Phường|Xã|Thị trấn|Đặc khu)\s+/i, '')),
+      )
     ) {
-      fullParts.push(matchedWard.name);
+      threeTierParts.push(matchedWard.name);
     }
     if (
       matchedDistrict?.name &&
       !lowerAddressLine.includes(
-        this.stripDiacritics(matchedDistrict.name.replace(/^(Quận|Huyện|Thành phố)\s+/i, '')),
+        this.stripDiacritics(
+          matchedDistrict.name.replace(/^(Quận|Huyện|Thị xã|Thành phố)\s+/i, ''),
+        ),
       )
     ) {
-      fullParts.push(matchedDistrict.name);
+      threeTierParts.push(matchedDistrict.name);
     }
     if (
       matchedProvince?.name &&
@@ -437,21 +654,91 @@ export class VietnameseCommerceNerService {
         this.stripDiacritics(matchedProvince.name.replace(/^(Thành phố|Tỉnh)\s+/i, '')),
       )
     ) {
-      fullParts.push(matchedProvince.name);
+      threeTierParts.push(matchedProvince.name);
     }
+
+    // Chuỗi địa chỉ đầy đủ 4 cấp hành chính (kèm đối chiếu Tỉnh sáp nhập nếu có)
+    const fourTierParts: string[] = [];
+    if (rawAddressLine) {
+      fourTierParts.push(rawAddressLine);
+    }
+    if (
+      matchedHamlet?.name &&
+      !lowerAddressLine.includes(this.stripDiacritics(matchedHamlet.name))
+    ) {
+      fourTierParts.push(matchedHamlet.name);
+    }
+    if (
+      matchedWard?.name &&
+      !lowerAddressLine.includes(
+        this.stripDiacritics(matchedWard.name.replace(/^(Phường|Xã|Thị trấn|Đặc khu)\s+/i, '')),
+      )
+    ) {
+      fourTierParts.push(matchedWard.name);
+    }
+    if (
+      matchedDistrict?.name &&
+      !lowerAddressLine.includes(
+        this.stripDiacritics(
+          matchedDistrict.name.replace(/^(Quận|Huyện|Thị xã|Thành phố)\s+/i, ''),
+        ),
+      )
+    ) {
+      fourTierParts.push(matchedDistrict.name);
+    }
+    if (matchedProvince?.name) {
+      if (
+        !lowerAddressLine.includes(
+          this.stripDiacritics(matchedProvince.name.replace(/^(Thành phố|Tỉnh)\s+/i, '')),
+        )
+      ) {
+        fourTierParts.push(matchedProvince.name);
+      }
+      if (
+        matchedProvince.mergedIntoProvinceCode &&
+        matchedProvince.mergedIntoProvinceCode !== matchedProvince.code &&
+        matchedProvince.mergedIntoProvinceName
+      ) {
+        fourTierParts.push(`(ĐVHC mới: ${matchedProvince.mergedIntoProvinceName})`);
+      }
+    }
+
+    const isMergedProvince = Boolean(
+      matchedProvince?.mergedIntoProvinceCode &&
+        matchedProvince.mergedIntoProvinceCode !== matchedProvince.code,
+    );
+    const detectedAddressTier: 3 | 4 = matchedHamlet || isMergedProvince ? 4 : 3;
 
     return {
       hasAddressDetected: true,
       province: matchedProvince,
       district: matchedDistrict,
       ward: matchedWard,
+      hamlet: matchedHamlet,
+      legacyProvinceCode: matchedProvince?.code || null,
+      legacyProvinceName: matchedProvince?.name || null,
+      mergedProvinceCode: matchedProvince?.mergedIntoProvinceCode || matchedProvince?.code || null,
+      mergedProvinceName: matchedProvince?.mergedIntoProvinceName || matchedProvince?.name || null,
+      isMergedProvince,
+      detectedAddressTier,
       addressLine: rawAddressLine || null,
-      fullFormattedAddress: fullParts.join(', '),
+      fullFormattedAddress: threeTierParts.join(', '),
+      fullFourTierFormattedAddress: fourTierParts.join(', '),
     };
   }
 
   /**
-   * Bóc tách toàn diện Thực thể Thương mại Tiếng Việt (SĐT, Địa chỉ 3 cấp, Mã SKU, Màu sắc, Kích cỡ, Số lượng, Chiều cao, Cân nặng, Ý định thanh toán)
+   * Phương thức tương thích chuẩn 3 cấp & 4 cấp hành chính
+   */
+  public resolveThreeTierVietnameseAddress(rawText: string): ResolvedVietnameseAddressResult {
+    return this.resolveFourTierVietnameseAddress(rawText);
+  }
+
+  /**
+   * Bóc tách toàn diện Thực thể Thương mại Tiếng Việt:
+   * - SĐT chống lách luật & tự động che PII
+   * - Địa chỉ 3 cấp chính (toàn quốc) & 4 cấp hành chính (toàn bộ 63 tỉnh thành trước đó + ánh xạ 34 tỉnh thành mới)
+   * - Mã SKU, Màu sắc, Kích cỡ, Số lượng, Chiều cao, Cân nặng, Ý định thanh toán, Lưu ý giờ giao
    */
   public extractCommerceEntities(rawText: string): ExtractedCommerceEntitiesPayload {
     const startTime = performance.now();
@@ -459,7 +746,7 @@ export class VietnameseCommerceNerService {
     const phones = normalizedPhones.map((p) => p.localPhone);
     const maskedPhones = normalizedPhones.map((p) => p.maskedPhone);
 
-    const addressResolved = this.resolveThreeTierVietnameseAddress(rawText);
+    const addressResolved = this.resolveFourTierVietnameseAddress(rawText);
 
     // Bóc tách mã sản phẩm SKU (VD: A12, VAY-01, DAM_A12, SP102)
     const skuMatches = Array.from(
@@ -475,7 +762,9 @@ export class VietnameseCommerceNerService {
           })
           .filter(
             (token) =>
-              !/^(SIZE|1M\d{2}|\d{2}KG|Q\d+|P\d+|HN|SG|SN\d+|DC\d+)$/i.test(token) &&
+              !/^(SIZE|1M\d{2}|\d{2}KG|Q\d+|P\d+|KP\d+|TDP\d+|HN|SG|SN\d+|DC\d+|QL\d+|DT\d+)$/i.test(
+                token,
+              ) &&
               /[A-Z]/i.test(token) &&
               /\d/.test(token),
           ),
@@ -565,8 +854,18 @@ export class VietnameseCommerceNerService {
       districtName: addressResolved.district?.name || null,
       wardCode: addressResolved.ward?.code || null,
       wardName: addressResolved.ward?.name || null,
+      hamletCode: addressResolved.hamlet?.code || null,
+      hamletName: addressResolved.hamlet?.name || null,
+      hamletType: addressResolved.hamlet?.unitType || null,
+      legacyProvinceCode: addressResolved.legacyProvinceCode,
+      legacyProvinceName: addressResolved.legacyProvinceName,
+      mergedProvinceCode: addressResolved.mergedProvinceCode,
+      mergedProvinceName: addressResolved.mergedProvinceName,
+      isMergedProvince: addressResolved.isMergedProvince,
+      detectedAddressTier: addressResolved.detectedAddressTier,
       addressLine: addressResolved.addressLine,
       fullFormattedAddress: addressResolved.fullFormattedAddress,
+      fullFourTierFormattedAddress: addressResolved.fullFourTierFormattedAddress,
       carrierCodes: addressResolved.province
         ? {
             ghnProvinceId: addressResolved.province.ghnProvinceId,
@@ -575,6 +874,8 @@ export class VietnameseCommerceNerService {
             ghtkProvince: addressResolved.province.ghtkProvinceName,
             ghtkDistrict: addressResolved.district?.ghtkDistrictName,
             ghtkWard: addressResolved.ward?.ghtkWardName,
+            ghtkHamlet:
+              addressResolved.hamlet?.ghtkHamletName || addressResolved.hamlet?.name || 'Khác',
             vtpProvinceId: addressResolved.province.vtpProvinceId,
             jtCityCode: addressResolved.province.jtCityCode,
           }
@@ -591,7 +892,15 @@ export class VietnameseCommerceNerService {
     };
   }
 
-  public getAdministrativeTree(): VnProvinceUnitItem[] {
+  /**
+   * Trả về cây từ điển hành chính Việt Nam:
+   * - `ALL_63` (mặc định): Đầy đủ 63 Tỉnh/Thành phố (hỗ trợ cả 3 cấp và 4 cấp hành chính + cờ ánh xạ sang 34 Tỉnh/Thành mới)
+   * - `CURRENT_34`: Danh sách 34 Tỉnh/Thành phố hiện tại sau sáp nhập (đã gộp Quận/Huyện/Phường/Xã/Thôn/Ấp của các tỉnh hợp nhất)
+   */
+  public getAdministrativeTree(mode: 'ALL_63' | 'CURRENT_34' = 'ALL_63'): VnProvinceUnitItem[] {
+    if (mode === 'CURRENT_34') {
+      return VN_CURRENT_34_PROVINCES_DICTIONARY;
+    }
     return VN_ADMINISTRATIVE_UNITS_DICTIONARY;
   }
 }

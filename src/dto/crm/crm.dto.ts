@@ -28,9 +28,9 @@ import {
 export class ExtractVietnameseNerDto {
   @ApiProperty({
     description:
-      'Nội dung tin nhắn hoặc bình luận tiếng Việt cần bóc tách SĐT, địa chỉ 3 cấp, SKU, size, màu',
+      'Nội dung tin nhắn hoặc bình luận tiếng Việt cần bóc tách SĐT, địa chỉ 3 cấp & 4 cấp hành chính, SKU, size, màu',
     example:
-      'Cho chị 2 đầm A12 màu kem size M (1m60 52kg) về số 15 ngõ 68 Cầu Giấy HN nhé, sđt không chín tám tám 123 bốn năm sáu',
+      'Cho chị 2 đầm A12 màu kem size M (1m60 52kg) về số 15 ngõ 68 Tổ dân phố số 2 Phường Quan Hoa Cầu Giấy HN nhé, sđt không chín tám tám 123 bốn năm sáu',
   })
   @IsString()
   @IsNotEmpty()
@@ -134,6 +134,20 @@ export class UpsertCustomerProfileDto {
   @IsOptional()
   @IsString()
   defaultWardCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Mã đơn vị hành chính cấp 4 (Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm)',
+  })
+  @IsOptional()
+  @IsString()
+  defaultHamletCode?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tên đơn vị hành chính cấp 4 (Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm)',
+  })
+  @IsOptional()
+  @IsString()
+  defaultHamletName?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

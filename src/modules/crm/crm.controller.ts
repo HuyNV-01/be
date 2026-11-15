@@ -80,14 +80,15 @@ export class CrmController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'Công cụ T05: Lấy cây từ điển hành chính 3 cấp Tỉnh/Thành — Quận/Huyện — Phường/Xã có ánh xạ GHN/GHTK/VTP/J&T',
+      'Công cụ T05: Lấy cây từ điển hành chính 3 cấp & 4 cấp toàn quốc (63 Tỉnh/Thành trước sáp nhập & 34 Tỉnh/Thành hiện tại) ánh xạ GHN/GHTK/VTP/J&T',
   })
-  getAdministrativeUnits(): DBaseRes {
+  getAdministrativeUnits(@Query('mode') mode?: 'ALL_63' | 'CURRENT_34'): DBaseRes {
+    const resolvedMode = mode === 'CURRENT_34' ? 'CURRENT_34' : 'ALL_63';
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
-      message: 'Fetched Vietnamese 3-tier administrative dictionary successfully',
-      data: this.nerService.getAdministrativeTree(),
+      message: 'Fetched Vietnamese 3-tier & 4-tier administrative dictionary successfully',
+      data: this.nerService.getAdministrativeTree(resolvedMode),
     };
   }
 
@@ -135,7 +136,7 @@ export class CrmController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'F04.1 & Công cụ T05 (Direct Endpoint): Bóc tách SĐT chống lách luật & Địa chỉ 3 cấp (< 3ms)',
+      'F04.1 & Công cụ T05 (Direct Endpoint): Bóc tách SĐT chống lách luật & Địa chỉ 3 cấp / 4 cấp (< 3ms)',
   })
   async extractVietnameseCommerceNerDirect(
     @Body() dto: ExtractVietnameseNerDto,
@@ -152,7 +153,7 @@ export class CrmController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'F04.1 & Công cụ T05: Bóc tách SĐT chống lách luật, tự động che SĐT, tra cứu chỉ số Nhận/Hoàn/Bị báo cáo & chuẩn hóa Địa chỉ 3 cấp (< 3ms)',
+      'F04.1 & Công cụ T05: Bóc tách SĐT chống lách luật, tự động che SĐT, tra cứu chỉ số Nhận/Hoàn/Bị báo cáo & chuẩn hóa Địa chỉ 3 cấp / 4 cấp (< 3ms)',
   })
   async extractVietnameseCommerceNer(
     @Param('shopId') shopId: string,

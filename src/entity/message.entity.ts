@@ -57,8 +57,36 @@ export interface ExtractedCommerceEntitiesPayload {
   districtName?: string | null;
   wardCode?: string | null;
   wardName?: string | null;
+  /**
+   * Cấp hành chính thứ 4 (Thôn / Ấp / Bản / Làng / Khu phố / Tổ dân phố / Khóm / Tiểu khu / KĐT / Đường phố)
+   */
+  hamletCode?: string | null;
+  hamletName?: string | null;
+  hamletType?:
+    | 'THON'
+    | 'AP'
+    | 'BAN'
+    | 'LANG'
+    | 'KHU_PHO'
+    | 'TO_DAN_PHO'
+    | 'KHOM'
+    | 'TIEU_KHU'
+    | 'XOM'
+    | 'KHU_DO_THI'
+    | 'DUONG_PHO'
+    | null;
+  /**
+   * Thông tin đối chiếu song hành giữa 63 Tỉnh/Thành trước sáp nhập và 34 Tỉnh/Thành hiện tại (NQ 202/2025/QH15)
+   */
+  legacyProvinceCode?: string | null;
+  legacyProvinceName?: string | null;
+  mergedProvinceCode?: string | null;
+  mergedProvinceName?: string | null;
+  isMergedProvince?: boolean;
+  detectedAddressTier?: 3 | 4 | null;
   addressLine?: string | null;
   fullFormattedAddress?: string | null;
+  fullFourTierFormattedAddress?: string | null;
   carrierCodes?: {
     ghnProvinceId?: number;
     ghnDistrictId?: number;
@@ -66,6 +94,7 @@ export interface ExtractedCommerceEntitiesPayload {
     ghtkProvince?: string;
     ghtkDistrict?: string;
     ghtkWard?: string;
+    ghtkHamlet?: string;
     vtpProvinceId?: number;
     jtCityCode?: string;
   } | null;

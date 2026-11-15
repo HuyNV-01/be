@@ -136,6 +136,25 @@ export class CustomerProfileEntity extends BaseModel {
   })
   defaultWardName: string | null;
 
+  // Đơn vị hành chính cấp 4 (Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm / KĐT) phục vụ chuẩn 4 cấp GHTK/VTP & 63 tỉnh thành
+  @Column({
+    name: 'default_hamlet_code',
+    type: 'varchar',
+    length: 48,
+    nullable: true,
+    default: null,
+  })
+  defaultHamletCode: string | null;
+
+  @Column({
+    name: 'default_hamlet_name',
+    type: 'varchar',
+    length: 150,
+    nullable: true,
+    default: null,
+  })
+  defaultHamletName: string | null;
+
   @Column({ name: 'default_address_line', type: 'text', nullable: true, default: null })
   defaultAddressLine: string | null;
 

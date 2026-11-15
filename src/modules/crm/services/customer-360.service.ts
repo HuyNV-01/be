@@ -390,8 +390,8 @@ export class Customer360Service {
    *    - Tính `phoneSearchHash = HMAC-SHA256(normalizedPhone, SHOP_PII_SALT)`.
    *    - Tìm hồ sơ khách hàng đã tồn tại theo `(shopId, phoneSearchHash)` trên mọi kênh.
    *    - Tự động tra cứu chỉ số Nhận / Hoàn / Bị báo cáo từ nguồn dữ liệu đã cài đặt (`lookupPhoneReputationFromSources`).
-   * 2. Nếu tin nhắn chỉ chứa Địa chỉ (không chứa SĐT):
-   *    - Tìm theo `conversation.customerId` hoặc `externalUserId` và tự động cập nhật ngay Địa chỉ 3 cấp / `defaultAddressLine` vào hồ sơ khách hàng!
+   * 2. Nếu tin nhắn chứa Địa chỉ 3 cấp hoặc 4 cấp hành chính:
+   *    - Tự động cập nhật ngay Tỉnh/Thành, Quận/Huyện, Phường/Xã, Thôn/Ấp/Khu phố/Tổ dân phố (Cấp 4) và `defaultAddressLine` vào hồ sơ khách hàng!
    * 3. Nếu cuộc hội thoại đến từ Quảng cáo (`sourceAdId` / `ctwaClickId`) và vừa thu thập được SĐT mới:
    *    - Tự động bắn sự kiện `LeadSubmitted` (`QualifiedLead`) lên Meta CAPI!
    */
@@ -489,6 +489,8 @@ export class Customer360Service {
         defaultDistrictName: extractedNer.districtName || null,
         defaultWardCode: extractedNer.wardCode || null,
         defaultWardName: extractedNer.wardName || null,
+        defaultHamletCode: extractedNer.hamletCode || null,
+        defaultHamletName: extractedNer.hamletName || null,
         defaultAddressLine: extractedNer.addressLine || extractedNer.fullFormattedAddress || null,
         tier: CustomerTierEnum.NEW,
         rfmScoreR: 3,
@@ -576,6 +578,10 @@ export class Customer360Service {
       if (extractedNer.wardCode) {
         customer.defaultWardCode = extractedNer.wardCode;
         customer.defaultWardName = extractedNer.wardName || customer.defaultWardName;
+      }
+      if (extractedNer.hamletCode || extractedNer.hamletName) {
+        customer.defaultHamletCode = extractedNer.hamletCode || customer.defaultHamletCode;
+        customer.defaultHamletName = extractedNer.hamletName || customer.defaultHamletName;
       }
       if (extractedNer.addressLine || extractedNer.fullFormattedAddress) {
         customer.defaultAddressLine =
@@ -991,6 +997,8 @@ export class Customer360Service {
         defaultDistrictName: 'Quận Cầu Giấy',
         defaultWardCode: 'VN-HN-CG-QH',
         defaultWardName: 'Phường Quan Hoa',
+        defaultHamletCode: 'VN-HN-CG-QH-H1',
+        defaultHamletName: 'Tổ dân phố số 1',
         defaultAddressLine: 'Số 15 Ngõ 68 Cầu Giấy',
         tier: CustomerTierEnum.VIP,
         rfmScoreR: 5,
@@ -1091,6 +1099,8 @@ export class Customer360Service {
         defaultDistrictName: 'Quận Bình Thạnh',
         defaultWardCode: 'VN-SG-BT-P22',
         defaultWardName: 'Phường 22',
+        defaultHamletCode: 'VN-SG-BT-P22-H1',
+        defaultHamletName: 'Khu phố 1',
         defaultAddressLine: 'Park 5 Vinhomes Central Park, 208 Nguyễn Hữu Cảnh',
         tier: CustomerTierEnum.GOLD,
         rfmScoreR: 4,
@@ -1158,6 +1168,8 @@ export class Customer360Service {
         defaultDistrictName: 'Quận 10',
         defaultWardCode: 'VN-SG-Q10-P12',
         defaultWardName: 'Phường 12',
+        defaultHamletCode: 'VN-SG-Q10-P12-H1',
+        defaultHamletName: 'Khu phố 1',
         defaultAddressLine: '120 Sư Vạn Hạnh',
         tier: CustomerTierEnum.BLACKLIST,
         rfmScoreR: 2,
@@ -1347,7 +1359,7 @@ export class Customer360Service {
   }
 
   /**
-   * Quét lịch sử các tin nhắn gần nhất trong cuộc hội thoại để tổng hợp SĐT & Địa chỉ 3 cấp mà khách đã nhắn
+   * Quét lịch sử các tin nhắn gần nhất trong cuộc hội thoại để tổng hợp SĐT & Địa chỉ 3 cấp / 4 cấp mà khách đã nhắn
    */
   private async aggregateNerFromConversationMessages(
     conversationId: string,
@@ -1393,6 +1405,8 @@ export class Customer360Service {
         aggregateNer.districtName = ext.districtName;
         aggregateNer.wardCode = ext.wardCode;
         aggregateNer.wardName = ext.wardName;
+        aggregateNer.hamletCode = ext.hamletCode || aggregateNer.hamletCode;
+        aggregateNer.hamletName = ext.hamletName || aggregateNer.hamletName;
       }
       if (!aggregateNer.addressLine && (ext.addressLine || ext.fullFormattedAddress)) {
         aggregateNer.hasAddressDetected = true;
@@ -1435,7 +1449,7 @@ export class Customer360Service {
         where: { id: conv.customerId, shopId: effectiveShopId },
       });
       if (existing) {
-        // Nếu hồ sơ đã tồn tại nhưng chưa có Địa chỉ 3 cấp hoặc chưa có SĐT, quét lại 20 tin nhắn gần nhất để tự động bổ sung
+        // Nếu hồ sơ đã tồn tại nhưng chưa có Địa chỉ hoặc chưa có SĐT, quét lại 20 tin nhắn gần nhất để tự động bổ sung
         if (!existing.defaultProvinceCode || !existing.phoneSearchHash) {
           const retroNer = await this.aggregateNerFromConversationMessages(
             conversationId,
@@ -1482,7 +1496,7 @@ export class Customer360Service {
   }
 
   /**
-   * Tạo mới hoặc cập nhật Hồ sơ Khách hàng CRM 360° (Hỗ trợ đa ngành hàng & thuộc tính tùy chỉnh)
+   * Tạo mới hoặc cập nhật Hồ sơ Khách hàng CRM 360° (Hỗ trợ đa ngành hàng, địa chỉ 3 cấp & 4 cấp hành chính)
    */
   public async upsertCustomerProfile(
     shopId: string,
@@ -1518,7 +1532,7 @@ export class Customer360Service {
           })
         : null;
 
-    const adminTree = this.nerService.getAdministrativeTree();
+    const adminTree = this.nerService.getAdministrativeTree('ALL_63');
     const matchedProv = dto.defaultProvinceCode
       ? adminTree.find((p) => p.code === dto.defaultProvinceCode)
       : null;
@@ -1529,6 +1543,10 @@ export class Customer360Service {
     const matchedWard =
       matchedDist && dto.defaultWardCode
         ? matchedDist.wards.find((w) => w.code === dto.defaultWardCode)
+        : null;
+    const matchedHamlet =
+      matchedWard && dto.defaultHamletCode
+        ? matchedWard.hamlets?.find((h) => h.code === dto.defaultHamletCode)
         : null;
 
     const sanitizedCustomAttrs: CustomerCustomAttributeItem[] | undefined = Array.isArray(
@@ -1558,6 +1576,8 @@ export class Customer360Service {
         defaultDistrictName: matchedDist?.name || null,
         defaultWardCode: dto.defaultWardCode || null,
         defaultWardName: matchedWard?.name || null,
+        defaultHamletCode: dto.defaultHamletCode || null,
+        defaultHamletName: dto.defaultHamletName?.trim() || matchedHamlet?.name || null,
         defaultAddressLine: dto.defaultAddressLine?.trim() || null,
         tier: dto.tier || CustomerTierEnum.NEW,
         networkDeliveredCount: externalTrustLookup?.networkDeliveredCount || 0,
@@ -1612,6 +1632,10 @@ export class Customer360Service {
       if (dto.defaultWardCode !== undefined) {
         customer.defaultWardCode = dto.defaultWardCode || null;
         customer.defaultWardName = matchedWard?.name || null;
+      }
+      if (dto.defaultHamletCode !== undefined || dto.defaultHamletName !== undefined) {
+        customer.defaultHamletCode = dto.defaultHamletCode || null;
+        customer.defaultHamletName = dto.defaultHamletName?.trim() || matchedHamlet?.name || null;
       }
       if (dto.defaultAddressLine !== undefined) {
         customer.defaultAddressLine = dto.defaultAddressLine?.trim() || null;
@@ -1888,6 +1912,8 @@ export class Customer360Service {
       primary.defaultDistrictName = duplicate.defaultDistrictName;
       primary.defaultWardCode = duplicate.defaultWardCode;
       primary.defaultWardName = duplicate.defaultWardName;
+      primary.defaultHamletCode = duplicate.defaultHamletCode;
+      primary.defaultHamletName = duplicate.defaultHamletName;
       primary.defaultAddressLine = duplicate.defaultAddressLine;
     }
 
