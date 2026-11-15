@@ -58,7 +58,7 @@ export interface ExtractedCommerceEntitiesPayload {
   wardCode?: string | null;
   wardName?: string | null;
   /**
-   * Cấp hành chính thứ 4 (Thôn / Ấp / Bản / Làng / Khu phố / Tổ dân phố / Khóm / Tiểu khu / KĐT / Đường phố)
+   * Cấp hành chính cơ sở (Thôn / Ấp / Bản / Làng / Khu phố / Tổ dân phố / Khóm / Tiểu khu / KĐT / Đường phố)
    */
   hamletCode?: string | null;
   hamletName?: string | null;
@@ -76,7 +76,7 @@ export interface ExtractedCommerceEntitiesPayload {
     | 'DUONG_PHO'
     | null;
   /**
-   * Thông tin đối chiếu song hành giữa 63 Tỉnh/Thành trước sáp nhập và 34 Tỉnh/Thành hiện tại (NQ 202/2025/QH15)
+   * Thông tin đối chiếu song hành giữa 63 Tỉnh/Thành trước sáp nhập (4 cấp) và 34 Tỉnh/Thành hiện tại (3 cấp không cấp huyện - NQ 202/2025/QH15)
    */
   legacyProvinceCode?: string | null;
   legacyProvinceName?: string | null;
@@ -86,6 +86,7 @@ export interface ExtractedCommerceEntitiesPayload {
   detectedAddressTier?: 3 | 4 | null;
   addressLine?: string | null;
   fullFormattedAddress?: string | null;
+  fullThreeTierPostMergerAddress?: string | null;
   fullFourTierFormattedAddress?: string | null;
   carrierCodes?: {
     ghnProvinceId?: number;

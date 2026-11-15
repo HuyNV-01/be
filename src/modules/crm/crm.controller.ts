@@ -80,7 +80,7 @@ export class CrmController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'Công cụ T05: Lấy cây từ điển hành chính 3 cấp & 4 cấp toàn quốc (63 Tỉnh/Thành trước sáp nhập & 34 Tỉnh/Thành hiện tại) ánh xạ GHN/GHTK/VTP/J&T',
+      'Công cụ T05: Lấy cây từ điển hành chính 3 cấp (34 Tỉnh/Thành - 3.321 Phường/Xã/Đặc khu mới) & 4 cấp toàn quốc (63 Tỉnh/Thành - 704 Quận/Huyện - 9.752+ Phường/Xã) ánh xạ GHN/GHTK/VTP/J&T',
   })
   getAdministrativeUnits(@Query('mode') mode?: 'ALL_63' | 'CURRENT_34'): DBaseRes {
     const resolvedMode = mode === 'CURRENT_34' ? 'CURRENT_34' : 'ALL_63';
@@ -89,6 +89,52 @@ export class CrmController {
       code: HttpStatus.OK,
       message: 'Fetched Vietnamese 3-tier & 4-tier administrative dictionary successfully',
       data: this.nerService.getAdministrativeTree(resolvedMode),
+    };
+  }
+
+  @Get(':shopId/administrative-units/hamlets')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Công cụ T05: Lấy danh sách đầy đủ Thôn/Ấp/Bản/Khu phố/Tổ dân phố/KĐT (45-65+ ĐV/xã) tích hợp GHTK Level-4 Address API',
+  })
+  async getAdministrativeWardHamlets(
+    @Query('wardCode') wardCode?: string,
+    @Query('q') searchQuery?: string,
+  ): Promise<DBaseRes> {
+    const data = await this.nerService.getHamletsForWard({
+      wardCode,
+      searchQuery,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched fourth-tier hamlets for ward successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/administrative-units/sync')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Công cụ T05: Đối soát & đồng bộ trực tuyến địa giới hành chính đa nguồn (provinces.open-api.vn v1/v2, GHN, GHTK Level-4, ViettelPost)',
+  })
+  async syncAdministrativeUnitsFromMultiSources(
+    @Body()
+    body?: {
+      ghnToken?: string;
+      ghtkToken?: string;
+      vtpToken?: string;
+    },
+  ): Promise<DBaseRes> {
+    const report = await this.nerService.syncAdministrativeTreeWithOpenApisAndCarriers(body || {});
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Synchronized multi-source Vietnamese administrative tree successfully',
+      data: report,
     };
   }
 

@@ -1532,22 +1532,17 @@ export class Customer360Service {
           })
         : null;
 
-    const adminTree = this.nerService.getAdministrativeTree('ALL_63');
-    const matchedProv = dto.defaultProvinceCode
-      ? adminTree.find((p) => p.code === dto.defaultProvinceCode)
-      : null;
-    const matchedDist =
-      matchedProv && dto.defaultDistrictCode
-        ? matchedProv.districts.find((d) => d.code === dto.defaultDistrictCode)
-        : null;
-    const matchedWard =
-      matchedDist && dto.defaultWardCode
-        ? matchedDist.wards.find((w) => w.code === dto.defaultWardCode)
-        : null;
-    const matchedHamlet =
-      matchedWard && dto.defaultHamletCode
-        ? matchedWard.hamlets?.find((h) => h.code === dto.defaultHamletCode)
-        : null;
+    const resolvedAdmin = this.nerService.resolveAdministrativeUnitsByCodes({
+      provinceCode: dto.defaultProvinceCode,
+      districtCode: dto.defaultDistrictCode,
+      wardCode: dto.defaultWardCode,
+      hamletCode: dto.defaultHamletCode,
+      hamletName: dto.defaultHamletName,
+    });
+    const matchedProv = resolvedAdmin.province;
+    const matchedDist = resolvedAdmin.district;
+    const matchedWard = resolvedAdmin.ward;
+    const matchedHamlet = resolvedAdmin.hamlet;
 
     const sanitizedCustomAttrs: CustomerCustomAttributeItem[] | undefined = Array.isArray(
       dto.customAttributesJson,
@@ -1570,11 +1565,12 @@ export class Customer360Service {
         phoneEncrypted: encryptedPack?.phoneEncrypted || null,
         phoneSearchHash: encryptedPack?.phoneSearchHash || null,
         email: dto.email?.trim() || null,
-        defaultProvinceCode: dto.defaultProvinceCode || null,
+        defaultProvinceCode: dto.defaultProvinceCode || matchedProv?.code || null,
         defaultProvinceName: matchedProv?.name || null,
-        defaultDistrictCode: dto.defaultDistrictCode || null,
-        defaultDistrictName: matchedDist?.name || null,
-        defaultWardCode: dto.defaultWardCode || null,
+        defaultDistrictCode:
+          dto.defaultDistrictCode || matchedDist?.code || matchedWard?.legacyDistrictCode || null,
+        defaultDistrictName: matchedDist?.name || matchedWard?.legacyDistrictName || null,
+        defaultWardCode: dto.defaultWardCode || matchedWard?.code || null,
         defaultWardName: matchedWard?.name || null,
         defaultHamletCode: dto.defaultHamletCode || null,
         defaultHamletName: dto.defaultHamletName?.trim() || matchedHamlet?.name || null,
@@ -1622,16 +1618,29 @@ export class Customer360Service {
       }
       if (dto.email !== undefined) customer.email = dto.email?.trim() || null;
       if (dto.defaultProvinceCode !== undefined) {
-        customer.defaultProvinceCode = dto.defaultProvinceCode || null;
+        customer.defaultProvinceCode = dto.defaultProvinceCode || matchedProv?.code || null;
         customer.defaultProvinceName = matchedProv?.name || null;
       }
-      if (dto.defaultDistrictCode !== undefined) {
-        customer.defaultDistrictCode = dto.defaultDistrictCode || null;
-        customer.defaultDistrictName = matchedDist?.name || null;
+      if (dto.defaultDistrictCode !== undefined || matchedDist || matchedWard?.legacyDistrictCode) {
+        customer.defaultDistrictCode =
+          dto.defaultDistrictCode !== undefined
+            ? dto.defaultDistrictCode ||
+              matchedDist?.code ||
+              matchedWard?.legacyDistrictCode ||
+              null
+            : matchedDist?.code || matchedWard?.legacyDistrictCode || customer.defaultDistrictCode;
+        customer.defaultDistrictName =
+          dto.defaultDistrictCode === null && !dto.defaultWardCode
+            ? null
+            : matchedDist?.name || matchedWard?.legacyDistrictName || customer.defaultDistrictName;
       }
       if (dto.defaultWardCode !== undefined) {
         customer.defaultWardCode = dto.defaultWardCode || null;
-        customer.defaultWardName = matchedWard?.name || null;
+        customer.defaultWardName =
+          matchedWard?.name ||
+          (dto.defaultWardCode?.startsWith('CUSTOM-WARD:')
+            ? dto.defaultWardCode.replace('CUSTOM-WARD:', '')
+            : null);
       }
       if (dto.defaultHamletCode !== undefined || dto.defaultHamletName !== undefined) {
         customer.defaultHamletCode = dto.defaultHamletCode || null;
