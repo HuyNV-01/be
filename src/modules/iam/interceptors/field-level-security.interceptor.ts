@@ -22,7 +22,10 @@ const RAW_PII_NEVER_SERIALIZE_KEYS = new Set([
   'refreshTokenEncrypted',
   'capiAccessTokenEncrypted',
   'webhookVerifySecretEncrypted',
+  'customLookupApiKeyEncrypted',
   'tokenHash',
+  'localPhone',
+  'e164Phone',
 ]);
 
 @Injectable()
@@ -78,6 +81,16 @@ export class FieldLevelSecurityInterceptor implements NestInterceptor {
     }
   }
 
+  private maskRawPhoneString(val: string): string {
+    const digits = val.replace(/\D/g, '');
+    if (digits.length >= 9 && !val.includes('*')) {
+      const local =
+        digits.startsWith('84') && digits.length === 11 ? `0${digits.slice(2)}` : digits;
+      return `${local.slice(0, 3)}***${local.slice(-3)}`;
+    }
+    return val;
+  }
+
   private sanitizePayload(data: unknown, canViewCost: boolean, visited: WeakSet<object>): unknown {
     if (data === null || data === undefined) return data;
     if (data instanceof Date || Buffer.isBuffer(data)) return data;
@@ -98,6 +111,12 @@ export class FieldLevelSecurityInterceptor implements NestInterceptor {
           continue;
         }
         if (!canViewCost && COST_AND_PROFIT_SENSITIVE_KEYS.has(key)) {
+          continue;
+        }
+        if (key === 'phones' && Array.isArray(value)) {
+          sanitized[key] = value.map((v) =>
+            typeof v === 'string' ? this.maskRawPhoneString(v) : v,
+          );
           continue;
         }
         sanitized[key] = this.sanitizePayload(value, canViewCost, visited);

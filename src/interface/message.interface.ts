@@ -93,6 +93,13 @@ export interface MessageMetadata {
   quickReplyShortcutUsed?: string;
   productCards?: MessageProductCardMeta[];
   translation?: MessageTranslationMeta;
+  channelType?: string;
+  channelIntegrationId?: string | null;
+  externalPageId?: string | null;
+  pageShortCode?: string | null;
+  pageName?: string | null;
+  channelAvatarUrl?: string | null;
+  hasMaskedPhonesInContent?: boolean;
   externalCustomerName?: string;
   externalCustomerAvatar?: string | null;
   externalCustomerPsid?: string | null;
@@ -121,6 +128,15 @@ export interface MessageMetadata {
   platformEditedExternalId?: string | null;
   platformEditSyncedAt?: string;
   platformErrorMessage?: string | null;
+  buyerDeliveredAt?: string | null;
+  buyerReadAt?: string | null;
+  platformSeenSyncedAt?: string | null;
+  viewerReadBy?: Array<{
+    id: string;
+    name: string;
+    avatar: string | null;
+    readAt: string;
+  }>;
 }
 
 export interface MessagePollOptionMeta {

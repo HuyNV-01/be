@@ -1,4 +1,4 @@
-import { MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
+import { DeliveryTrustBandEnum, MessageStatusEnum, MessageTypeEnum } from 'src/common/enum';
 import * as messageInterface from 'src/interface/message.interface';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
@@ -13,13 +13,101 @@ export enum MessageDirectionEnum {
   SYSTEM = 'SYSTEM',
 }
 
+export interface ExtractedPhoneTrustSummary {
+  customerId?: string | null;
+  phoneMasked: string;
+  carrierName?: string;
+  score: number;
+  band: DeliveryTrustBandEnum;
+  badgeVariant: 'success' | 'info' | 'warning' | 'danger';
+  headline: string;
+  recommendation?: string;
+  totalDeliveredCount: number;
+  shopDeliveredCount: number;
+  networkDeliveredCount: number;
+  totalReturnedCount: number;
+  shopReturnedCount: number;
+  networkReturnedCount: number;
+  reportedCount: number;
+  returnRatePercent: number;
+  successRatePercent: number;
+  requireDepositVietQr: boolean;
+  isBlacklisted: boolean;
+  lookupSource: string;
+  lookupSourceLabel: string;
+  latestReportReason?: string | null;
+  checkedAt: string;
+}
+
 export interface ExtractedCommerceEntitiesPayload {
   phones?: string[];
+  maskedPhones?: string[];
+  normalizedPhones?: Array<{
+    rawMatch: string;
+    localPhone?: string;
+    maskedPhone?: string;
+    e164Phone?: string;
+    carrierName: string;
+  }>;
+  phoneTrustSummary?: ExtractedPhoneTrustSummary | null;
+  hasAddressDetected?: boolean;
   provinceCode?: string | null;
+  provinceName?: string | null;
   districtCode?: string | null;
+  districtName?: string | null;
   wardCode?: string | null;
+  wardName?: string | null;
+  /**
+   * Cấp hành chính cơ sở (Thôn / Ấp / Bản / Làng / Khu phố / Tổ dân phố / Khóm / Tiểu khu / KĐT / Đường phố)
+   */
+  hamletCode?: string | null;
+  hamletName?: string | null;
+  hamletType?:
+    | 'THON'
+    | 'AP'
+    | 'BAN'
+    | 'LANG'
+    | 'KHU_PHO'
+    | 'TO_DAN_PHO'
+    | 'KHOM'
+    | 'TIEU_KHU'
+    | 'XOM'
+    | 'KHU_DO_THI'
+    | 'DUONG_PHO'
+    | null;
+  /**
+   * Thông tin đối chiếu song hành giữa 63 Tỉnh/Thành trước sáp nhập (4 cấp) và 34 Tỉnh/Thành hiện tại (3 cấp không cấp huyện - NQ 202/2025/QH15)
+   */
+  legacyProvinceCode?: string | null;
+  legacyProvinceName?: string | null;
+  mergedProvinceCode?: string | null;
+  mergedProvinceName?: string | null;
+  isMergedProvince?: boolean;
+  detectedAddressTier?: 3 | 4 | null;
   addressLine?: string | null;
+  fullFormattedAddress?: string | null;
+  fullThreeTierPostMergerAddress?: string | null;
+  fullFourTierFormattedAddress?: string | null;
+  carrierCodes?: {
+    ghnProvinceId?: number;
+    ghnDistrictId?: number;
+    ghnWardCode?: string;
+    ghtkProvince?: string;
+    ghtkDistrict?: string;
+    ghtkWard?: string;
+    ghtkHamlet?: string;
+    vtpProvinceId?: number;
+    jtCityCode?: string;
+  } | null;
   skuCodes?: string[];
+  colors?: string[];
+  sizes?: string[];
+  heightCm?: number | null;
+  weightKg?: number | null;
+  quantities?: number[];
+  paymentIntent?: 'BANK_TRANSFER' | 'COD' | null;
+  deliveryTimeNote?: string | null;
+  processingTimeMs?: number;
 }
 
 @Entity('messages')
@@ -98,10 +186,6 @@ export class MessageEntity extends BaseModel {
   @Column({ name: 'expires_at', type: 'datetime', nullable: true, default: null })
   @Index()
   expiresAt: Date | null;
-
-  // ============================================================================
-  // OMNICHANNEL SELLER OS EXTENSIONS (Zero-Config DatabaseEvolutionService Safe)
-  // ============================================================================
 
   @Column({ name: 'shop_id', type: 'varchar', length: 36, nullable: true, default: null })
   shopId: string | null;

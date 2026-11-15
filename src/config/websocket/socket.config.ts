@@ -122,6 +122,10 @@ export const SOCKET_CONFIG = {
       COMMENT_PRIVATE_REPLY_SENT: 'inbox:comment_private_reply_sent',
       COMMENT_DELETED_ON_PLATFORM: 'inbox:comment_deleted_on_platform',
       OUTBOUND_DELIVERY_STATUS: 'inbox:outbound_delivery_status',
+      BUYER_SEEN_SYNCED: 'inbox:buyer_seen_synced',
+      CRM_PROFILE_UPDATED: 'crm:profile_updated',
+      CAPI_EVENT_DISPATCHED: 'crm:capi_event_dispatched',
+      SECURITY_AUDIT_ALERT: 'crm:security_audit_alert',
     },
   },
 } as const;

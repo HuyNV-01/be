@@ -5,6 +5,7 @@ import { ConversationSupportStatusEnum, DataScopeEnum } from 'src/common/enum/pe
 import { OmnichannelInboxFilterDto } from 'src/dto/chat/omnichannel-inbox.dto';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
+import { VietnameseCommerceNerService } from 'src/modules/crm/services/vietnamese-commerce-ner.service';
 import { EffectiveMemberContext } from 'src/modules/iam/iam.service';
 import { In, Repository } from 'typeorm';
 
@@ -25,6 +26,7 @@ export type OmnichannelMergedConversationItem = ConversationEntity & {
   pageShortCode?: string;
   pageName?: string;
   channelAvatarUrl?: string | null;
+  externalPageId?: string | null;
 };
 
 @Injectable()
@@ -35,10 +37,12 @@ export class OmnichannelInboxQueryService {
     @InjectRepository(ChannelIntegrationEntity)
     private readonly channelRepo: Repository<ChannelIntegrationEntity>,
     private readonly messageCryptoService: MessageCryptoService,
+    private readonly nerService: VietnameseCommerceNerService,
   ) {}
 
   /**
-   * F03.1 & F03.2: Truy vấn hộp thư bán hàng hợp nhất 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT
+   * F03.1 & F03.2: Truy vấn hộp thư bán hàng hợp nhất 18 tiêu chí kết hợp toán tử Tag AND / OR / NOT,
+   * tự động che số điện thoại trong `lastMessage` và đính kèm đầy đủ `pageName`, `pageShortCode`, `channelAvatarUrl`.
    */
   async queryMergedConversations(
     filter: OmnichannelInboxFilterDto,
@@ -201,14 +205,18 @@ export class OmnichannelInboxQueryService {
       const fallbackAvatar =
         conv.avatar ||
         `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent((conv.name || 'Khách hàng').trim())}&backgroundType=gradientLinear`;
+      const decryptedLast = conv.lastMessage
+        ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
+        : '';
+      const maskedLast = decryptedLast ? this.nerService.maskPhonesInText(decryptedLast) : '';
+
       return Object.assign(conv, {
         avatar: fallbackAvatar,
-        lastMessage: conv.lastMessage
-          ? this.messageCryptoService.decryptForConversation(conv.lastMessage, conv.id)
-          : '',
+        lastMessage: maskedLast,
         pageShortCode: ch?.pageShortCode || conv.channelType,
         pageName: ch?.pageName || conv.channelType,
         channelAvatarUrl: ch?.avatarUrl || null,
+        externalPageId: ch?.externalPageId || null,
       });
     });
 

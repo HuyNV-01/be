@@ -21,6 +21,7 @@ import { HTTP_RESPONSE } from './constants/http-response';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
     logger: ['log', 'fatal', 'error', 'warn', 'debug', 'verbose'],
   });
 

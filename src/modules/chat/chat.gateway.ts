@@ -792,6 +792,9 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
       userId: event.userId,
       user: event.user,
       lastReadAt: event.lastReadAt.toISOString(),
+      status: MessageStatusEnum.READ,
+      isBuyerReceipt: Boolean(event.isBuyerReceipt),
+      platformSeenSynced: Boolean(event.platformSeenSynced),
     };
     this.server
       .to(`conversation:${event.conversationId}`)

@@ -1,3 +1,4 @@
+import { ShopBusinessCategoryEnum } from 'src/common/enum';
 import { ChannelTypeEnum, RoutingStrategyEnum } from 'src/common/enum/permission.enum';
 import { Column, Entity, Index } from 'typeorm';
 
@@ -13,6 +14,32 @@ export interface MarketplaceSyncConfig {
   autoReserveStockOnMarketplaceOrder: boolean;
   safetyBufferStockQty: number;
   pushAvailableStockToShopeeTikTok: boolean;
+}
+
+/**
+ * Cấu hình Nguồn Dữ Liệu Tra Cứu Chỉ Số Nhận / Hoàn / Bị Báo Cáo Của SĐT & Cấu Hình Hồ Sơ Theo Ngành Hàng
+ * Tham chiếu nghiệp vụ Pancake CRM, Pancake POS & Mạng lưới đối tác vận chuyển 3PL (GHN, GHTK, ViettelPost, J&T).
+ */
+export interface CrmTrustAndIndustryConfig {
+  enableAutoTrustLookupOnPhone: boolean;
+  useInternalPosHistory: boolean;
+  usePancakeCommunityNetwork: boolean;
+  useCarrier3plLookup: boolean;
+  enabledCarriers: Array<'GHN' | 'GHTK' | 'VTP' | 'JT'>;
+  customLookupWebhookUrl: string | null;
+  customLookupApiKeyEncrypted?: string | null;
+  highRiskReturnRateThresholdPercent: number;
+  highRiskReportedCountThreshold: number;
+  autoMaskBuyerPhoneInChat: boolean;
+  autoExtractAddressFromChat: boolean;
+  businessCategory: ShopBusinessCategoryEnum;
+  showApparelMeasurementsInProfile: boolean;
+  customAttributeTemplates: Array<{
+    key: string;
+    label: string;
+    placeholder?: string;
+  }>;
+  updatedAt?: string;
 }
 
 /**
@@ -101,4 +128,12 @@ export class ShopWorkspaceEntity extends BaseModel {
 
   @Column({ name: 'saas_app_profiles_json', type: 'json', nullable: true, default: null })
   saasAppProfilesJson: SaasAppProfileItem[] | null;
+
+  @Column({
+    name: 'crm_trust_and_industry_config_json',
+    type: 'json',
+    nullable: true,
+    default: null,
+  })
+  crmTrustAndIndustryConfigJson: CrmTrustAndIndustryConfig | null;
 }

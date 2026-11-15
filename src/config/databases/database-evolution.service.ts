@@ -20,17 +20,6 @@ interface DbColumnInfoRow {
   characterMaximumLength?: number | string | null;
 }
 
-/**
- * DatabaseEvolutionService (100% Zero-Config, Self-Healing Schema & Metadata-Driven Backfill):
- * 1. Thực thi ngay tại `onModuleInit()` (trước khi `ScheduleModule` kích hoạt các `@Cron` job):
- *    - Tự động tạo các bảng Entity mới chưa tồn tại trong MySQL (`message_tag_assignments`, `quick_reply_templates`, ...).
- *    - Tự động phát hiện và `ALTER TABLE ... ADD COLUMN` cho toàn bộ các cột mới trong Entity mà DB chưa có.
- *    - Tự động nâng cấp kiểu dữ liệu cột (`varchar(255)` / `varchar(500)` -> `text` / `longtext` hoặc mở rộng độ dài `varchar`)
- *      trên các bảng đã tồn tại để ngăn chặn triệt để lỗi tràn ký tự (`ER_DATA_TOO_LONG`) khi lưu URL ảnh đại diện CDN dài.
- *    - Tự động mở rộng tập giá trị `ENUM(...)` nếu Entity bổ sung thêm enum value mới.
- *    - Tự động tạo các Index còn thiếu trên bảng.
- * 2. Thực thi chuẩn hoá & điền dữ liệu thiếu (Backfill) cho các bản ghi cũ mà không làm mất dữ liệu lịch sử.
- */
 @Injectable()
 export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBootstrap {
   private readonly logger = new Logger(DatabaseEvolutionService.name, { timestamp: true });
@@ -38,6 +27,7 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     'messages',
     'call_participants',
     'channel_webhook_logs',
+    'security_audit_logs',
   ]);
 
   private schemaReady = false;
@@ -84,10 +74,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     return this.evolutionPromise;
   }
 
-  /**
-   * Bước 1: Tự động kiểm tra và bổ sung các Bảng mới, Cột mới, Nâng cấp độ dài/kiểu cột (`varchar` -> `text`),
-   * Enum mới và Index mới từ `this.dataSource.entityMetadatas` vào MySQL một cách an toàn (Non-destructive).
-   */
   public async synchronizeMissingTablesColumnsAndEnums(): Promise<void> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -181,11 +167,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     }
   }
 
-  /**
-   * Tự động phát hiện và nâng cấp cột kiểu chuỗi đang bị giới hạn độ dài trong DB cũ
-   * (VD: `avatar_url varchar(500)` hoặc `avatar varchar(255)` -> `text`),
-   * hoặc mở rộng cột `varchar(N_old)` sang `varchar(N_new)` lớn hơn mà không làm mất dữ liệu.
-   */
   private async upgradeColumnTypeOrLengthIfNeeded(
     queryRunner: QueryRunner,
     tableName: string,
@@ -200,7 +181,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     const currentDataType = (existingCol.dataType || '').toLowerCase();
     const dbColName = col.databaseName;
 
-    // Trường hợp 1: Entity yêu cầu kiểu text / mediumtext / longtext nhưng DB hiện tại đang là varchar hoặc tinytext
     const isDesiredText =
       desiredRawType === 'text' || desiredRawType === 'mediumtext' || desiredRawType === 'longtext';
     if (isDesiredText && (currentDataType === 'varchar' || currentDataType === 'tinytext')) {
@@ -221,7 +201,6 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
       return;
     }
 
-    // Trường hợp 2: Entity yêu cầu varchar(L_new) lớn hơn độ dài hiện tại trong DB
     if (
       (desiredRawType === 'varchar' || desiredRawType === 'character varying') &&
       currentDataType === 'varchar' &&
@@ -436,7 +415,7 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
         );
         existingIdxNames.add(idx.name.toLowerCase());
       } catch {
-        // Bỏ qua nếu index trùng cột hoặc đã tồn tại dưới tên khác
+        // Ignore duplicate index errors
       }
     }
   }

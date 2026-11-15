@@ -15,6 +15,10 @@ export interface NotificationMetadata {
   emoji?: string;
   unreadMessageCount?: number;
   actionUrl?: string;
+  actorUserId?: string;
+  actorName?: string;
+  usedCount?: number;
+  hourlyLimit?: number;
   // Bổ sung cho đa ngôn ngữ (i18n) trên FE
   titleKey?: string;
   contentKey?: string;
