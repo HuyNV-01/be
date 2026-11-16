@@ -17,7 +17,7 @@ import { WarehouseEntity } from 'src/entity/warehouse.entity';
 import { CrmModule } from '../crm/crm.module';
 import { IamModule } from '../iam/iam.module';
 import { NotificationsModule } from '../notifications/notifications.module';
-import { CatalogPosController } from './catalog-pos.controller';
+import { CatalogPosController, VietQrPublicWebhookController } from './catalog-pos.controller';
 import { AtomicInventoryAndTransferService } from './services/atomic-inventory-and-transfer.service';
 import { CatalogAndBomService } from './services/catalog-and-bom.service';
 import { InChatPosAndOrderRouterService } from './services/in-chat-pos-and-order-router.service';
@@ -43,7 +43,7 @@ import { VietQrEmvcoAndCounterPosService } from './services/vietqr-emvco-and-cou
     CrmModule,
     NotificationsModule,
   ],
-  controllers: [CatalogPosController],
+  controllers: [CatalogPosController, VietQrPublicWebhookController],
   providers: [
     AtomicInventoryAndTransferService,
     CatalogAndBomService,

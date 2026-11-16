@@ -126,6 +126,23 @@ export const DEFAULT_INDUSTRY_ATTRIBUTE_TEMPLATES: Record<
       placeholder: 'VD: Bỉm dán size L, sữa số 2',
     },
   ],
+  [ShopBusinessCategoryEnum.HOME_LIVING_APPLIANCES]: [
+    {
+      key: 'housing_space_type',
+      label: 'Loại hình nhà ở / Không gian lắp đặt',
+      placeholder: 'VD: Chung cư 75m2, Nhà phố 3 tầng',
+    },
+    {
+      key: 'appliance_power_spec',
+      label: 'Hạ tầng điện / Nước & Công suất ưu tiên',
+      placeholder: 'VD: Điện 220V, tủ bếp âm, ưu tiên Inverter tiết kiệm điện',
+    },
+    {
+      key: 'installation_warranty_note',
+      label: 'Ghi chú lắp đặt & Bảo hành tận nơi',
+      placeholder: 'VD: Giao lắp cuối tuần, kích hoạt bảo hành điện tử theo SĐT',
+    },
+  ],
 };
 
 @Injectable()
@@ -341,12 +358,14 @@ export class Customer360Service {
       checkedAt: customer.lastTrustLookupAt || customer.updatedAt,
     });
 
-    const clone = { ...customer } as CustomerProfileEntity & {
+    // Bảo toàn nguyên vẹn prototype của BaseEntity (hasId, save, remove, softRemove...) khi gắn thêm trustEvaluation
+    const clone = Object.assign(Object.create(Object.getPrototypeOf(customer)), customer, {
+      trustEvaluation,
+    }) as CustomerProfileEntity & {
       trustEvaluation: DeliveryTrustEvaluationResult;
     };
-    delete (clone as any).phoneEncrypted;
-    delete (clone as any).phoneSearchHash;
-    clone.trustEvaluation = trustEvaluation;
+    delete (clone as unknown as Record<string, unknown>).phoneEncrypted;
+    delete (clone as unknown as Record<string, unknown>).phoneSearchHash;
     return clone;
   }
 

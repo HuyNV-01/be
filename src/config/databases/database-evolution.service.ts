@@ -28,6 +28,8 @@ export class DatabaseEvolutionService implements OnModuleInit, OnApplicationBoot
     'call_participants',
     'channel_webhook_logs',
     'security_audit_logs',
+    'inventory_movement_ledgers',
+    'bot_flow_execution_logs',
   ]);
 
   private schemaReady = false;

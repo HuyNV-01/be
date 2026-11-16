@@ -8,6 +8,7 @@ import {
   IsInt,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -18,10 +19,15 @@ import {
   InventoryMovementTypeEnum,
   PosOrderPaymentMethodEnum,
   PosOrderStatusEnum,
+  ProductIndustryTypeEnum,
   ProductSerialStatusEnum,
 } from 'src/common/enum';
 import { BundleBomComponentItem } from 'src/entity/product-variant.entity';
-import { ProductFreeGiftRuleItem, ProductSizeChartRowItem } from 'src/entity/product.entity';
+import {
+  ProductFreeGiftRuleItem,
+  ProductSizeChartRowItem,
+  ProductUomConversionItem,
+} from 'src/entity/product.entity';
 
 export class UpsertWarehouseDto {
   @ApiProperty()
@@ -77,27 +83,37 @@ export class UpsertWarehouseDto {
 }
 
 export class CreateProductWithMatrixDto {
-  @ApiProperty({ example: 'AO-LUA-2026' })
+  @ApiProperty({ example: 'SP-DA-NGANH-2026' })
   @IsString()
   @IsNotEmpty()
   code: string;
 
-  @ApiProperty({ example: 'Áo Sơ Mi Lụa Cao Cấp Hàn Quốc' })
+  @ApiProperty({ example: 'Serum Vitamin C Cấp Ẩm Trắng Da 15%' })
   @IsString()
   @IsNotEmpty()
   name: string;
 
-  @ApiPropertyOptional({ example: 'Thời trang Nữ' })
+  @ApiPropertyOptional({
+    enum: ProductIndustryTypeEnum,
+    default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
+    description:
+      'Ngành hàng sản phẩm (Thời trang, Mỹ phẩm, Điện tử, Thực phẩm/F&B, Mẹ & Bé, Gia dụng, Đa ngành)',
+  })
+  @IsOptional()
+  @IsEnum(ProductIndustryTypeEnum)
+  industryType?: ProductIndustryTypeEnum;
+
+  @ApiPropertyOptional({ example: 'Mỹ phẩm & Chăm sóc da' })
   @IsOptional()
   @IsString()
   categoryName?: string;
 
-  @ApiPropertyOptional({ example: 'Pancake Chic' })
+  @ApiPropertyOptional({ example: 'PancakeDerma' })
   @IsOptional()
   @IsString()
   brandName?: string;
 
-  @ApiPropertyOptional({ example: 'Chiếc' })
+  @ApiPropertyOptional({ example: 'Chai' })
   @IsOptional()
   @IsString()
   unitName?: string;
@@ -112,13 +128,47 @@ export class CreateProductWithMatrixDto {
   @IsString()
   description?: string;
 
-  @ApiPropertyOptional({ description: 'Danh sách màu sắc để tự động nhân ma trận biến thể SKU' })
+  @ApiPropertyOptional({
+    description:
+      'Tên trục thuộc tính 1 tùy theo ngành hàng (VD: Màu sắc, Dung tích, Phiên bản, Quy cách đóng gói, Độ tuổi)',
+    example: 'Dung tích',
+  })
+  @IsOptional()
+  @IsString()
+  attributeAxis1Name?: string;
+
+  @ApiPropertyOptional({
+    description: 'Danh sách giá trị trục thuộc tính 1 (tương thích ngược với colors)',
+  })
+  @IsOptional()
+  @IsArray()
+  attributeAxis1Values?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Tên trục thuộc tính 2 tùy theo ngành hàng (VD: Kích cỡ, Loại da, Cấu hình, Hương vị)',
+    example: 'Loại da',
+  })
+  @IsOptional()
+  @IsString()
+  attributeAxis2Name?: string;
+
+  @ApiPropertyOptional({
+    description: 'Danh sách giá trị trục thuộc tính 2 (tương thích ngược với sizes)',
+  })
+  @IsOptional()
+  @IsArray()
+  attributeAxis2Values?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Danh sách màu sắc / phân loại 1 để nhân ma trận biến thể SKU',
+  })
   @IsOptional()
   @IsArray()
   colors?: string[];
 
   @ApiPropertyOptional({
-    description: 'Danh sách kích cỡ (S, M, L, XL) để tự động nhân ma trận biến thể SKU',
+    description: 'Danh sách kích cỡ / phân loại 2 để nhân ma trận biến thể SKU',
   })
   @IsOptional()
   @IsArray()
@@ -163,6 +213,27 @@ export class CreateProductWithMatrixDto {
   @Min(10)
   weightGrams?: number;
 
+  @ApiPropertyOptional({ default: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  lengthCm?: number;
+
+  @ApiPropertyOptional({ default: 15 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  widthCm?: number;
+
+  @ApiPropertyOptional({ default: 5 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  heightCm?: number;
+
   @ApiPropertyOptional({ default: false })
   @IsOptional()
   @IsBoolean()
@@ -173,6 +244,51 @@ export class CreateProductWithMatrixDto {
   @Type(() => Number)
   @IsInt()
   warrantyMonths?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Quản lý theo Lô sản xuất & Hạn sử dụng FEFO (Mỹ phẩm, Thực phẩm, Dược phẩm, Mẹ & Bé)',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiresBatchExpiry?: boolean;
+
+  @ApiPropertyOptional({ example: 'LOT-2026-11A' })
+  @IsOptional()
+  @IsString()
+  batchCode?: string;
+
+  @ApiPropertyOptional({ example: '2026-11-01' })
+  @IsOptional()
+  @IsString()
+  manufacturingDate?: string;
+
+  @ApiPropertyOptional({ example: '2028-11-01' })
+  @IsOptional()
+  @IsString()
+  expiryDate?: string;
+
+  @ApiPropertyOptional({ default: 24 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  shelfLifeMonths?: number;
+
+  @ApiPropertyOptional({ example: 'Nơi khô ráo, thoáng mát < 25°C' })
+  @IsOptional()
+  @IsString()
+  storageCondition?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  technicalSpecsJson?: Record<string, string>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  uomConversionsJson?: ProductUomConversionItem[];
 
   @ApiPropertyOptional({
     description: 'Số lượng tồn kho khởi tạo ban đầu cho mỗi biến thể tại kho mặc định',
@@ -206,6 +322,14 @@ export class CreateBundleBomVariantDto {
   @IsNotEmpty()
   variantName: string;
 
+  @ApiPropertyOptional({
+    enum: ProductIndustryTypeEnum,
+    default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
+  })
+  @IsOptional()
+  @IsEnum(ProductIndustryTypeEnum)
+  industryType?: ProductIndustryTypeEnum;
+
   @ApiProperty({ example: 590000 })
   @Type(() => Number)
   @IsNumber()
@@ -231,19 +355,54 @@ export class RecommendSizeAdvisorDto {
   @IsString()
   productId?: string;
 
-  @ApiProperty({ example: 160 })
-  @Type(() => Number)
-  @IsInt()
-  @Min(100)
-  @Max(220)
-  heightCm: number;
+  @ApiPropertyOptional({ enum: ProductIndustryTypeEnum })
+  @IsOptional()
+  @IsEnum(ProductIndustryTypeEnum)
+  industryType?: ProductIndustryTypeEnum;
 
-  @ApiProperty({ example: 52 })
+  @ApiPropertyOptional({ example: 160 })
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(25)
-  @Max(160)
-  weightKg: number;
+  @Min(40)
+  @Max(230)
+  heightCm?: number;
+
+  @ApiPropertyOptional({ example: 52 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(2)
+  @Max(200)
+  weightKg?: number;
+
+  @ApiPropertyOptional({
+    description: 'Tháng tuổi của bé (dành cho ngành hàng Mẹ & Bé: Bỉm, Sữa, Quần áo trẻ em)',
+    example: 9,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(180)
+  babyAgeMonths?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Loại da khách hàng (dành cho ngành Mỹ phẩm: OILY, DRY, COMBINATION, SENSITIVE, NORMAL)',
+    example: 'OILY',
+  })
+  @IsOptional()
+  @IsString()
+  skinType?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Nhu cầu sử dụng / diện tích phòng / số người dùng (dành cho Điện tử, Gia dụng, Thực phẩm)',
+  })
+  @IsOptional()
+  @IsString()
+  usageNeed?: string;
 }
 
 export class ReserveStockAtomicDto {
@@ -657,6 +816,13 @@ export class GenerateOrderVietQrDto {
 }
 
 export class VietQrPaymentWebhookDto {
+  @ApiPropertyOptional({
+    description: 'ID cửa hàng (nếu gọi qua cổng Webhook công khai /webhooks/payment/vietqr)',
+  })
+  @IsOptional()
+  @IsString()
+  shopId?: string;
+
   @ApiProperty({
     description: 'ID hoặc Mã đơn hàng (hoặc chuỗi nội dung chuyển khoản chứa SEVQR ORD...)',
   })

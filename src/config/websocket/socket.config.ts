@@ -127,5 +127,20 @@ export const SOCKET_CONFIG = {
       CAPI_EVENT_DISPATCHED: 'crm:capi_event_dispatched',
       SECURITY_AUDIT_ALERT: 'crm:security_audit_alert',
     },
+    POS_OMS: {
+      STOCK_RESERVED_UPDATED: 'pos:stock_reserved_updated',
+      DUPLICATE_ORDER_DETECTED: 'pos:duplicate_order_detected',
+      DISCOUNT_APPROVAL_REQUESTED: 'pos:discount_approval_requested',
+      DISCOUNT_APPROVAL_RESOLVED: 'pos:discount_approval_resolved',
+      VIETQR_PAYMENT_CONFIRMED: 'pos:vietqr_payment_confirmed',
+      CARRIER_WEBHOOK_STATUS_CHANGED: 'oms:carrier_webhook_status_changed',
+      FAILED_DELIVERY_RESCUE_ALERT: 'oms:failed_delivery_rescue_alert',
+    },
+    LIVESTREAM: {
+      COMMENT_HARVESTED: 'live:comment_harvested',
+      AUTO_CART_UPDATED: 'live:auto_cart_updated',
+      INSTANT_THERMAL_PRINT_JOB: 'live:instant_thermal_print_job',
+      LUCKY_WHEEL_WINNER: 'live:lucky_wheel_winner',
+    },
   },
 } as const;

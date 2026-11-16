@@ -8,9 +8,13 @@ import { EffectiveMemberContext, GranularIamService } from '../iam.service';
 
 const COST_AND_PROFIT_SENSITIVE_KEYS = new Set([
   'costPrice',
+  'unitCostSnapshot',
+  'allocatedCogsAmount',
   'cogsSnapshotAmount',
   'estimatedNetProfitAmount',
+  'landedCost',
   'landedUnitCost',
+  'supplierPrice',
   'supplierUnitPrice',
   'realizedNetProfit',
 ]);

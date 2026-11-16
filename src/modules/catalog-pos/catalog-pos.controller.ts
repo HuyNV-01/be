@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -14,6 +15,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import type { Request } from 'express';
+import { ProductIndustryTypeEnum } from 'src/common/enum';
 import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import {
@@ -49,7 +51,7 @@ import { InChatPosAndOrderRouterService } from './services/in-chat-pos-and-order
 import { VietQrEmvcoAndCounterPosService } from './services/vietqr-emvco-and-counter-pos.service';
 
 @ApiTags(
-  'Sprint 4 — Catalog, Multi-Warehouse, Redis Lua Atomic Stock (T07), Bundle BOM, Serial/IMEI, In-Chat POS & Dynamic VietQR EMVCo (T08)',
+  'Sprint 4 — Multi-Industry Catalog, Multi-Warehouse, Redis Lua Atomic Stock (T07), Bundle BOM, Serial/IMEI, In-Chat POS & Dynamic VietQR EMVCo (T08)',
 )
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard, ShopPermissionGuard)
@@ -101,19 +103,21 @@ export class CatalogPosController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'F05.1, F05.2, F05.3 & F05.7: Danh sách Biến thể SKU & Combo BOM kèm Tồn kho 4 trạng thái theo từng Kho (Giá vốn được bảo vệ bởi FLS)',
+      'F05.1, F05.2, F05.3 & F05.7: Danh sách Biến thể SKU Đa ngành hàng & Combo BOM kèm Tồn kho 4 trạng thái theo từng Kho (Giá vốn được bảo vệ bởi FLS)',
   })
   async listVariantsWithStock(
     @Param('shopId') shopId: string,
     @Query('search') search?: string,
     @Query('warehouseId') warehouseId?: string,
     @Query('bundleOnly') bundleOnly?: boolean,
+    @Query('industryType') industryType?: ProductIndustryTypeEnum,
   ): Promise<DBaseRes> {
     const data = await this.catalogService.listCatalogVariantsWithMultiWarehouseStock({
       shopId,
       search,
       warehouseId,
       bundleOnly: String(bundleOnly) === 'true',
+      industryType,
     });
     return {
       status: HttpStatus.OK,
@@ -128,7 +132,7 @@ export class CatalogPosController {
   @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
   @ApiOperation({
     summary:
-      'F05.1 & F05.2: Tạo Sản phẩm mới & Tự động sinh Ma trận Biến thể SKU (Màu sắc x Kích cỡ) kèm mã vạch Barcode',
+      'F05.1 & F05.2: Tạo Sản phẩm Đa Ngành Hàng & Tự động sinh Ma trận Biến thể SKU (2 trục thuộc tính động) kèm mã vạch Barcode, Lô/Hạn sử dụng FEFO hoặc Serial/IMEI',
   })
   async createProductWithMatrix(
     @Param('shopId') shopId: string,
@@ -172,7 +176,8 @@ export class CatalogPosController {
   @HttpCode(HttpStatus.OK)
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
-    summary: 'F05.1: Tư vấn Size tự động theo Chiều cao (cm) & Cân nặng (kg) của khách hàng',
+    summary:
+      'F05.1: Tư vấn Size & Thông số Đa ngành hàng tự động (Thời trang: Cao/Nặng, Mẹ & Bé: Cân nặng/Tháng tuổi, Mỹ phẩm: Loại da, Điện tử/F&B: Nhu cầu)',
   })
   async recommendSize(
     @Param('shopId') shopId: string,
@@ -182,7 +187,7 @@ export class CatalogPosController {
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
-      message: 'Recommended apparel size successfully',
+      message: 'Recommended product specification/size successfully',
       data,
     };
   }
@@ -590,6 +595,37 @@ export class CatalogPosController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Processed VietQR payment webhook and reconciled order successfully',
+      data,
+    };
+  }
+}
+
+/**
+ * Cổng Webhook công khai (`POST /webhooks/payment/vietqr`) nhận thông báo biến động số dư ngân hàng
+ * từ Casso / SePay / NAPAS 247 theo đúng đặc tả Sprint 4 Mục 4 (`F06.4` & Công cụ `T08`).
+ */
+@ApiTags('Sprint 4 — Public Bank Transfer VietQR Webhook (Casso / SePay / NAPAS 247)')
+@Controller('webhooks/payment')
+export class VietQrPublicWebhookController {
+  constructor(private readonly vietQrService: VietQrEmvcoAndCounterPosService) {}
+
+  @Post('vietqr')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F06.4 & T08: Cổng Webhook công khai nhận biến động số dư ngân hàng (SEVQR ORD...) tự động gạch nợ đơn hàng POS',
+  })
+  async receivePublicVietQrWebhook(
+    @Body() dto: VietQrPaymentWebhookDto,
+    @Query('shopId') queryShopId?: string,
+    @Headers('x-shop-id') headerShopId?: string,
+  ): Promise<DBaseRes> {
+    const resolvedShopId = dto.shopId || queryShopId || headerShopId || 'default_shop';
+    const data = await this.vietQrService.handleVietQrPaymentWebhook(resolvedShopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Reconciled public VietQR bank webhook successfully',
       data,
     };
   }

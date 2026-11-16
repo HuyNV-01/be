@@ -9,6 +9,16 @@ import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
 
+export interface BundleComponentRevenueAllocationItem {
+  componentVariantId: string;
+  componentSkuCode: string;
+  componentName: string;
+  quantityDeducted: number;
+  retailWeightRatio: number;
+  allocatedRevenueAmount: number;
+  allocatedCogsAmount: number;
+}
+
 export interface PosOrderLineItem {
   variantId: string;
   productId: string;
@@ -32,6 +42,7 @@ export interface PosOrderLineItem {
   warehouseId: string;
   warehouseName: string;
   assignedSerialNumbers?: string[];
+  bundleComponentAllocations?: BundleComponentRevenueAllocationItem[];
 }
 
 export interface VietQrEmvcoPayloadInfo {

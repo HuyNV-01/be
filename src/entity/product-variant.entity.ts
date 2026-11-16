@@ -1,7 +1,8 @@
+import { ProductIndustryTypeEnum } from 'src/common/enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
-import { ProductSizeChartRowItem } from './product.entity';
+import { ProductSizeChartRowItem, ProductUomConversionItem } from './product.entity';
 
 export interface BundleBomComponentItem {
   componentVariantId: string;
@@ -22,6 +23,23 @@ export class ProductVariantEntity extends BaseModel {
   @Column({ name: 'product_id', type: 'varchar', length: 36 })
   productId: string;
 
+  @Column({
+    name: 'industry_type',
+    type: 'enum',
+    enum: ProductIndustryTypeEnum,
+    default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
+  })
+  industryType: ProductIndustryTypeEnum;
+
+  @Column({ name: 'category_name', type: 'varchar', length: 120, default: 'Đa ngành hàng' })
+  categoryName: string;
+
+  @Column({ name: 'brand_name', type: 'varchar', length: 120, nullable: true, default: null })
+  brandName: string | null;
+
+  @Column({ name: 'unit_name', type: 'varchar', length: 32, default: 'Sản phẩm' })
+  unitName: string;
+
   @Column({ name: 'sku_code', type: 'varchar', length: 80 })
   skuCode: string;
 
@@ -36,6 +54,42 @@ export class ProductVariantEntity extends BaseModel {
 
   @Column({ name: 'size_code', type: 'varchar', length: 32, nullable: true, default: null })
   sizeCode: string | null;
+
+  @Column({
+    name: 'attribute_axis_1_name',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: 'Phân loại 1',
+  })
+  attributeAxis1Name: string | null;
+
+  @Column({
+    name: 'attribute_axis_1_value',
+    type: 'varchar',
+    length: 120,
+    nullable: true,
+    default: null,
+  })
+  attributeAxis1Value: string | null;
+
+  @Column({
+    name: 'attribute_axis_2_name',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: 'Phân loại 2',
+  })
+  attributeAxis2Name: string | null;
+
+  @Column({
+    name: 'attribute_axis_2_value',
+    type: 'varchar',
+    length: 120,
+    nullable: true,
+    default: null,
+  })
+  attributeAxis2Value: string | null;
 
   @Column({ name: 'attributes_json', type: 'json', nullable: true, default: null })
   attributesJson: Record<string, string> | null;
@@ -85,6 +139,36 @@ export class ProductVariantEntity extends BaseModel {
 
   @Column({ name: 'warranty_months', type: 'int', default: 0 })
   warrantyMonths: number;
+
+  @Column({ name: 'requires_batch_expiry', type: 'boolean', default: false })
+  requiresBatchExpiry: boolean;
+
+  @Column({ name: 'batch_code', type: 'varchar', length: 64, nullable: true, default: null })
+  batchCode: string | null;
+
+  @Column({
+    name: 'manufacturing_date',
+    type: 'varchar',
+    length: 32,
+    nullable: true,
+    default: null,
+  })
+  manufacturingDate: string | null;
+
+  @Column({ name: 'expiry_date', type: 'varchar', length: 32, nullable: true, default: null })
+  expiryDate: string | null;
+
+  @Column({ name: 'shelf_life_months', type: 'int', default: 0 })
+  shelfLifeMonths: number;
+
+  @Column({ name: 'storage_condition', type: 'varchar', length: 64, nullable: true, default: null })
+  storageCondition: string | null;
+
+  @Column({ name: 'technical_specs_json', type: 'json', nullable: true, default: null })
+  technicalSpecsJson: Record<string, string> | null;
+
+  @Column({ name: 'uom_conversions_json', type: 'json', nullable: true, default: null })
+  uomConversionsJson: ProductUomConversionItem[] | null;
 
   @Column({ name: 'size_chart_metadata_json', type: 'json', nullable: true, default: null })
   sizeChartMetadataJson: ProductSizeChartRowItem[] | null;

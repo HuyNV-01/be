@@ -53,11 +53,11 @@ export class InventoryMovementLedgerEntity extends BaseModel {
   @Column({ name: 'after_available_qty', type: 'int', default: 0 })
   afterAvailableQty: number;
 
-  /**
-   * Giá vốn đơn vị tại thời điểm phát sinh giao dịch (được bảo vệ bởi FLS)
-   */
   @Column({ name: 'cost_price', type: 'decimal', precision: 15, scale: 2, default: 0 })
   costPrice: number;
+
+  @Column({ name: 'unit_cost_snapshot', type: 'decimal', precision: 15, scale: 2, default: 0 })
+  unitCostSnapshot: number;
 
   @Column({ name: 'reference_type', type: 'varchar', length: 48, default: 'POS_ORDER' })
   referenceType: string;
