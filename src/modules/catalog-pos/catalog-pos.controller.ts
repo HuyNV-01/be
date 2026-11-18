@@ -1,12 +1,15 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -35,6 +38,9 @@ import {
   ResolveDiscountApprovalDto,
   ScanBindSerialToOrderDto,
   SerialLookupQueryDto,
+  UpdateProductVariantDto,
+  UpdateShopCatalogPosConfigDto,
+  UpsertSellerCategoryBlueprintDto,
   UpsertWarehouseDto,
   VietQrPaymentWebhookDto,
 } from 'src/dto/catalog-pos/catalog-pos.dto';
@@ -51,7 +57,7 @@ import { InChatPosAndOrderRouterService } from './services/in-chat-pos-and-order
 import { VietQrEmvcoAndCounterPosService } from './services/vietqr-emvco-and-counter-pos.service';
 
 @ApiTags(
-  'Sprint 4 — Multi-Industry Catalog, Multi-Warehouse, Redis Lua Atomic Stock (T07), Bundle BOM, Serial/IMEI, In-Chat POS & Dynamic VietQR EMVCo (T08)',
+  'Sprint 4 — Seller-Configurable Industry Catalog, Multi-Warehouse, Redis Lua Atomic Stock (T07), Bundle BOM, Serial/IMEI, In-Chat POS & Dynamic VietQR EMVCo (T08)',
 )
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard, ShopPermissionGuard)
@@ -64,6 +70,101 @@ export class CatalogPosController {
     private readonly posOrderService: InChatPosAndOrderRouterService,
     private readonly vietQrService: VietQrEmvcoAndCounterPosService,
   ) {}
+
+  @Get(':shopId/config')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'F05.1 & F06.1: Lấy Cấu hình Ngành hàng Động, Tiêu chí Tư vấn Thông số/Size, Quy tắc Quà tặng kèm & Tài khoản Ngân hàng VietQR của Cửa hàng',
+  })
+  async getCatalogPosConfig(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.catalogService.getShopCatalogAndPosConfig(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched seller catalog and POS configuration successfully',
+      data,
+    };
+  }
+
+  @Put(':shopId/config')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary:
+      'F05.1 & F06.4: Cập nhật Cấu hình Ngành hàng Động, Quy tắc Quà tặng kèm 0đ & Tài khoản Ngân hàng thụ hưởng VietQR EMVCo',
+  })
+  async updateCatalogPosConfig(
+    @Param('shopId') shopId: string,
+    @Body() dto: UpdateShopCatalogPosConfigDto,
+  ): Promise<DBaseRes> {
+    const data = await this.catalogService.updateShopCatalogAndPosConfig(shopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated seller catalog and POS configuration successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/config/categories')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary:
+      'F05.1: Người bán tự Tạo mới hoặc Cập nhật Ngành hàng / Danh mục sản phẩm kèm 2 trục biến thể & bộ tiêu chí tư vấn thông số động',
+  })
+  async upsertSellerCategory(
+    @Param('shopId') shopId: string,
+    @Body() dto: UpsertSellerCategoryBlueprintDto,
+  ): Promise<DBaseRes> {
+    const data = await this.catalogService.upsertSellerCategoryBlueprint(shopId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Upserted seller custom category blueprint successfully',
+      data,
+    };
+  }
+
+  @Delete(':shopId/config/categories/:categoryId')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary: 'F05.1: Xóa Ngành hàng / Danh mục sản phẩm tùy chỉnh khỏi cấu hình cửa hàng',
+  })
+  async deleteSellerCategory(
+    @Param('shopId') shopId: string,
+    @Param('categoryId') categoryId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.catalogService.deleteSellerCategoryBlueprint(shopId, categoryId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Deleted seller category blueprint successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/seed-demo')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary:
+      'F05.1: Nạp bộ dữ liệu Sản phẩm & Tồn kho mẫu tham khảo theo yêu cầu chủ động của Người bán',
+  })
+  async seedDemoCatalog(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    await this.catalogService.ensureSeededCatalogForShop(shopId, true);
+    const data = await this.catalogService.listCatalogVariantsWithMultiWarehouseStock({
+      shopId,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Seeded sample catalog products and multi-warehouse stock successfully',
+      data,
+    };
+  }
 
   @Get(':shopId/warehouses')
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
@@ -103,7 +204,7 @@ export class CatalogPosController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'F05.1, F05.2, F05.3 & F05.7: Danh sách Biến thể SKU Đa ngành hàng & Combo BOM kèm Tồn kho 4 trạng thái theo từng Kho (Giá vốn được bảo vệ bởi FLS)',
+      'F05.1, F05.2, F05.3 & F05.7: Danh sách Biến thể SKU Đa ngành hàng & Combo BOM kèm Tồn kho 4 trạng thái theo từng Kho và Cấu hình Ngành hàng Động (Giá vốn được bảo vệ bởi FLS)',
   })
   async listVariantsWithStock(
     @Param('shopId') shopId: string,
@@ -111,6 +212,7 @@ export class CatalogPosController {
     @Query('warehouseId') warehouseId?: string,
     @Query('bundleOnly') bundleOnly?: boolean,
     @Query('industryType') industryType?: ProductIndustryTypeEnum,
+    @Query('customCategoryId') customCategoryId?: string,
   ): Promise<DBaseRes> {
     const data = await this.catalogService.listCatalogVariantsWithMultiWarehouseStock({
       shopId,
@@ -118,11 +220,52 @@ export class CatalogPosController {
       warehouseId,
       bundleOnly: String(bundleOnly) === 'true',
       industryType,
+      customCategoryId,
     });
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
-      message: 'Fetched catalog variants and multi-warehouse 4-state stock successfully',
+      message: 'Fetched catalog variants, 4-state stock and seller config successfully',
+      data,
+    };
+  }
+
+  @Patch(':shopId/variants/:variantId')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary:
+      'F05.1 & F05.2: Người bán cập nhật thông tin Biến thể SKU (Tên, Danh mục, Giá bán lẻ/sỉ, Giá vốn, Trần giảm giá, Lô/HSD, Serial/IMEI)',
+  })
+  async updateVariant(
+    @Param('shopId') shopId: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: UpdateProductVariantDto,
+  ): Promise<DBaseRes> {
+    const data = await this.catalogService.updateProductVariant(shopId, variantId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated product variant successfully',
+      data,
+    };
+  }
+
+  @Delete(':shopId/variants/:variantId')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
+  @ApiOperation({
+    summary: 'F05.1: Xóa mềm / Ngừng kinh doanh một Biến thể SKU khỏi danh mục',
+  })
+  async deleteVariant(
+    @Param('shopId') shopId: string,
+    @Param('variantId') variantId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.catalogService.deleteProductVariant(shopId, variantId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Deleted product variant successfully',
       data,
     };
   }
@@ -132,7 +275,7 @@ export class CatalogPosController {
   @RequireShopPermissions(PermissionCodeEnum.CATALOG_PRODUCT_CREATE_EDIT)
   @ApiOperation({
     summary:
-      'F05.1 & F05.2: Tạo Sản phẩm Đa Ngành Hàng & Tự động sinh Ma trận Biến thể SKU (2 trục thuộc tính động) kèm mã vạch Barcode, Lô/Hạn sử dụng FEFO hoặc Serial/IMEI',
+      'F05.1 & F05.2: Tạo Sản phẩm theo Ngành hàng Người bán cấu hình & Tự động sinh Ma trận Biến thể SKU (2 trục thuộc tính động) kèm mã vạch Barcode, Lô/Hạn sử dụng FEFO hoặc Serial/IMEI',
   })
   async createProductWithMatrix(
     @Param('shopId') shopId: string,
@@ -177,7 +320,7 @@ export class CatalogPosController {
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @ApiOperation({
     summary:
-      'F05.1: Tư vấn Size & Thông số Đa ngành hàng tự động (Thời trang: Cao/Nặng, Mẹ & Bé: Cân nặng/Tháng tuổi, Mỹ phẩm: Loại da, Điện tử/F&B: Nhu cầu)',
+      'F05.1: Tư vấn Size & Thông số Động theo cấu hình Ngành hàng của Người bán (trả về cả danh sách SKU còn tồn kho khớp kết quả)',
   })
   async recommendSize(
     @Param('shopId') shopId: string,
@@ -187,7 +330,7 @@ export class CatalogPosController {
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
-      message: 'Recommended product specification/size successfully',
+      message: 'Recommended product specification/size dynamically',
       data,
     };
   }

@@ -24,6 +24,15 @@ export class ProductVariantEntity extends BaseModel {
   productId: string;
 
   @Column({
+    name: 'custom_category_id',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  customCategoryId: string | null;
+
+  @Column({
     name: 'industry_type',
     type: 'enum',
     enum: ProductIndustryTypeEnum,

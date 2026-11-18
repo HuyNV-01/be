@@ -6,11 +6,8 @@ import {
   AdsConversionPlatformEnum,
   CustomerWalletLedgerTypeEnum,
   CustomerWalletTransactionTypeEnum,
-  NotificationResourceTypeEnum,
-  NotificationTypeEnum,
   PosOrderPaymentStatusEnum,
   PosOrderStatusEnum,
-  ShopRoleEnum,
 } from 'src/common/enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
@@ -20,6 +17,7 @@ import {
 } from 'src/dto/catalog-pos/catalog-pos.dto';
 import { PosOrderEntity, VietQrEmvcoPayloadInfo } from 'src/entity/pos-order.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
+import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { AdsConversionSyncService } from 'src/modules/crm/services/ads-conversion-sync.service';
 import { CustomerRfmAndLoyaltyService } from 'src/modules/crm/services/customer-rfm-and-loyalty.service';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
@@ -34,6 +32,8 @@ export class VietQrEmvcoAndCounterPosService {
     private readonly orderRepo: Repository<PosOrderEntity>,
     @InjectRepository(ShopMemberEntity)
     private readonly memberRepo: Repository<ShopMemberEntity>,
+    @InjectRepository(ShopWorkspaceEntity)
+    private readonly shopRepo: Repository<ShopWorkspaceEntity>,
     private readonly rfmAndLoyaltyService: CustomerRfmAndLoyaltyService,
     private readonly adsConversionSyncService: AdsConversionSyncService,
     private readonly notificationsService: NotificationsService,
@@ -66,7 +66,7 @@ export class VietQrEmvcoAndCounterPosService {
 
   /**
    * Công cụ `T08` (`F06.4`):
-   * Sinh chuỗi Payload EMVCo VietQR Động chuẩn NAPAS 247 khóa cứng Số tiền và Nội dung chuyển khoản `SEVQR ORD{orderCode}`
+   * Sinh chuỗi Payload EMVCo VietQR Động chuẩn NAPAS 247 khóa cứng Số tiền và Nội dung chuyển khoản theo cấu hình tài khoản ngân hàng của Người bán
    */
   public buildDynamicVietQrPayload(params: {
     orderCode: string;
@@ -75,14 +75,16 @@ export class VietQrEmvcoAndCounterPosService {
     bankShortName?: string;
     accountNumber?: string;
     accountName?: string;
+    transferPrefix?: string;
   }): VietQrEmvcoPayloadInfo {
     const bankBin = (params.bankBin || '970422').trim();
     const bankShortName = (params.bankShortName || 'MBBank').trim();
     const accountNumber = (params.accountNumber || '0988123456888').trim();
     const accountName = (params.accountName || 'CONG TY TNHH PANCAKE SELLER OS').trim();
+    const prefix = (params.transferPrefix || 'SEVQR ORD').trim();
     const amountVnd = Math.max(1000, Math.round(Number(params.amountVnd || 0)));
     const cleanOrderCode = params.orderCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-    const transferReferenceCode = `SEVQR ORD${cleanOrderCode}`;
+    const transferReferenceCode = `${prefix}${cleanOrderCode}`;
 
     // Tag 38: Merchant Account Information cho NAPAS 247 (GUID A000000727)
     const beneficiaryAcquirer = this.formatTlv('00', bankBin) + this.formatTlv('01', accountNumber);
@@ -95,10 +97,10 @@ export class VietQrEmvcoAndCounterPosService {
     const additionalDataField = this.formatTlv('08', transferReferenceCode);
 
     const payloadWithoutCrc =
-      this.formatTlv('00', '01') + // Payload Format Indicator
-      this.formatTlv('01', '12') + // Point of Initiation Method: 12 = Dynamic QR
+      this.formatTlv('00', '01') +
+      this.formatTlv('01', '12') +
       this.formatTlv('38', merchantAccountInfo) +
-      this.formatTlv('53', '704') + // Transaction Currency: 704 = VND
+      this.formatTlv('53', '704') +
       this.formatTlv('54', String(amountVnd)) +
       this.formatTlv('58', 'VN') +
       this.formatTlv('62', additionalDataField) +
@@ -133,11 +135,15 @@ export class VietQrEmvcoAndCounterPosService {
     orderId: string,
     dto: GenerateOrderVietQrDto,
   ): Promise<PosOrderEntity> {
-    const order = await this.orderRepo.findOne({ where: { id: orderId, shopId } });
+    const [order, shop] = await Promise.all([
+      this.orderRepo.findOne({ where: { id: orderId, shopId } }),
+      this.shopRepo.findOne({ where: { id: shopId } }),
+    ]);
     if (!order) {
       throw new NotFoundException('POS_ORDER_NOT_FOUND');
     }
 
+    const shopBankCfg = shop?.catalogAndPosConfigJson?.vietQrBankConfig;
     const amountVnd =
       dto.amountVnd ??
       (Number(order.depositRequiredAmount || 0) > 0
@@ -147,10 +153,11 @@ export class VietQrEmvcoAndCounterPosService {
     order.vietqrPayloadJson = this.buildDynamicVietQrPayload({
       orderCode: order.orderCode,
       amountVnd,
-      bankBin: dto.bankBin,
-      bankShortName: dto.bankShortName,
-      accountNumber: dto.accountNumber,
-      accountName: dto.accountName,
+      bankBin: dto.bankBin || shopBankCfg?.bankBin,
+      bankShortName: dto.bankShortName || shopBankCfg?.bankShortName,
+      accountNumber: dto.accountNumber || shopBankCfg?.accountNumber,
+      accountName: dto.accountName || shopBankCfg?.accountName,
+      transferPrefix: shopBankCfg?.transferPrefix,
     });
 
     return this.orderRepo.save(order);
@@ -158,10 +165,7 @@ export class VietQrEmvcoAndCounterPosService {
 
   /**
    * F06.4 & Công cụ `T08`:
-   * Xử lý Webhook biến động số dư ngân hàng (Casso / SePay / NAPAS VietQR) hoặc xác nhận gạch nợ chuyển khoản:
-   * - Tự động cập nhật `paidTransferAmount`, giảm `codCollectAmount` tương ứng.
-   * - Nếu khách chuyển khoản dư (`overpaymentAmount > 0`), tự động cộng phần tiền thừa vào Ví khách hàng (`walletCreditBalance` — `F11.4`).
-   * - Tự động kích hoạt sự kiện chuyển đổi `Purchase` lên `Meta CAPI` (`F11.1`) và phát sự kiện WebSocket `pos:vietqr_payment_confirmed`.
+   * Xử lý Webhook biến động số dư ngân hàng (Casso / SePay / NAPAS VietQR) hoặc xác nhận gạch nợ chuyển khoản
    */
   public async handleVietQrPaymentWebhook(
     shopId: string,
@@ -182,7 +186,6 @@ export class VietQrEmvcoAndCounterPosService {
     }
 
     if (!order) {
-      // Bóc tách mã đơn từ nội dung chuyển khoản `SEVQR ORD...`
       const extractedMatch = (dto.transferContent || refClean).match(/ORD([A-Z0-9-]+)/i);
       if (extractedMatch) {
         const candidateCode = extractedMatch[1];
@@ -233,7 +236,6 @@ export class VietQrEmvcoAndCounterPosService {
 
     const savedOrder = await this.orderRepo.save(order);
 
-    // Nếu khách chuyển khoản dư so với tổng tiền phải thu, tự động cộng tiền dư vào Ví khách hàng (F11.4)
     const overpaymentCreditedToWallet = Math.max(0, nextPaidTransfer - totalPayable);
     if (overpaymentCreditedToWallet > 0 && savedOrder.customerId) {
       await this.rfmAndLoyaltyService
@@ -252,7 +254,6 @@ export class VietQrEmvcoAndCounterPosService {
         .catch(() => null);
     }
 
-    // Tự động bắn sự kiện Purchase lên Meta CAPI nếu đơn hàng thuộc hội thoại quảng cáo (F11.1)
     if (savedOrder.conversationId) {
       await this.adsConversionSyncService
         .dispatchConversionEvent(shopId, {

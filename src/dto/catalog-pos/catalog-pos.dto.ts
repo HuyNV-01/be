@@ -28,6 +28,12 @@ import {
   ProductSizeChartRowItem,
   ProductUomConversionItem,
 } from 'src/entity/product.entity';
+import {
+  SellerAdvisorFieldSchema,
+  SellerAdvisorRuleRow,
+  SellerCategoryBlueprintItem,
+  SellerVietQrBankConfig,
+} from 'src/entity/shop-workspace.entity';
 
 export class UpsertWarehouseDto {
   @ApiProperty()
@@ -82,6 +88,302 @@ export class UpsertWarehouseDto {
   allowNegativeStock?: boolean;
 }
 
+/**
+ * DTO cho phép Người bán tự Tạo mới hoặc Cập nhật Ngành hàng / Danh mục sản phẩm tùy chỉnh (`UpsertSellerCategoryBlueprintDto`)
+ */
+export class UpsertSellerCategoryBlueprintDto {
+  @ApiPropertyOptional({
+    description: 'Mã định danh danh mục của shop (nếu bỏ trống sẽ tự động sinh từ code/name)',
+  })
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  @ApiProperty({ example: 'SNEAKERS_FOOTWEAR' })
+  @IsString()
+  @IsNotEmpty()
+  code: string;
+
+  @ApiProperty({ example: 'Giày Dép & Sneaker Thể Thao' })
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+
+  @ApiPropertyOptional({ example: 'Giày Sneaker' })
+  @IsOptional()
+  @IsString()
+  badgeLabel?: string;
+
+  @ApiPropertyOptional({ example: '👟' })
+  @IsOptional()
+  @IsString()
+  iconEmoji?: string;
+
+  @ApiPropertyOptional({
+    enum: ProductIndustryTypeEnum,
+    default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
+  })
+  @IsOptional()
+  @IsEnum(ProductIndustryTypeEnum)
+  industryType?: ProductIndustryTypeEnum;
+
+  @ApiPropertyOptional({ example: 'Đôi' })
+  @IsOptional()
+  @IsString()
+  defaultUnitName?: string;
+
+  @ApiPropertyOptional({ example: 'Phối màu' })
+  @IsOptional()
+  @IsString()
+  attributeAxis1Name?: string;
+
+  @ApiPropertyOptional({ example: ['Trắng Panda', 'Đen Retro', 'Xám Kem'] })
+  @IsOptional()
+  @IsArray()
+  attributeAxis1SampleValues?: string[];
+
+  @ApiPropertyOptional({ example: 'Size Giày EU' })
+  @IsOptional()
+  @IsString()
+  attributeAxis2Name?: string;
+
+  @ApiPropertyOptional({ example: ['38', '39', '40', '41', '42'] })
+  @IsOptional()
+  @IsArray()
+  attributeAxis2SampleValues?: string[];
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  requiresSerialImei?: boolean;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  defaultWarrantyMonths?: number;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  requiresBatchExpiry?: boolean;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  defaultShelfLifeMonths?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  defaultStorageCondition?: string | null;
+
+  @ApiPropertyOptional({ default: 15 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  defaultMaxDiscountPercent?: number;
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  enableAdvisorInPos?: boolean;
+
+  @ApiPropertyOptional({ example: 'Tư vấn Size Giày theo Chiều dài bàn chân (cm)' })
+  @IsOptional()
+  @IsString()
+  advisorTitle?: string;
+
+  @ApiPropertyOptional({
+    description: 'Danh sách các trường nhập liệu tư vấn động do Người bán cấu hình',
+  })
+  @IsOptional()
+  @IsArray()
+  advisorFields?: SellerAdvisorFieldSchema[];
+
+  @ApiPropertyOptional({
+    description: 'Danh sách các quy tắc đối chiếu thông số/size động do Người bán cấu hình',
+  })
+  @IsOptional()
+  @IsArray()
+  advisorRules?: SellerAdvisorRuleRow[];
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+
+  @ApiPropertyOptional({ default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  sortOrder?: number;
+}
+
+/**
+ * DTO Cập nhật Cấu hình Tổng thể Danh mục Ngành hàng Động, Quà tặng kèm & Ngân hàng VietQR của Cửa hàng
+ */
+export class UpdateShopCatalogPosConfigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  categories?: SellerCategoryBlueprintItem[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  freeGiftRules?: ProductFreeGiftRuleItem[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  vietQrBankConfig?: Partial<SellerVietQrBankConfig>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  autoSeedDemoCatalogWhenEmpty?: boolean;
+}
+
+/**
+ * DTO Chỉnh sửa Biến thể SKU (`UpdateProductVariantDto`) giúp người bán tự cập nhật giá bán, giá vốn, trần giảm giá, lô/HSD hoặc trạng thái hoạt động
+ */
+export class UpdateProductVariantDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  variantName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customCategoryId?: string | null;
+
+  @ApiPropertyOptional({ enum: ProductIndustryTypeEnum })
+  @IsOptional()
+  @IsEnum(ProductIndustryTypeEnum)
+  industryType?: ProductIndustryTypeEnum;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  categoryName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  brandName?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  unitName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  barcode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  retailPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  wholesalePrice?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  maxDiscountPercent?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  weightGrams?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  lengthCm?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  widthCm?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  heightCm?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isFreeGiftItem?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requiresSerialImei?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  warrantyMonths?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requiresBatchExpiry?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  batchCode?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  expiryDate?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  storageCondition?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
 export class CreateProductWithMatrixDto {
   @ApiProperty({ example: 'SP-DA-NGANH-2026' })
   @IsString()
@@ -94,10 +396,18 @@ export class CreateProductWithMatrixDto {
   name: string;
 
   @ApiPropertyOptional({
+    description: 'ID Danh mục / Ngành hàng do Người bán tự cấu hình trong ShopCatalogAndPosConfig',
+    example: 'CAT_COSMETICS',
+  })
+  @IsOptional()
+  @IsString()
+  customCategoryId?: string;
+
+  @ApiPropertyOptional({
     enum: ProductIndustryTypeEnum,
     default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
     description:
-      'Ngành hàng sản phẩm (Thời trang, Mỹ phẩm, Điện tử, Thực phẩm/F&B, Mẹ & Bé, Gia dụng, Đa ngành)',
+      'Ngành hàng sản phẩm cơ sở (Thời trang, Mỹ phẩm, Điện tử, Thực phẩm/F&B, Mẹ & Bé, Gia dụng, Đa ngành)',
   })
   @IsOptional()
   @IsEnum(ProductIndustryTypeEnum)
@@ -237,6 +547,11 @@ export class CreateProductWithMatrixDto {
   @ApiPropertyOptional({ default: false })
   @IsOptional()
   @IsBoolean()
+  isFreeGiftItem?: boolean;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
   requiresSerialImei?: boolean;
 
   @ApiPropertyOptional({ default: 0 })
@@ -322,6 +637,11 @@ export class CreateBundleBomVariantDto {
   @IsNotEmpty()
   variantName: string;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customCategoryId?: string;
+
   @ApiPropertyOptional({
     enum: ProductIndustryTypeEnum,
     default: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
@@ -355,41 +675,49 @@ export class RecommendSizeAdvisorDto {
   @IsString()
   productId?: string;
 
+  @ApiPropertyOptional({
+    description: 'ID Ngành hàng / Danh mục do Người bán tự cấu hình',
+  })
+  @IsOptional()
+  @IsString()
+  customCategoryId?: string;
+
   @ApiPropertyOptional({ enum: ProductIndustryTypeEnum })
   @IsOptional()
   @IsEnum(ProductIndustryTypeEnum)
   industryType?: ProductIndustryTypeEnum;
 
+  @ApiPropertyOptional({
+    description:
+      'Bản đồ các giá trị nhập liệu động theo cấu hình advisorFields của người bán (VD: { heightCm: 162, weightKg: 51, footLengthCm: 24.5, skinType: "OILY" })',
+  })
+  @IsOptional()
+  @IsObject()
+  dynamicInputs?: Record<string, string | number>;
+
   @ApiPropertyOptional({ example: 160 })
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(40)
-  @Max(230)
+  @IsNumber()
   heightCm?: number;
 
   @ApiPropertyOptional({ example: 52 })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
-  @Min(2)
-  @Max(200)
   weightKg?: number;
 
   @ApiPropertyOptional({
-    description: 'Tháng tuổi của bé (dành cho ngành hàng Mẹ & Bé: Bỉm, Sữa, Quần áo trẻ em)',
+    description: 'Tháng tuổi của bé (tương thích ngược)',
     example: 9,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(0)
-  @Max(180)
   babyAgeMonths?: number;
 
   @ApiPropertyOptional({
-    description:
-      'Loại da khách hàng (dành cho ngành Mỹ phẩm: OILY, DRY, COMBINATION, SENSITIVE, NORMAL)',
+    description: 'Loại da khách hàng (tương thích ngược)',
     example: 'OILY',
   })
   @IsOptional()
@@ -397,8 +725,7 @@ export class RecommendSizeAdvisorDto {
   skinType?: string;
 
   @ApiPropertyOptional({
-    description:
-      'Nhu cầu sử dụng / diện tích phòng / số người dùng (dành cho Điện tử, Gia dụng, Thực phẩm)',
+    description: 'Nhu cầu sử dụng (tương thích ngược)',
   })
   @IsOptional()
   @IsString()

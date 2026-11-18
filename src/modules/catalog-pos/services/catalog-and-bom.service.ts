@@ -10,10 +10,18 @@ import {
   CreateBundleBomVariantDto,
   CreateProductWithMatrixDto,
   RecommendSizeAdvisorDto,
+  UpdateProductVariantDto,
+  UpdateShopCatalogPosConfigDto,
+  UpsertSellerCategoryBlueprintDto,
 } from 'src/dto/catalog-pos/catalog-pos.dto';
 import { ProductSerialItemEntity } from 'src/entity/product-serial-item.entity';
 import { ProductVariantEntity } from 'src/entity/product-variant.entity';
 import { ProductEntity, ProductSizeChartRowItem } from 'src/entity/product.entity';
+import {
+  SellerCategoryBlueprintItem,
+  ShopCatalogAndPosConfig,
+  ShopWorkspaceEntity,
+} from 'src/entity/shop-workspace.entity';
 import { WarehouseStockItemEntity } from 'src/entity/warehouse-stock-item.entity';
 import { WarehouseEntity } from 'src/entity/warehouse.entity';
 import { Repository } from 'typeorm';
@@ -44,6 +52,15 @@ export type EnrichedCatalogVariantItem = ProductVariantEntity & {
   totalDefectiveHoldQty: number;
   stocksByWarehouse: WarehouseStockSummaryItem[];
 };
+
+export interface SuggestedVariantAdvisorItem {
+  variantId: string;
+  skuCode: string;
+  variantName: string;
+  retailPrice: number;
+  totalAvailableQty: number;
+  categoryName: string;
+}
 
 export const DEFAULT_APPAREL_SIZE_CHART: ProductSizeChartRowItem[] = [
   {
@@ -145,6 +162,363 @@ export const DEFAULT_BABY_DIAPER_SIZE_CHART: ProductSizeChartRowItem[] = [
   },
 ];
 
+/**
+ * Bộ mẫu Ngành hàng Khởi tạo Ban đầu (`buildInitialSellerCategories`)
+ * Khi một Cửa hàng mới được tạo, hệ thống lưu cấu hình này vào `shop_workspaces.catalog_and_pos_config_json`
+ * để Người bán có thể tự do Thêm / Sửa / Xóa / Bật / Tắt bất kỳ ngành hàng, trục biến thể, trường nhập tư vấn và quy tắc tư vấn nào.
+ */
+export function buildInitialSellerCategories(): SellerCategoryBlueprintItem[] {
+  return [
+    {
+      categoryId: 'CAT_FASHION_APPAREL',
+      code: 'FASHION_APPAREL',
+      name: 'Thời trang, Giày dép & Phụ kiện',
+      badgeLabel: 'Thời trang',
+      iconEmoji: '👗',
+      industryType: ProductIndustryTypeEnum.FASHION_APPAREL,
+      defaultUnitName: 'Chiếc',
+      attributeAxis1Name: 'Màu sắc',
+      attributeAxis1SampleValues: ['Kem', 'Đen', 'Trắng', 'Be'],
+      attributeAxis2Name: 'Kích cỡ (Size)',
+      attributeAxis2SampleValues: ['S', 'M', 'L', 'XL'],
+      requiresSerialImei: false,
+      defaultWarrantyMonths: 0,
+      requiresBatchExpiry: false,
+      defaultShelfLifeMonths: 0,
+      defaultStorageCondition: null,
+      defaultMaxDiscountPercent: 15,
+      enableAdvisorInPos: true,
+      advisorTitle: 'Tư vấn Size Thời trang theo Chiều cao & Cân nặng',
+      advisorFields: [
+        {
+          fieldKey: 'heightCm',
+          label: 'Chiều cao khách',
+          unit: 'cm',
+          fieldType: 'NUMBER',
+          defaultValue: 160,
+          min: 130,
+          max: 210,
+          nerAutoFillField: 'heightCm',
+        },
+        {
+          fieldKey: 'weightKg',
+          label: 'Cân nặng khách',
+          unit: 'kg',
+          fieldType: 'NUMBER',
+          defaultValue: 52,
+          min: 30,
+          max: 130,
+          nerAutoFillField: 'weightKg',
+        },
+      ],
+      advisorRules: [
+        {
+          ruleId: 'RULE_APPAREL_S',
+          recommendedResultCode: 'S',
+          fitNote: 'Form chuẩn vừa vặn cho dáng người nhỏ nhắn (40–48kg, 148–158cm)',
+          numericRanges: {
+            heightCm: { min: 148, max: 158 },
+            weightKg: { min: 40, max: 48 },
+          },
+          linkedSkuKeyword: '-S',
+        },
+        {
+          ruleId: 'RULE_APPAREL_M',
+          recommendedResultCode: 'M',
+          fitNote: 'Size phổ biến nhất — thoải mái vận động (48–55kg, 155–165cm)',
+          numericRanges: {
+            heightCm: { min: 155, max: 165 },
+            weightKg: { min: 48, max: 55 },
+          },
+          linkedSkuKeyword: '-M',
+        },
+        {
+          ruleId: 'RULE_APPAREL_L',
+          recommendedResultCode: 'L',
+          fitNote: 'Phù hợp dáng người đầy đặn hoặc thích mặc rộng nhẹ (55–62kg, 160–170cm)',
+          numericRanges: {
+            heightCm: { min: 160, max: 170 },
+            weightKg: { min: 55, max: 62 },
+          },
+          linkedSkuKeyword: '-L',
+        },
+        {
+          ruleId: 'RULE_APPAREL_XL',
+          recommendedResultCode: 'XL',
+          fitNote: 'Form thoải mái, che khuyết điểm tốt (62–75kg, 162–176cm)',
+          numericRanges: {
+            heightCm: { min: 162, max: 176 },
+            weightKg: { min: 62, max: 75 },
+          },
+          linkedSkuKeyword: '-XL',
+        },
+      ],
+      isActive: true,
+      sortOrder: 1,
+    },
+    {
+      categoryId: 'CAT_COSMETICS_BEAUTY',
+      code: 'COSMETICS_BEAUTY',
+      name: 'Mỹ phẩm, Chăm sóc da & Làm đẹp (FEFO)',
+      badgeLabel: 'Mỹ phẩm • FEFO',
+      iconEmoji: '💄',
+      industryType: ProductIndustryTypeEnum.COSMETICS_BEAUTY,
+      defaultUnitName: 'Chai',
+      attributeAxis1Name: 'Dung tích / Trọng lượng',
+      attributeAxis1SampleValues: ['30ml', '50ml', '100ml'],
+      attributeAxis2Name: 'Loại da phù hợp',
+      attributeAxis2SampleValues: ['Mọi loại da', 'Da dầu mụn', 'Da khô nhạy cảm'],
+      requiresSerialImei: false,
+      defaultWarrantyMonths: 0,
+      requiresBatchExpiry: true,
+      defaultShelfLifeMonths: 24,
+      defaultStorageCondition: 'Bảo quản nơi thoáng mát < 25°C, tránh ánh nắng trực tiếp',
+      defaultMaxDiscountPercent: 18,
+      enableAdvisorInPos: true,
+      advisorTitle: 'Tư vấn Dòng Mỹ phẩm & Hoạt chất theo Tình trạng Da',
+      advisorFields: [
+        {
+          fieldKey: 'skinType',
+          label: 'Loại da / Tình trạng da',
+          fieldType: 'SELECT',
+          defaultValue: 'COMBINATION',
+          options: [
+            { value: 'OILY', label: 'Da dầu / Lỗ chân lông to / Dễ mụn' },
+            { value: 'DRY', label: 'Da khô / Thiếu ẩm bong tróc' },
+            { value: 'SENSITIVE', label: 'Da nhạy cảm / Đang treatment' },
+            { value: 'COMBINATION', label: 'Da hỗn hợp / Mọi loại da' },
+          ],
+        },
+      ],
+      advisorRules: [
+        {
+          ruleId: 'RULE_SKIN_OILY',
+          recommendedResultCode: '50ml (Cấp ẩm kiềm dầu B5 + HA)',
+          fitNote: 'Da dầu/hỗn hợp nên ưu tiên kết cấu mỏng nhẹ thấm nhanh (Serum B5 + HA 50ml).',
+          exactMatches: { skinType: 'OILY' },
+          linkedSkuKeyword: 'SRM-B5',
+        },
+        {
+          ruleId: 'RULE_SKIN_DRY',
+          recommendedResultCode: '50ml (Phục hồi màng ẩm sâu B5 + HA)',
+          fitNote: 'Da khô bong tróc cần phục hồi màng ẩm chuyên sâu với Vitamin B5 + HA.',
+          exactMatches: { skinType: 'DRY' },
+          linkedSkuKeyword: 'SRM-B5',
+        },
+        {
+          ruleId: 'RULE_SKIN_SENSITIVE',
+          recommendedResultCode: '50ml (Dịu nhẹ cho Mọi loại da & Da nhạy cảm)',
+          fitNote: 'Da nhạy cảm/treatment phù hợp nhất với Tinh chất B5 + HA lành tính không cồn.',
+          exactMatches: { skinType: 'SENSITIVE' },
+          linkedSkuKeyword: 'SRM-B5',
+        },
+        {
+          ruleId: 'RULE_SKIN_COMBINATION',
+          recommendedResultCode: '50ml (Cân bằng ẩm B5 + HA)',
+          fitNote: 'Da hỗn hợp phù hợp dùng Tinh chất B5 cấp ẩm vùng chữ U và kiềm dầu vùng chữ T.',
+          exactMatches: { skinType: 'COMBINATION' },
+          linkedSkuKeyword: 'SRM-B5',
+        },
+      ],
+      isActive: true,
+      sortOrder: 2,
+    },
+    {
+      categoryId: 'CAT_ELECTRONICS_TECH',
+      code: 'ELECTRONICS_TECH',
+      name: 'Điện tử, Thiết bị số & Công nghệ (Serial/IMEI)',
+      badgeLabel: 'Điện tử • IMEI',
+      iconEmoji: '📱',
+      industryType: ProductIndustryTypeEnum.ELECTRONICS_TECH,
+      defaultUnitName: 'Máy',
+      attributeAxis1Name: 'Phiên bản / Dung lượng',
+      attributeAxis1SampleValues: ['Standard', 'Pro Ion+'],
+      attributeAxis2Name: 'Màu sắc',
+      attributeAxis2SampleValues: ['Đen Không Gian', 'Hồng Ngọc Trai', 'Bạc Titan'],
+      requiresSerialImei: true,
+      defaultWarrantyMonths: 12,
+      requiresBatchExpiry: false,
+      defaultShelfLifeMonths: 0,
+      defaultStorageCondition: null,
+      defaultMaxDiscountPercent: 12,
+      enableAdvisorInPos: true,
+      advisorTitle: 'Tư vấn Thiết bị Công nghệ & Gói Bảo hành Điện tử',
+      advisorFields: [
+        {
+          fieldKey: 'usageNeed',
+          label: 'Nhu cầu sử dụng',
+          fieldType: 'SELECT',
+          defaultValue: 'PRO_CARE',
+          options: [
+            { value: 'PRO_CARE', label: 'Chăm sóc chuyên sâu / Tần suất hàng ngày' },
+            { value: 'GIFT_COMBO', label: 'Mua làm quà tặng cao cấp trọn bộ' },
+          ],
+        },
+      ],
+      advisorRules: [
+        {
+          ruleId: 'RULE_TECH_PRO',
+          recommendedResultCode: 'Phiên bản Pro Ion+ (Bảo hành Điện tử 12T)',
+          fitNote: 'Tích hợp sóng âm T-Sonic & đẩy tinh chất Ion+, bảo hành 1 đổi 1 theo Serial.',
+          exactMatches: { usageNeed: 'PRO_CARE' },
+          linkedSkuKeyword: 'S9-PRO',
+        },
+        {
+          ruleId: 'RULE_TECH_GIFT',
+          recommendedResultCode: 'Combo Thiết bị S9 Pro + Serum B5',
+          fitNote: 'Phù hợp làm quà tặng cao cấp kèm kích hoạt bảo hành điện tử chính hãng.',
+          exactMatches: { usageNeed: 'GIFT_COMBO' },
+          linkedSkuKeyword: 'S9-PRO',
+        },
+      ],
+      isActive: true,
+      sortOrder: 3,
+    },
+    {
+      categoryId: 'CAT_FOOD_BEVERAGE',
+      code: 'FOOD_BEVERAGE',
+      name: 'Thực phẩm, Đồ uống & Dinh dưỡng F&B',
+      badgeLabel: 'Thực phẩm • HSD',
+      iconEmoji: '🍵',
+      industryType: ProductIndustryTypeEnum.FOOD_BEVERAGE,
+      defaultUnitName: 'Hộp',
+      attributeAxis1Name: 'Quy cách đóng gói',
+      attributeAxis1SampleValues: ['Gói 250g', 'Hộp 500g', 'Thùng 12 Hộp'],
+      attributeAxis2Name: 'Hương vị',
+      attributeAxis2SampleValues: ['Nguyên bản', 'Vị Matcha Ít Ngọt', 'Vị Socola'],
+      requiresSerialImei: false,
+      defaultWarrantyMonths: 0,
+      requiresBatchExpiry: true,
+      defaultShelfLifeMonths: 12,
+      defaultStorageCondition: 'Đậy kín nắp sau khi mở, bảo quản nơi khô mát',
+      defaultMaxDiscountPercent: 15,
+      enableAdvisorInPos: true,
+      advisorTitle: 'Tư vấn Quy cách Đóng gói & Liệu trình Dinh dưỡng',
+      advisorFields: [
+        {
+          fieldKey: 'weightKg',
+          label: 'Cân nặng hiện tại',
+          unit: 'kg',
+          fieldType: 'NUMBER',
+          defaultValue: 55,
+          min: 30,
+          max: 150,
+          nerAutoFillField: 'weightKg',
+        },
+        {
+          fieldKey: 'dietGoal',
+          label: 'Mục tiêu dinh dưỡng',
+          fieldType: 'SELECT',
+          defaultValue: 'EAT_CLEAN',
+          options: [
+            { value: 'EAT_CLEAN', label: 'Ăn kiêng Eat Clean / Giảm đường' },
+            { value: 'FAMILY_USE', label: 'Bữa sáng dinh dưỡng cho cả gia đình' },
+          ],
+        },
+      ],
+      advisorRules: [
+        {
+          ruleId: 'RULE_FOOD_MATCHA',
+          recommendedResultCode: 'Hộp 500g - Vị Matcha Ít Ngọt',
+          fitNote: 'Nướng mật ong tự nhiên không đường tinh luyện, dùng được 15–20 bữa sáng.',
+          exactMatches: { dietGoal: 'EAT_CLEAN' },
+          linkedSkuKeyword: 'GRN-500G',
+        },
+        {
+          ruleId: 'RULE_FOOD_FAMILY',
+          recommendedResultCode: 'Combo 2 Hộp 500g hoặc Thùng Sỉ',
+          fitNote: 'Tiết kiệm chi phí cho gia đình 3–4 người sử dụng hàng ngày.',
+          exactMatches: { dietGoal: 'FAMILY_USE' },
+          linkedSkuKeyword: 'GRN-500G',
+        },
+      ],
+      isActive: true,
+      sortOrder: 4,
+    },
+    {
+      categoryId: 'CAT_MOTHER_AND_BABY',
+      code: 'MOTHER_AND_BABY',
+      name: 'Mẹ & Bé (Bỉm, Sữa, Đồ sơ sinh)',
+      badgeLabel: 'Mẹ & Bé',
+      iconEmoji: '🍼',
+      industryType: ProductIndustryTypeEnum.MOTHER_AND_BABY,
+      defaultUnitName: 'Bịch',
+      attributeAxis1Name: 'Size cân nặng / Độ tuổi',
+      attributeAxis1SampleValues: ['S (4-8kg)', 'M (6-11kg)', 'L (9-14kg)', 'XL (12-17kg)'],
+      attributeAxis2Name: 'Phân loại',
+      attributeAxis2SampleValues: ['Tã dán', 'Tã quần'],
+      requiresSerialImei: false,
+      defaultWarrantyMonths: 0,
+      requiresBatchExpiry: true,
+      defaultShelfLifeMonths: 24,
+      defaultStorageCondition: 'Nơi khô ráo, tránh ẩm ướt',
+      defaultMaxDiscountPercent: 12,
+      enableAdvisorInPos: true,
+      advisorTitle: 'Tư vấn Size Bỉm / Quần áo cho Bé theo Cân nặng & Tháng tuổi',
+      advisorFields: [
+        {
+          fieldKey: 'weightKg',
+          label: 'Cân nặng của bé',
+          unit: 'kg',
+          fieldType: 'NUMBER',
+          defaultValue: 8,
+          min: 2,
+          max: 30,
+          nerAutoFillField: 'weightKg',
+        },
+        {
+          fieldKey: 'babyAgeMonths',
+          label: 'Tháng tuổi của bé',
+          unit: 'tháng',
+          fieldType: 'NUMBER',
+          defaultValue: 6,
+          min: 0,
+          max: 60,
+        },
+      ],
+      advisorRules: DEFAULT_BABY_DIAPER_SIZE_CHART.map((row, idx) => ({
+        ruleId: `RULE_BABY_${idx + 1}`,
+        recommendedResultCode: row.sizeCode,
+        fitNote: row.fitNote || 'Form chuẩn cho bé',
+        numericRanges: {
+          weightKg: { min: row.minWeightKg, max: row.maxWeightKg },
+          babyAgeMonths: {
+            min: row.minAgeMonths ?? 0,
+            max: row.maxAgeMonths ?? 36,
+          },
+        },
+      })),
+      isActive: true,
+      sortOrder: 5,
+    },
+    {
+      categoryId: 'CAT_HOME_LIVING',
+      code: 'HOME_LIVING_APPLIANCES',
+      name: 'Gia dụng, Nội thất & Đời sống',
+      badgeLabel: 'Gia dụng',
+      iconEmoji: '🏠',
+      industryType: ProductIndustryTypeEnum.HOME_LIVING_APPLIANCES,
+      defaultUnitName: 'Bộ',
+      attributeAxis1Name: 'Kích thước / Công suất',
+      attributeAxis1SampleValues: ['Tiêu chuẩn 3.5L', 'Cỡ lớn 5.5L'],
+      attributeAxis2Name: 'Chất liệu / Màu',
+      attributeAxis2SampleValues: ['Inox 304', 'Phủ Gốm Ceramic'],
+      requiresSerialImei: true,
+      defaultWarrantyMonths: 12,
+      requiresBatchExpiry: false,
+      defaultShelfLifeMonths: 0,
+      defaultStorageCondition: null,
+      defaultMaxDiscountPercent: 15,
+      enableAdvisorInPos: false,
+      advisorTitle: 'Tư vấn Dung tích & Công suất Gia dụng',
+      advisorFields: [],
+      advisorRules: [],
+      isActive: true,
+      sortOrder: 6,
+    },
+  ];
+}
+
 export const INDUSTRY_ATTRIBUTE_BLUEPRINTS: Record<
   ProductIndustryTypeEnum,
   {
@@ -225,6 +599,8 @@ export class CatalogAndBomService {
     private readonly stockRepo: Repository<WarehouseStockItemEntity>,
     @InjectRepository(ProductSerialItemEntity)
     private readonly serialRepo: Repository<ProductSerialItemEntity>,
+    @InjectRepository(ShopWorkspaceEntity)
+    private readonly shopRepo: Repository<ShopWorkspaceEntity>,
     private readonly inventoryService: AtomicInventoryAndTransferService,
   ) {}
 
@@ -238,8 +614,198 @@ export class CatalogAndBomService {
   }
 
   /**
+   * Lấy hoặc Khởi tạo Cấu hình Ngành hàng Động, Tư vấn Size/Thông số, Quà tặng kèm & Ngân hàng VietQR của Cửa hàng (`getShopCatalogAndPosConfig`)
+   * Lưu trữ trực tiếp trong `shop_workspaces.catalog_and_pos_config_json` để Người bán toàn quyền tùy biến.
+   */
+  public async getShopCatalogAndPosConfig(shopId: string): Promise<ShopCatalogAndPosConfig> {
+    const shop = await this.shopRepo.findOne({ where: { id: shopId } });
+    const existing = shop?.catalogAndPosConfigJson;
+
+    if (existing && Array.isArray(existing.categories) && existing.categories.length > 0) {
+      return existing;
+    }
+
+    // Tìm SKU quà tặng hoặc SKU phụ kiện hiện có trong shop (nếu có) để gợi ý quy tắc quà tặng mặc định
+    const giftCandidate = await this.variantRepo.findOne({
+      where: { shopId, isActive: true },
+      order: { retailPrice: 'ASC' },
+    });
+
+    const initialConfig: ShopCatalogAndPosConfig = {
+      categories: buildInitialSellerCategories(),
+      freeGiftRules: giftCandidate
+        ? [
+            {
+              ruleId: 'GIFT_RULE_500K',
+              ruleName: 'Tặng kèm phụ kiện cho đơn hàng từ 500.000đ',
+              minOrderSubtotalVnd: 500000,
+              requiredCategoryId: null,
+              giftVariantId: giftCandidate.id,
+              giftSkuCode: giftCandidate.skuCode,
+              giftVariantName: giftCandidate.variantName,
+              giftQty: 1,
+              isActive: true,
+            },
+          ]
+        : [],
+      vietQrBankConfig: {
+        bankBin: '970422',
+        bankShortName: 'MBBank',
+        accountNumber: '0988123456888',
+        accountName: shop?.name
+          ? this.stripDiacriticsCode(shop.name)
+          : 'CONG TY TNHH PANCAKE SELLER OS',
+        transferPrefix: 'SEVQR ORD',
+        autoConfirmWebhookEnabled: true,
+      },
+      autoSeedDemoCatalogWhenEmpty: false,
+      hasInitializedDefaultCatalog: existing?.hasInitializedDefaultCatalog ?? false,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (shop) {
+      shop.catalogAndPosConfigJson = initialConfig;
+      await this.shopRepo.save(shop);
+    }
+
+    return initialConfig;
+  }
+
+  /**
+   * Cập nhật Cấu hình Tổng thể Danh mục Ngành hàng Động, Quy tắc Quà tặng kèm & Tài khoản Ngân hàng VietQR của Cửa hàng
+   */
+  public async updateShopCatalogAndPosConfig(
+    shopId: string,
+    dto: UpdateShopCatalogPosConfigDto,
+  ): Promise<ShopCatalogAndPosConfig> {
+    const current = await this.getShopCatalogAndPosConfig(shopId);
+    const updated: ShopCatalogAndPosConfig = {
+      ...current,
+      categories: Array.isArray(dto.categories) ? dto.categories : current.categories,
+      freeGiftRules: Array.isArray(dto.freeGiftRules) ? dto.freeGiftRules : current.freeGiftRules,
+      vietQrBankConfig: dto.vietQrBankConfig
+        ? {
+            ...current.vietQrBankConfig,
+            ...dto.vietQrBankConfig,
+          }
+        : current.vietQrBankConfig,
+      autoSeedDemoCatalogWhenEmpty:
+        dto.autoSeedDemoCatalogWhenEmpty !== undefined
+          ? dto.autoSeedDemoCatalogWhenEmpty
+          : current.autoSeedDemoCatalogWhenEmpty,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const shop = await this.shopRepo.findOne({ where: { id: shopId } });
+    if (shop) {
+      shop.catalogAndPosConfigJson = updated;
+      await this.shopRepo.save(shop);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Thêm mới hoặc Cập nhật 1 Ngành hàng / Danh mục sản phẩm tùy chỉnh của Người bán (`upsertSellerCategoryBlueprint`)
+   */
+  public async upsertSellerCategoryBlueprint(
+    shopId: string,
+    dto: UpsertSellerCategoryBlueprintDto,
+  ): Promise<ShopCatalogAndPosConfig> {
+    const config = await this.getShopCatalogAndPosConfig(shopId);
+    const cleanCode = this.stripDiacriticsCode(dto.code || dto.name);
+    const categoryId = (dto.categoryId || `CAT_${cleanCode}`).trim();
+
+    const existingIdx = config.categories.findIndex(
+      (c) => c.categoryId === categoryId || c.code === cleanCode,
+    );
+    const existingItem = existingIdx >= 0 ? config.categories[existingIdx] : null;
+
+    const blueprintItem: SellerCategoryBlueprintItem = {
+      categoryId,
+      code: cleanCode,
+      name: dto.name.trim(),
+      badgeLabel: (dto.badgeLabel || dto.name).trim(),
+      iconEmoji: dto.iconEmoji ?? existingItem?.iconEmoji ?? '📦',
+      industryType:
+        dto.industryType ||
+        existingItem?.industryType ||
+        ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
+      defaultUnitName: (dto.defaultUnitName || existingItem?.defaultUnitName || 'Sản phẩm').trim(),
+      attributeAxis1Name: (
+        dto.attributeAxis1Name ||
+        existingItem?.attributeAxis1Name ||
+        'Phân loại 1'
+      ).trim(),
+      attributeAxis1SampleValues:
+        Array.isArray(dto.attributeAxis1SampleValues) && dto.attributeAxis1SampleValues.length > 0
+          ? dto.attributeAxis1SampleValues
+          : existingItem?.attributeAxis1SampleValues || ['Tiêu chuẩn'],
+      attributeAxis2Name: (
+        dto.attributeAxis2Name ||
+        existingItem?.attributeAxis2Name ||
+        'Phân loại 2'
+      ).trim(),
+      attributeAxis2SampleValues:
+        Array.isArray(dto.attributeAxis2SampleValues) && dto.attributeAxis2SampleValues.length > 0
+          ? dto.attributeAxis2SampleValues
+          : existingItem?.attributeAxis2SampleValues || ['Mặc định'],
+      requiresSerialImei: dto.requiresSerialImei ?? existingItem?.requiresSerialImei ?? false,
+      defaultWarrantyMonths: Number(
+        dto.defaultWarrantyMonths ?? existingItem?.defaultWarrantyMonths ?? 0,
+      ),
+      requiresBatchExpiry: dto.requiresBatchExpiry ?? existingItem?.requiresBatchExpiry ?? false,
+      defaultShelfLifeMonths: Number(
+        dto.defaultShelfLifeMonths ?? existingItem?.defaultShelfLifeMonths ?? 0,
+      ),
+      defaultStorageCondition:
+        dto.defaultStorageCondition !== undefined
+          ? dto.defaultStorageCondition
+          : (existingItem?.defaultStorageCondition ?? null),
+      defaultMaxDiscountPercent: Number(
+        dto.defaultMaxDiscountPercent ?? existingItem?.defaultMaxDiscountPercent ?? 15,
+      ),
+      enableAdvisorInPos: dto.enableAdvisorInPos ?? existingItem?.enableAdvisorInPos ?? true,
+      advisorTitle:
+        dto.advisorTitle || existingItem?.advisorTitle || `Tư vấn thông số ${dto.name.trim()}`,
+      advisorFields: Array.isArray(dto.advisorFields)
+        ? dto.advisorFields
+        : existingItem?.advisorFields || [],
+      advisorRules: Array.isArray(dto.advisorRules)
+        ? dto.advisorRules
+        : existingItem?.advisorRules || [],
+      isActive: dto.isActive ?? existingItem?.isActive ?? true,
+      sortOrder: Number(dto.sortOrder ?? existingItem?.sortOrder ?? config.categories.length + 1),
+    };
+
+    const nextCategories = [...config.categories];
+    if (existingIdx >= 0) {
+      nextCategories[existingIdx] = blueprintItem;
+    } else {
+      nextCategories.push(blueprintItem);
+    }
+
+    return this.updateShopCatalogAndPosConfig(shopId, {
+      categories: nextCategories,
+    });
+  }
+
+  /**
+   * Xóa một Ngành hàng / Danh mục tùy chỉnh khỏi cấu hình của Cửa hàng
+   */
+  public async deleteSellerCategoryBlueprint(
+    shopId: string,
+    categoryId: string,
+  ): Promise<ShopCatalogAndPosConfig> {
+    const config = await this.getShopCatalogAndPosConfig(shopId);
+    const nextCategories = config.categories.filter((c) => c.categoryId !== categoryId);
+    return this.updateShopCatalogAndPosConfig(shopId, {
+      categories: nextCategories,
+    });
+  }
+
+  /**
    * Tính trọng lượng quy đổi thể tích chuẩn hãng vận chuyển 3PL (`(Dài x Rộng x Cao) / 5` tính ra gram)
-   * giúp các shop bán đồ gia dụng, bỉm sữa, thùng thực phẩm cồng kềnh tính đúng phí vận chuyển GHN/GHTK/VTP/J&T.
    */
   public computeVolumetricAndChargeableWeightGrams(params: {
     weightGrams?: number;
@@ -254,32 +820,47 @@ export class CatalogAndBomService {
     const l = Math.max(1, Number(params.lengthCm || 20));
     const w = Math.max(1, Number(params.widthCm || 15));
     const h = Math.max(1, Number(params.heightCm || 5));
-    // Theo chuẩn GHN/GHTK: Trọng lượng quy đổi (kg) = (D x R x C) / 5000 => Quy ra gram = (D x R x C) / 5
     const volumetricWeightGrams = Math.round((l * w * h) / 5);
     const chargeableWeightGrams = Math.max(actualWeight, volumetricWeightGrams);
     return { volumetricWeightGrams, chargeableWeightGrams };
   }
 
   /**
-   * Khởi tạo bộ dữ liệu Danh mục Sản phẩm Đa Ngành Hàng (Thời trang, Phụ kiện, Combo BOM, Thiết bị Công nghệ Serial/IMEI,
-   * Mỹ phẩm có Lô/Hạn sử dụng FEFO và Thực phẩm dinh dưỡng F&B) để người bán trải nghiệm đầy đủ mọi nghiệp vụ.
+   * Khởi tạo bộ dữ liệu Danh mục Sản phẩm Mẫu cho Cửa hàng mới (chỉ chạy 1 lần duy nhất khi shop mới tinh chưa khởi tạo
+   * hoặc khi người bán chủ động bấm nút "Nạp dữ liệu mẫu tham khảo" `forceSeed = true`).
+   * Nếu người bán đã xóa toàn bộ sản phẩm để tự nhập hàng riêng, hệ thống tôn trọng tuyệt đối và không tự ý chèn lại!
    */
-  public async ensureSeededCatalogForShop(shopId: string): Promise<void> {
+  public async ensureSeededCatalogForShop(shopId: string, forceSeed = false): Promise<void> {
     const existingCount = await this.variantRepo.count({ where: { shopId } });
-    if (existingCount > 0) return;
+    if (existingCount > 0 && !forceSeed) return;
+
+    const shop = await this.shopRepo.findOne({ where: { id: shopId } });
+    const currentConfig = shop?.catalogAndPosConfigJson;
+    if (
+      !forceSeed &&
+      currentConfig?.hasInitializedDefaultCatalog &&
+      !currentConfig?.autoSeedDemoCatalogWhenEmpty
+    ) {
+      return;
+    }
+
+    if (existingCount > 0 && forceSeed) {
+      return;
+    }
 
     const warehouses = await this.inventoryService.ensureDefaultWarehousesForShop(shopId);
     const hnWh = warehouses[0];
     const hcmWh = warehouses[1] || warehouses[0];
 
-    // 1. Ngành Thời trang (`FASHION_APPAREL`): Đầm Lụa có Ma trận Biến thể (Màu x Size)
+    // 1. Ngành Thời trang (`CAT_FASHION_APPAREL`): Đầm Lụa có Ma trận Biến thể (Màu x Size)
     const dressProd = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: 'DAM-LUA-A12',
         name: 'Đầm Lụa Thiết Kế Dự Tiệc Cao Cấp A12',
+        customCategoryId: 'CAT_FASHION_APPAREL',
         industryType: ProductIndustryTypeEnum.FASHION_APPAREL,
-        categoryName: 'Thời trang Nữ',
+        categoryName: 'Thời trang, Giày dép & Phụ kiện',
         brandName: 'Pancake Couture',
         unitName: 'Chiếc',
         attributeAxis1Name: 'Màu sắc',
@@ -335,6 +916,7 @@ export class CatalogAndBomService {
         this.variantRepo.create({
           shopId,
           productId: dressProd.id,
+          customCategoryId: 'CAT_FASHION_APPAREL',
           industryType: ProductIndustryTypeEnum.FASHION_APPAREL,
           categoryName: dressProd.categoryName,
           brandName: dressProd.brandName,
@@ -393,14 +975,15 @@ export class CatalogAndBomService {
       ]);
     }
 
-    // 2. Ngành Phụ kiện & Quà tặng kèm (`FASHION_APPAREL`)
+    // 2. Ngành Phụ kiện & Quà tặng kèm (`CAT_FASHION_APPAREL`)
     const bagProd = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: 'TUI-COI-B05',
         name: 'Túi Cói Đi Biển Thêu Hoa Vintage B05',
+        customCategoryId: 'CAT_FASHION_APPAREL',
         industryType: ProductIndustryTypeEnum.FASHION_APPAREL,
-        categoryName: 'Phụ kiện & Túi xách',
+        categoryName: 'Thời trang, Giày dép & Phụ kiện',
         brandName: 'Pancake Chic',
         unitName: 'Chiếc',
         attributeAxis1Name: 'Màu sắc',
@@ -413,6 +996,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: bagProd.id,
+        customCategoryId: 'CAT_FASHION_APPAREL',
         industryType: ProductIndustryTypeEnum.FASHION_APPAREL,
         categoryName: bagProd.categoryName,
         brandName: bagProd.brandName,
@@ -433,6 +1017,7 @@ export class CatalogAndBomService {
         maxDiscountPercent: 20,
         weightGrams: 250,
         isBundleBom: false,
+        isFreeGiftItem: true,
         requiresSerialImei: false,
         isActive: true,
       }),
@@ -472,6 +1057,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: dressProd.id,
+        customCategoryId: 'CAT_FASHION_APPAREL',
         industryType: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
         categoryName: 'Combo Tiết Kiệm (Bundle BOM)',
         brandName: 'Pancake Combo',
@@ -540,14 +1126,15 @@ export class CatalogAndBomService {
       }),
     ]);
 
-    // 4. Ngành Điện tử & Thiết bị Công nghệ quản lý theo Serial / IMEI (`ELECTRONICS_TECH` — F05.8)
+    // 4. Ngành Điện tử & Thiết bị Công nghệ quản lý theo Serial / IMEI (`CAT_ELECTRONICS_TECH` — F05.8)
     const deviceProd = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: 'MAY-RUA-MAT-S9',
         name: 'Máy Rửa Mặt & Đẩy Tinh Chất Sóng Âm S9 Pro',
+        customCategoryId: 'CAT_ELECTRONICS_TECH',
         industryType: ProductIndustryTypeEnum.ELECTRONICS_TECH,
-        categoryName: 'Thiết bị Làm đẹp & Công nghệ',
+        categoryName: 'Điện tử, Thiết bị số & Công nghệ (Serial/IMEI)',
         brandName: 'Pancake BeautyTech',
         unitName: 'Máy',
         attributeAxis1Name: 'Phiên bản',
@@ -566,6 +1153,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: deviceProd.id,
+        customCategoryId: 'CAT_ELECTRONICS_TECH',
         industryType: ProductIndustryTypeEnum.ELECTRONICS_TECH,
         categoryName: deviceProd.categoryName,
         brandName: deviceProd.brandName,
@@ -625,14 +1213,15 @@ export class CatalogAndBomService {
       );
     }
 
-    // 5. Ngành Mỹ phẩm & Chăm sóc da quản lý Lô & Hạn sử dụng FEFO (`COSMETICS_BEAUTY`)
+    // 5. Ngành Mỹ phẩm & Chăm sóc da quản lý Lô & Hạn sử dụng FEFO (`CAT_COSMETICS_BEAUTY`)
     const serumProd = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: 'SERUM-B5-HYDRA',
         name: 'Tinh Chất Phục Hồi Cấp Ẩm Chuyên Sâu Vitamin B5 + HA',
+        customCategoryId: 'CAT_COSMETICS_BEAUTY',
         industryType: ProductIndustryTypeEnum.COSMETICS_BEAUTY,
-        categoryName: 'Mỹ phẩm & Chăm sóc da',
+        categoryName: 'Mỹ phẩm, Chăm sóc da & Làm đẹp (FEFO)',
         brandName: 'Pancake DermaLab',
         unitName: 'Chai',
         attributeAxis1Name: 'Dung tích',
@@ -648,6 +1237,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: serumProd.id,
+        customCategoryId: 'CAT_COSMETICS_BEAUTY',
         industryType: ProductIndustryTypeEnum.COSMETICS_BEAUTY,
         categoryName: serumProd.categoryName,
         brandName: serumProd.brandName,
@@ -711,14 +1301,15 @@ export class CatalogAndBomService {
       }),
     ]);
 
-    // 6. Ngành Thực phẩm & Đồ uống (`FOOD_BEVERAGE`) có Quy đổi Đơn vị tính & Hạn sử dụng
+    // 6. Ngành Thực phẩm & Đồ uống (`CAT_FOOD_BEVERAGE`) có Quy đổi Đơn vị tính & Hạn sử dụng
     const foodProd = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: 'GRANOLA-MATCHA-01',
         name: 'Ngũ Cốc Hạt Dinh Dưỡng Nướng Mật Ong & Matcha Uji Nhật Bản',
+        customCategoryId: 'CAT_FOOD_BEVERAGE',
         industryType: ProductIndustryTypeEnum.FOOD_BEVERAGE,
-        categoryName: 'Thực phẩm Dinh dưỡng & Healthy F&B',
+        categoryName: 'Thực phẩm, Đồ uống & Dinh dưỡng F&B',
         brandName: 'Pancake NutriFood',
         unitName: 'Hộp',
         attributeAxis1Name: 'Quy cách đóng gói',
@@ -738,6 +1329,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: foodProd.id,
+        customCategoryId: 'CAT_FOOD_BEVERAGE',
         industryType: ProductIndustryTypeEnum.FOOD_BEVERAGE,
         categoryName: foodProd.categoryName,
         brandName: foodProd.brandName,
@@ -801,11 +1393,34 @@ export class CatalogAndBomService {
         lowStockThreshold: 10,
       }),
     ]);
+
+    // Đánh dấu cửa hàng đã khởi tạo catalog lần đầu để nếu người bán xóa sản phẩm mẫu thì không bao giờ tự động sinh lại nữa
+    const config = await this.getShopCatalogAndPosConfig(shopId);
+    config.hasInitializedDefaultCatalog = true;
+    if (config.freeGiftRules.length === 0) {
+      config.freeGiftRules = [
+        {
+          ruleId: 'GIFT_RULE_500K',
+          ruleName: 'Tặng kèm Túi Cói B05 cho đơn hàng từ 500.000đ',
+          minOrderSubtotalVnd: 500000,
+          requiredCategoryId: null,
+          giftVariantId: bagVariant.id,
+          giftSkuCode: bagVariant.skuCode,
+          giftVariantName: bagVariant.variantName,
+          giftQty: 1,
+          isActive: true,
+        },
+      ];
+    }
+    if (shop) {
+      shop.catalogAndPosConfigJson = config;
+      await this.shopRepo.save(shop);
+    }
   }
 
   /**
-   * F05.1 & F05.2: Lấy toàn bộ Danh mục Biến thể SKU Đa Ngành Hàng kèm Tồn kho 4 trạng thái tại từng Kho,
-   * tính toán động tồn khả dụng cho `Bundle BOM`, cảnh báo cận hạn FEFO và bảo toàn đầy đủ phương thức của `ProductVariantEntity`.
+   * F05.1 & F05.2: Lấy toàn bộ Danh mục Biến thể SKU kèm Tồn kho 4 trạng thái tại từng Kho,
+   * đồng thời trả về Cấu hình Ngành hàng Động (`catalogConfig`) của Người bán.
    */
   public async listCatalogVariantsWithMultiWarehouseStock(params: {
     shopId: string;
@@ -813,19 +1428,22 @@ export class CatalogAndBomService {
     warehouseId?: string;
     bundleOnly?: boolean;
     industryType?: ProductIndustryTypeEnum;
+    customCategoryId?: string;
   }): Promise<{
     warehouses: WarehouseEntity[];
     variants: EnrichedCatalogVariantItem[];
+    catalogConfig: ShopCatalogAndPosConfig;
   }> {
     await this.ensureSeededCatalogForShop(params.shopId);
 
-    const [warehouses, allVariants, allStocks] = await Promise.all([
+    const [warehouses, allVariants, allStocks, catalogConfig] = await Promise.all([
       this.inventoryService.ensureDefaultWarehousesForShop(params.shopId),
       this.variantRepo.find({
         where: { shopId: params.shopId, isActive: true },
         order: { createdAt: 'DESC' },
       }),
       this.stockRepo.find({ where: { shopId: params.shopId } }),
+      this.getShopCatalogAndPosConfig(params.shopId),
     ]);
 
     const stockByVariantAndWh = new Map<string, WarehouseStockItemEntity>();
@@ -839,6 +1457,9 @@ export class CatalogAndBomService {
     const enriched: EnrichedCatalogVariantItem[] = allVariants
       .filter((v) => {
         if (params.bundleOnly && !v.isBundleBom) return false;
+        if (params.customCategoryId && v.customCategoryId !== params.customCategoryId) {
+          return false;
+        }
         if (params.industryType && v.industryType !== params.industryType) return false;
         if (!q) return true;
         return (
@@ -852,7 +1473,6 @@ export class CatalogAndBomService {
       })
       .map((v) => {
         const stocksByWarehouse: WarehouseStockSummaryItem[] = warehouses.map((wh) => {
-          // Nếu là sản phẩm Combo (`Bundle BOM`), tồn khả dụng tại kho được tính động từ các SKU con
           if (
             v.isBundleBom &&
             Array.isArray(v.bundleComponentsJson) &&
@@ -924,7 +1544,6 @@ export class CatalogAndBomService {
           }
         }
 
-        // Sử dụng Object.assign trên thực thể `v` để bảo toàn đầy đủ các phương thức của BaseEntity (`hasId`, `save`, `remove`, `softRemove`, `recover`, `reload`)
         return Object.assign(v, {
           retailPrice: Number(v.retailPrice || 0),
           wholesalePrice: Number(v.wholesalePrice || 0),
@@ -944,13 +1563,12 @@ export class CatalogAndBomService {
     return {
       warehouses,
       variants: enriched,
+      catalogConfig,
     };
   }
 
   /**
-   * F05.1: Khởi tạo Sản phẩm mới kèm Ma trận Biến thể Tự động Đa Ngành Hàng
-   * Hỗ trợ linh hoạt 2 trục thuộc tính tùy biến (`attributeAxis1Name` x `attributeAxis2Name`),
-   * tự động thiết lập cờ `requiresSerialImei` (Điện tử) hoặc `requiresBatchExpiry` (Mỹ phẩm, Thực phẩm, Mẹ & Bé).
+   * F05.1: Khởi tạo Sản phẩm mới kèm Ma trận Biến thể Tự động dựa trên Cấu hình Ngành hàng Động của Người bán (`SellerCategoryBlueprintItem`)
    */
   public async createProductWithVariantMatrix(params: {
     shopId: string;
@@ -961,7 +1579,10 @@ export class CatalogAndBomService {
     createdVariants: ProductVariantEntity[];
   }> {
     const { shopId, actorUserId, dto } = params;
-    const warehouses = await this.inventoryService.ensureDefaultWarehousesForShop(shopId);
+    const [warehouses, catalogConfig] = await Promise.all([
+      this.inventoryService.ensureDefaultWarehousesForShop(shopId),
+      this.getShopCatalogAndPosConfig(shopId),
+    ]);
     const defaultWh = warehouses.find((w) => w.isDefault) || warehouses[0];
 
     const cleanCode = this.stripDiacriticsCode(dto.code);
@@ -972,47 +1593,75 @@ export class CatalogAndBomService {
       throw new BadRequestException(`Mã sản phẩm [${cleanCode}] đã tồn tại trong cửa hàng.`);
     }
 
-    const industryType = dto.industryType || ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY;
-    const blueprint =
+    // Tra cứu cấu hình ngành hàng do Người bán tự định nghĩa
+    const sellerCategory =
+      catalogConfig.categories.find(
+        (c) =>
+          (dto.customCategoryId && c.categoryId === dto.customCategoryId) ||
+          (dto.categoryName && c.name.toLowerCase() === dto.categoryName.trim().toLowerCase()) ||
+          (dto.industryType && c.industryType === dto.industryType),
+      ) || null;
+
+    const industryType =
+      dto.industryType ||
+      sellerCategory?.industryType ||
+      ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY;
+    const fallbackBlueprint =
       INDUSTRY_ATTRIBUTE_BLUEPRINTS[industryType] ||
       INDUSTRY_ATTRIBUTE_BLUEPRINTS[ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY];
 
-    const axis1Name = (dto.attributeAxis1Name || blueprint.axis1Name).trim();
-    const axis2Name = (dto.attributeAxis2Name || blueprint.axis2Name).trim();
+    const resolvedCategoryId = sellerCategory?.categoryId || dto.customCategoryId || null;
+    const resolvedCategoryName =
+      dto.categoryName?.trim() || sellerCategory?.name || fallbackBlueprint.defaultCategoryName;
+    const resolvedUnitName =
+      dto.unitName?.trim() || sellerCategory?.defaultUnitName || fallbackBlueprint.defaultUnitName;
 
-    const defaultChart =
-      industryType === ProductIndustryTypeEnum.MOTHER_AND_BABY
-        ? DEFAULT_BABY_DIAPER_SIZE_CHART
-        : DEFAULT_APPAREL_SIZE_CHART;
+    const axis1Name = (
+      dto.attributeAxis1Name ||
+      sellerCategory?.attributeAxis1Name ||
+      fallbackBlueprint.axis1Name
+    ).trim();
+    const axis2Name = (
+      dto.attributeAxis2Name ||
+      sellerCategory?.attributeAxis2Name ||
+      fallbackBlueprint.axis2Name
+    ).trim();
 
     const sizeChart =
       Array.isArray(dto.sizeChartMetadataJson) && dto.sizeChartMetadataJson.length > 0
         ? dto.sizeChartMetadataJson
-        : defaultChart;
+        : null;
 
     const requiresSerialImei =
-      dto.requiresSerialImei !== undefined ? dto.requiresSerialImei : blueprint.requiresSerialImei;
+      dto.requiresSerialImei !== undefined
+        ? dto.requiresSerialImei
+        : (sellerCategory?.requiresSerialImei ?? fallbackBlueprint.requiresSerialImei);
     const requiresBatchExpiry =
       dto.requiresBatchExpiry !== undefined
         ? dto.requiresBatchExpiry
-        : blueprint.requiresBatchExpiry;
+        : (sellerCategory?.requiresBatchExpiry ?? fallbackBlueprint.requiresBatchExpiry);
 
     const product = await this.productRepo.save(
       this.productRepo.create({
         shopId,
         code: cleanCode,
         name: dto.name.trim(),
+        customCategoryId: resolvedCategoryId,
         industryType,
-        categoryName: dto.categoryName || blueprint.defaultCategoryName,
-        brandName: dto.brandName || 'Pancake Brand',
-        unitName: dto.unitName || blueprint.defaultUnitName,
+        categoryName: resolvedCategoryName,
+        brandName: dto.brandName || 'Thương hiệu riêng',
+        unitName: resolvedUnitName,
         attributeAxis1Name: axis1Name,
         attributeAxis2Name: axis2Name,
         thumbnailUrl: dto.thumbnailUrl || null,
         description: dto.description || null,
         requiresBatchExpiry,
-        shelfLifeMonths: Number(dto.shelfLifeMonths ?? (requiresBatchExpiry ? 24 : 0)),
-        storageCondition: dto.storageCondition || null,
+        shelfLifeMonths: Number(
+          dto.shelfLifeMonths ??
+            sellerCategory?.defaultShelfLifeMonths ??
+            (requiresBatchExpiry ? 24 : 0),
+        ),
+        storageCondition: dto.storageCondition || sellerCategory?.defaultStorageCondition || null,
         technicalSpecsJson: dto.technicalSpecsJson || null,
         uomConversionsJson: dto.uomConversionsJson || null,
         sizeChartMetadataJson: sizeChart,
@@ -1026,14 +1675,18 @@ export class CatalogAndBomService {
         ? dto.attributeAxis1Values
         : Array.isArray(dto.colors) && dto.colors.length > 0
           ? dto.colors
-          : ['Tiêu chuẩn'];
+          : sellerCategory?.attributeAxis1SampleValues?.length
+            ? sellerCategory.attributeAxis1SampleValues
+            : ['Tiêu chuẩn'];
 
     const rawAxis2List =
       Array.isArray(dto.attributeAxis2Values) && dto.attributeAxis2Values.length > 0
         ? dto.attributeAxis2Values
         : Array.isArray(dto.sizes) && dto.sizes.length > 0
           ? dto.sizes
-          : ['MẶC ĐỊNH'];
+          : sellerCategory?.attributeAxis2SampleValues?.length
+            ? sellerCategory.attributeAxis2SampleValues
+            : ['MẶC ĐỊNH'];
 
     const initQty = Math.max(0, Number(dto.initialOnHandQtyPerVariant ?? 25));
 
@@ -1060,6 +1713,7 @@ export class CatalogAndBomService {
           this.variantRepo.create({
             shopId,
             productId: product.id,
+            customCategoryId: resolvedCategoryId,
             industryType,
             categoryName: product.categoryName,
             brandName: product.brandName,
@@ -1080,21 +1734,33 @@ export class CatalogAndBomService {
             retailPrice: Number(dto.retailPrice ?? 350000),
             wholesalePrice: Number(dto.wholesalePrice ?? 280000),
             costPrice: Number(dto.costPrice ?? 185000),
-            maxDiscountPercent: Number(dto.maxDiscountPercent ?? 15),
+            maxDiscountPercent: Number(
+              dto.maxDiscountPercent ?? sellerCategory?.defaultMaxDiscountPercent ?? 15,
+            ),
             weightGrams: Number(dto.weightGrams ?? 300),
             lengthCm: Number(dto.lengthCm ?? 20),
             widthCm: Number(dto.widthCm ?? 15),
             heightCm: Number(dto.heightCm ?? 5),
             isBundleBom: false,
+            isFreeGiftItem: Boolean(dto.isFreeGiftItem),
             requiresSerialImei,
-            warrantyMonths: Number(dto.warrantyMonths ?? (requiresSerialImei ? 12 : 0)),
+            warrantyMonths: Number(
+              dto.warrantyMonths ??
+                sellerCategory?.defaultWarrantyMonths ??
+                (requiresSerialImei ? 12 : 0),
+            ),
             requiresBatchExpiry,
             batchCode:
               dto.batchCode || (requiresBatchExpiry ? `LOT-${cleanCode.slice(0, 6)}` : null),
             manufacturingDate: dto.manufacturingDate || null,
             expiryDate: dto.expiryDate || null,
-            shelfLifeMonths: Number(dto.shelfLifeMonths ?? (requiresBatchExpiry ? 24 : 0)),
-            storageCondition: dto.storageCondition || null,
+            shelfLifeMonths: Number(
+              dto.shelfLifeMonths ??
+                sellerCategory?.defaultShelfLifeMonths ??
+                (requiresBatchExpiry ? 24 : 0),
+            ),
+            storageCondition:
+              dto.storageCondition || sellerCategory?.defaultStorageCondition || null,
             technicalSpecsJson: dto.technicalSpecsJson || null,
             uomConversionsJson: dto.uomConversionsJson || null,
             sizeChartMetadataJson: sizeChart,
@@ -1150,6 +1816,70 @@ export class CatalogAndBomService {
   }
 
   /**
+   * Chỉnh sửa thông tin Biến thể SKU (`updateProductVariant`) cho phép Người bán cập nhật Giá lẻ, Giá vốn, Trần chiết khấu, Lô/HSD, Ngành hàng...
+   */
+  public async updateProductVariant(
+    shopId: string,
+    variantId: string,
+    dto: UpdateProductVariantDto,
+  ): Promise<ProductVariantEntity> {
+    const variant = await this.variantRepo.findOne({
+      where: { id: variantId, shopId },
+    });
+    if (!variant) {
+      throw new NotFoundException('PRODUCT_VARIANT_NOT_FOUND');
+    }
+
+    if (dto.variantName !== undefined) variant.variantName = dto.variantName.trim();
+    if (dto.customCategoryId !== undefined) variant.customCategoryId = dto.customCategoryId;
+    if (dto.industryType !== undefined) variant.industryType = dto.industryType;
+    if (dto.categoryName !== undefined) variant.categoryName = dto.categoryName.trim();
+    if (dto.brandName !== undefined) variant.brandName = dto.brandName;
+    if (dto.unitName !== undefined) variant.unitName = dto.unitName.trim();
+    if (dto.barcode !== undefined) variant.barcode = dto.barcode.trim();
+    if (dto.retailPrice !== undefined) variant.retailPrice = Number(dto.retailPrice);
+    if (dto.wholesalePrice !== undefined) variant.wholesalePrice = Number(dto.wholesalePrice);
+    if (dto.costPrice !== undefined) variant.costPrice = Number(dto.costPrice);
+    if (dto.maxDiscountPercent !== undefined) {
+      variant.maxDiscountPercent = Number(dto.maxDiscountPercent);
+    }
+    if (dto.weightGrams !== undefined) variant.weightGrams = Number(dto.weightGrams);
+    if (dto.lengthCm !== undefined) variant.lengthCm = Number(dto.lengthCm);
+    if (dto.widthCm !== undefined) variant.widthCm = Number(dto.widthCm);
+    if (dto.heightCm !== undefined) variant.heightCm = Number(dto.heightCm);
+    if (dto.isFreeGiftItem !== undefined) variant.isFreeGiftItem = dto.isFreeGiftItem;
+    if (dto.requiresSerialImei !== undefined) variant.requiresSerialImei = dto.requiresSerialImei;
+    if (dto.warrantyMonths !== undefined) variant.warrantyMonths = Number(dto.warrantyMonths);
+    if (dto.requiresBatchExpiry !== undefined) {
+      variant.requiresBatchExpiry = dto.requiresBatchExpiry;
+    }
+    if (dto.batchCode !== undefined) variant.batchCode = dto.batchCode;
+    if (dto.expiryDate !== undefined) variant.expiryDate = dto.expiryDate;
+    if (dto.storageCondition !== undefined) variant.storageCondition = dto.storageCondition;
+    if (dto.isActive !== undefined) variant.isActive = dto.isActive;
+
+    return this.variantRepo.save(variant);
+  }
+
+  /**
+   * Xóa mềm / Ngừng kinh doanh Biến thể SKU (`deleteProductVariant`)
+   */
+  public async deleteProductVariant(
+    shopId: string,
+    variantId: string,
+  ): Promise<{ deleted: boolean; variantId: string }> {
+    const variant = await this.variantRepo.findOne({
+      where: { id: variantId, shopId },
+    });
+    if (!variant) {
+      throw new NotFoundException('PRODUCT_VARIANT_NOT_FOUND');
+    }
+    variant.isActive = false;
+    await this.variantRepo.save(variant);
+    return { deleted: true, variantId };
+  }
+
+  /**
    * F05.7: Tạo Sản phẩm Combo (`Bundle BOM`) định nghĩa định mức các SKU thành phần (hỗ trợ kết hợp sản phẩm xuyên ngành hàng)
    */
   public async createBundleBomVariant(
@@ -1184,6 +1914,7 @@ export class CatalogAndBomService {
           shopId,
           code: 'BUNDLE-COMBO-MASTER',
           name: 'Danh Mục Sản Phẩm Combo & Bộ Quà Tặng (Bundle BOM)',
+          customCategoryId: dto.customCategoryId || null,
           industryType: ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
           categoryName: 'Combo Tiết Kiệm',
           brandName: 'Pancake Combo',
@@ -1198,6 +1929,7 @@ export class CatalogAndBomService {
       this.variantRepo.create({
         shopId,
         productId: bundleParentProduct.id,
+        customCategoryId: dto.customCategoryId || null,
         industryType: dto.industryType || ProductIndustryTypeEnum.GENERAL_MULTI_CATEGORY,
         categoryName: 'Combo Tiết Kiệm (Bundle BOM)',
         brandName: 'Pancake Combo',
@@ -1243,6 +1975,12 @@ export class CatalogAndBomService {
     return bundleVariant;
   }
 
+  /**
+   * Động cơ Tư vấn Thông số & Kích cỡ Động dựa trên Cấu hình Ngành hàng của Người bán (`recommendApparelSize`)
+   * - Đọc trực tiếp `advisorFields` và `advisorRules` từ `ShopCatalogAndPosConfig.categories` (hoặc `sizeChartMetadataJson` của sản phẩm cụ thể).
+   * - Đánh giá đồng thời các điều kiện khoảng số học (`numericRanges`: chiều cao, cân nặng, dài chân, tháng tuổi...) và điều kiện chọn lọc (`exactMatches`: loại da, mục tiêu, nhu cầu...).
+   * - Tự động tìm và trả về danh sách các Biến thể SKU đang còn tồn khả dụng (`suggestedVariantsInStock`) khớp với kết quả tư vấn để Sale bấm 1 chạm thêm ngay vào giỏ POS!
+   */
   public async recommendApparelSize(
     shopId: string,
     dto: RecommendSizeAdvisorDto,
@@ -1251,150 +1989,185 @@ export class CatalogAndBomService {
     confidenceScore: number;
     matchedRow: ProductSizeChartRowItem;
     adviceMessage: string;
+    categoryName: string;
+    suggestedVariantsInStock: SuggestedVariantAdvisorItem[];
   }> {
-    let industryType = dto.industryType || ProductIndustryTypeEnum.FASHION_APPAREL;
-    let chart = DEFAULT_APPAREL_SIZE_CHART;
+    const [{ variants }, catalogConfig] = await Promise.all([
+      this.listCatalogVariantsWithMultiWarehouseStock({ shopId }),
+      this.getShopCatalogAndPosConfig(shopId),
+    ]);
 
-    if (dto.productId) {
+    // 1. Hợp nhất các giá trị đầu vào động từ `dto.dynamicInputs` và các trường tương thích ngược
+    const normalizedInputs: Record<string, string | number> = {
+      ...(dto.dynamicInputs || {}),
+    };
+    if (dto.heightCm !== undefined && normalizedInputs.heightCm === undefined) {
+      normalizedInputs.heightCm = Number(dto.heightCm);
+    }
+    if (dto.weightKg !== undefined && normalizedInputs.weightKg === undefined) {
+      normalizedInputs.weightKg = Number(dto.weightKg);
+    }
+    if (dto.babyAgeMonths !== undefined && normalizedInputs.babyAgeMonths === undefined) {
+      normalizedInputs.babyAgeMonths = Number(dto.babyAgeMonths);
+    }
+    if (dto.skinType !== undefined && normalizedInputs.skinType === undefined) {
+      normalizedInputs.skinType = dto.skinType;
+    }
+    if (dto.usageNeed !== undefined && normalizedInputs.usageNeed === undefined) {
+      normalizedInputs.usageNeed = dto.usageNeed;
+    }
+
+    // 2. Xác định Danh mục Ngành hàng do Người bán cấu hình
+    let targetCategory: SellerCategoryBlueprintItem | undefined;
+    if (dto.customCategoryId) {
+      targetCategory = catalogConfig.categories.find(
+        (c) => c.categoryId === dto.customCategoryId || c.code === dto.customCategoryId,
+      );
+    }
+    if (!targetCategory && dto.productId) {
       const prod = await this.productRepo.findOne({
         where: { id: dto.productId, shopId },
       });
       if (prod) {
-        industryType = prod.industryType || industryType;
-        if (prod.sizeChartMetadataJson && prod.sizeChartMetadataJson.length > 0) {
-          chart = prod.sizeChartMetadataJson;
-        }
+        targetCategory = catalogConfig.categories.find(
+          (c) =>
+            (prod.customCategoryId && c.categoryId === prod.customCategoryId) ||
+            c.industryType === prod.industryType,
+        );
       }
     }
-
-    // 1. Tư vấn cho ngành Mỹ phẩm & Chăm sóc da
-    if (industryType === ProductIndustryTypeEnum.COSMETICS_BEAUTY || dto.skinType) {
-      const skin = (dto.skinType || 'COMBINATION').toUpperCase();
-      const skinMap: Record<string, { code: string; note: string }> = {
-        OILY: {
-          code: 'Bản Kiềm Dầu BHA 2% / Gel 50ml',
-          note: 'Da dầu/hỗn hợp thiên dầu nên ưu tiên kết cấu mỏng nhẹ thấm nhanh (Serum B5 + HA hoặc Gel 50ml).',
-        },
-        DRY: {
-          code: 'Bản Cấp Ẩm Sâu Vitamin B5 + Ceramide 50ml',
-          note: 'Da khô bong tróc cần phục hồi màng ẩm chuyên sâu với Vitamin B5 + HA dung tích 50ml.',
-        },
-        SENSITIVE: {
-          code: 'Bản Dịu Nhẹ Phục Hồi B5 (Không Cồn/Hương Liệu)',
-          note: 'Da nhạy cảm/kích ứng phù hợp nhất với Tinh chất B5 + HA lành tính, test thử size 30ml hoặc 50ml.',
-        },
-        COMBINATION: {
-          code: 'Bản Cân Bằng Ẩm B5 + Niacinamide 50ml',
-          note: 'Da hỗn hợp phù hợp dùng Tinh chất B5 cấp ẩm vùng chữ U và kiềm dầu vùng chữ T.',
-        },
-      };
-      const picked = skinMap[skin] || skinMap.COMBINATION;
-      const syntheticRow: ProductSizeChartRowItem = {
-        sizeCode: picked.code,
-        minHeightCm: 0,
-        maxHeightCm: 0,
-        minWeightKg: 0,
-        maxWeightKg: 0,
-        skinTypeRecommendation: skin,
-        fitNote: picked.note,
-      };
-      return {
-        recommendedSizeCode: picked.code,
-        confidenceScore: 95,
-        matchedRow: syntheticRow,
-        adviceMessage: `Tư vấn Mỹ phẩm (Loại da: ${skin}): Khuyên dùng [${picked.code}] — ${picked.note}`,
-      };
+    if (!targetCategory && dto.industryType) {
+      targetCategory = catalogConfig.categories.find((c) => c.industryType === dto.industryType);
+    }
+    if (!targetCategory) {
+      targetCategory =
+        catalogConfig.categories.find((c) => c.isActive && c.enableAdvisorInPos) ||
+        catalogConfig.categories[0];
     }
 
-    // 2. Tư vấn cho ngành Mẹ & Bé (Bỉm, Sữa, Quần áo sơ sinh)
-    if (
-      industryType === ProductIndustryTypeEnum.MOTHER_AND_BABY ||
-      (dto.babyAgeMonths !== undefined && Number(dto.weightKg || 0) <= 25)
-    ) {
-      const babyChart = DEFAULT_BABY_DIAPER_SIZE_CHART;
-      const w = Number(dto.weightKg || 7);
-      const ageM = Number(dto.babyAgeMonths ?? 6);
-      let bestRow = babyChart[2];
-      let bestScore = -999;
+    const categoryName = targetCategory?.name || 'Danh mục sản phẩm';
+    const rules = targetCategory?.advisorRules || [];
 
-      for (const row of babyChart) {
-        const wMatch = w >= row.minWeightKg && w <= row.maxWeightKg;
-        const ageMatch =
-          row.minAgeMonths !== undefined &&
-          row.maxAgeMonths !== undefined &&
-          ageM >= row.minAgeMonths &&
-          ageM <= row.maxAgeMonths;
-        const midW = (row.minWeightKg + row.maxWeightKg) / 2;
-        const score = (wMatch ? 60 : 0) + (ageMatch ? 30 : 0) - Math.abs(w - midW) * 4;
+    let bestCode = 'Tiêu chuẩn';
+    let bestNote = 'Phù hợp với thông số khách hàng cung cấp';
+    let bestKeyword = '';
+    let bestScore = -9999;
+
+    if (rules.length > 0) {
+      for (const rule of rules) {
+        let score = 0;
+
+        if (rule.exactMatches) {
+          for (const [fieldKey, expectedVal] of Object.entries(rule.exactMatches)) {
+            const actualVal = String(normalizedInputs[fieldKey] ?? '')
+              .trim()
+              .toUpperCase();
+            if (actualVal && actualVal === String(expectedVal).trim().toUpperCase()) {
+              score += 80;
+            } else if (actualVal && actualVal.includes(String(expectedVal).trim().toUpperCase())) {
+              score += 45;
+            } else {
+              score -= 30;
+            }
+          }
+        }
+
+        if (rule.numericRanges) {
+          for (const [fieldKey, range] of Object.entries(rule.numericRanges)) {
+            const numVal = Number(normalizedInputs[fieldKey]);
+            if (!Number.isNaN(numVal) && numVal > 0) {
+              const inRange = numVal >= range.min && numVal <= range.max;
+              const mid = (range.min + range.max) / 2;
+              const span = Math.max(1, range.max - range.min);
+              const normalizedDistance = Math.abs(numVal - mid) / span;
+              score += (inRange ? 60 : 0) - normalizedDistance * 25;
+            }
+          }
+        }
+
         if (score > bestScore) {
           bestScore = score;
-          bestRow = row;
+          bestCode = rule.recommendedResultCode;
+          bestNote = rule.fitNote;
+          bestKeyword = (rule.linkedSkuKeyword || rule.recommendedResultCode).toUpperCase();
         }
       }
-
-      return {
-        recommendedSizeCode: bestRow.sizeCode,
-        confidenceScore: 97,
-        matchedRow: bestRow,
-        adviceMessage: `Tư vấn Mẹ & Bé (Bé ${w}kg • ${ageM} tháng tuổi): Chuẩn đẹp Size ${bestRow.sizeCode} — ${bestRow.fitNote}.`,
-      };
     }
 
-    // 3. Tư vấn cho ngành Điện tử / Gia dụng / Thực phẩm theo nhu cầu
-    if (
-      industryType === ProductIndustryTypeEnum.ELECTRONICS_TECH ||
-      industryType === ProductIndustryTypeEnum.FOOD_BEVERAGE ||
-      industryType === ProductIndustryTypeEnum.HOME_LIVING_APPLIANCES
-    ) {
-      const needText = (dto.usageNeed || 'Sử dụng gia đình / Tiêu chuẩn').trim();
-      const recCode =
-        industryType === ProductIndustryTypeEnum.ELECTRONICS_TECH
-          ? 'Bản Pro (Bảo hành Điện tử 12 Tháng)'
-          : industryType === ProductIndustryTypeEnum.FOOD_BEVERAGE
-            ? 'Combo 2 Hộp 500g (Tiết kiệm 15%)'
-            : 'Phiên bản Tiêu chuẩn Gia đình';
-      const syntheticRow: ProductSizeChartRowItem = {
-        sizeCode: recCode,
-        minHeightCm: 0,
-        maxHeightCm: 0,
-        minWeightKg: 0,
-        maxWeightKg: 0,
-        fitNote: `Phù hợp nhu cầu: ${needText}`,
-      };
-      return {
-        recommendedSizeCode: recCode,
-        confidenceScore: 94,
-        matchedRow: syntheticRow,
-        adviceMessage: `Gợi ý cấu hình / quy cách cho nhu cầu "${needText}": Nên chọn [${recCode}] để tối ưu chi phí và hiệu năng sử dụng.`,
-      };
-    }
-
-    // 4. Tư vấn cho ngành Thời trang & Giày dép theo Chiều cao (cm) & Cân nặng (kg)
-    const h = Number(dto.heightCm || 160);
-    const w = Number(dto.weightKg || 52);
-
-    let bestMatch = chart[0];
-    let bestScore = -999;
-
-    for (const row of chart) {
-      const hInRange = h >= row.minHeightCm && h <= row.maxHeightCm;
-      const wInRange = w >= row.minWeightKg && w <= row.maxWeightKg;
-      const midH = (row.minHeightCm + row.maxHeightCm) / 2;
-      const midW = (row.minWeightKg + row.maxWeightKg) / 2;
-      const distancePenalty = Math.abs(h - midH) * 0.8 + Math.abs(w - midW) * 1.8;
-      const bonus = (hInRange ? 30 : 0) + (wInRange ? 50 : 0);
-      const score = bonus - distancePenalty;
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = row;
+    // 3. Lọc ra các Biến thể SKU thực tế đang còn tồn khả dụng (`totalAvailableQty > 0`) khớp với kết quả tư vấn
+    const candidatesInCategory = variants.filter((v) => {
+      if (v.totalAvailableQty <= 0) return false;
+      if (targetCategory) {
+        return (
+          v.customCategoryId === targetCategory.categoryId ||
+          v.industryType === targetCategory.industryType ||
+          (v.categoryName || '').toLowerCase() === targetCategory.name.toLowerCase()
+        );
       }
-    }
+      return true;
+    });
+
+    const cleanBestCode = bestCode
+      .split(' ')[0]
+      .replace(/[^A-Za-z0-9]/g, '')
+      .toUpperCase();
+    const matchedSkus = candidatesInCategory.filter((v) => {
+      const skuUpper = v.skuCode.toUpperCase();
+      const sizeUpper = (v.sizeCode || '').toUpperCase();
+      const axis2Upper = (v.attributeAxis2Value || '').toUpperCase();
+      if (bestKeyword && skuUpper.includes(bestKeyword)) return true;
+      if (cleanBestCode && (sizeUpper === cleanBestCode || axis2Upper.includes(cleanBestCode))) {
+        return true;
+      }
+      return false;
+    });
+
+    const suggestedVariantsInStock: SuggestedVariantAdvisorItem[] = (
+      matchedSkus.length > 0 ? matchedSkus : candidatesInCategory
+    )
+      .slice(0, 4)
+      .map((v) => ({
+        variantId: v.id,
+        skuCode: v.skuCode,
+        variantName: v.variantName,
+        retailPrice: Number(v.retailPrice),
+        totalAvailableQty: v.totalAvailableQty,
+        categoryName: v.categoryName,
+      }));
+
+    const inputSummaryParts = (targetCategory?.advisorFields || [])
+      .map((f) => {
+        const val = normalizedInputs[f.fieldKey];
+        if (val === undefined || val === '') return null;
+        if (f.fieldType === 'SELECT' && Array.isArray(f.options)) {
+          const opt = f.options.find((o) => o.value === String(val));
+          return `${f.label}: ${opt ? opt.label : val}`;
+        }
+        return `${f.label}: ${val}${f.unit ? f.unit : ''}`;
+      })
+      .filter(Boolean);
+
+    const summaryPrefix =
+      inputSummaryParts.length > 0
+        ? `[${categoryName} • ${inputSummaryParts.join(' | ')}]`
+        : `[${categoryName}]`;
+
+    const matchedRow: ProductSizeChartRowItem = {
+      sizeCode: bestCode,
+      minHeightCm: Number(normalizedInputs.heightCm || 0),
+      maxHeightCm: Number(normalizedInputs.heightCm || 0),
+      minWeightKg: Number(normalizedInputs.weightKg || 0),
+      maxWeightKg: Number(normalizedInputs.weightKg || 0),
+      fitNote: bestNote,
+    };
 
     return {
-      recommendedSizeCode: bestMatch.sizeCode,
+      recommendedSizeCode: bestCode,
       confidenceScore: 96,
-      matchedRow: bestMatch,
-      adviceMessage: `Với chiều cao ${h}cm và cân nặng ${w}kg, khách mặc chuẩn đẹp Size ${bestMatch.sizeCode} (${bestMatch.fitNote || 'Form chuẩn'}).`,
+      matchedRow,
+      adviceMessage: `${summaryPrefix} Gợi ý chuẩn: ${bestCode} — ${bestNote}`,
+      categoryName,
+      suggestedVariantsInStock,
     };
   }
 }

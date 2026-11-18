@@ -16,12 +16,15 @@ export interface ProductSizeChartRowItem {
   maxAgeMonths?: number;
   skinTypeRecommendation?: string;
   fitNote?: string;
+  numericRanges?: Record<string, { min: number; max: number }>;
+  exactMatches?: Record<string, string>;
 }
 
 export interface ProductFreeGiftRuleItem {
   ruleId: string;
   ruleName: string;
   minOrderSubtotalVnd: number;
+  requiredCategoryId?: string | null;
   giftVariantId: string;
   giftSkuCode: string;
   giftVariantName: string;
@@ -49,6 +52,15 @@ export class ProductEntity extends BaseModel {
 
   @Column({ name: 'name', type: 'varchar', length: 255 })
   name: string;
+
+  @Column({
+    name: 'custom_category_id',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  customCategoryId: string | null;
 
   @Column({
     name: 'industry_type',

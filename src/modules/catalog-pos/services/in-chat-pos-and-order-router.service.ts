@@ -38,7 +38,7 @@ import { CustomerRfmAndLoyaltyService } from 'src/modules/crm/services/customer-
 import { PiiVaultAndAuditService } from 'src/modules/crm/services/pii-vault-and-audit.service';
 import { VnAdministrativeAddressCarrierService } from 'src/modules/crm/services/vn-administrative-address-carrier.service';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
-import { In, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 
 import { AtomicInventoryAndTransferService } from './atomic-inventory-and-transfer.service';
 import { CatalogAndBomService } from './catalog-and-bom.service';
@@ -83,8 +83,6 @@ export class InChatPosAndOrderRouterService {
 
   /**
    * F06.5: Phát hiện các đơn hàng trùng của cùng khách hàng đang ở trạng thái chưa gửi cho bưu tá
-   * (`CONFIRMED`, `WAITING_PACKING`, `WAITING_DEPOSIT`, `PENDING_PRICE_APPROVAL`)
-   * để hiển thị thanh `DuplicateOrderMergeBanner` gợi ý gộp đơn 1 chạm tiết kiệm phí ship.
    */
   public async detectMergeableDuplicateOrders(params: {
     shopId: string;
@@ -148,7 +146,6 @@ export class InChatPosAndOrderRouterService {
     await this.catalogService.ensureSeededCatalogForShop(params.shopId);
     const warehouses = await this.inventoryService.ensureDefaultWarehousesForShop(params.shopId);
 
-    // Sắp xếp kho ưu tiên gần Tỉnh/Thành của khách nhận nhất (Miền Bắc ưu tiên Kho HN '01', Miền Nam ưu tiên Kho HCM '79')
     const sortedWarehouses = [...warehouses].sort((a, b) => {
       if (params.preferredWarehouseId) {
         if (a.id === params.preferredWarehouseId) return -1;
@@ -177,7 +174,6 @@ export class InChatPosAndOrderRouterService {
       if (v) variantsMap.set(v.id, v);
     }
 
-    // 1. Kiểm tra xem có 1 kho duy nhất nào đủ 100% toàn bộ mặt hàng trong giỏ không
     for (const wh of sortedWarehouses) {
       const allAvailableInWh = params.items.every((item) => {
         const v = variantsMap.get(item.variantId);
@@ -217,7 +213,6 @@ export class InChatPosAndOrderRouterService {
       }
     }
 
-    // 2. Nếu không có 1 kho nào đủ toàn bộ, tự động phân bổ tách đơn sang các kho có tồn
     const allocationsMap = new Map<
       string,
       {
@@ -288,12 +283,8 @@ export class InChatPosAndOrderRouterService {
   }
 
   /**
-   * F06.1, F06.2, F06.3, F06.4, F06.6:
-   * Tạo đơn hàng từ `In-Chat POS` hoặc `Counter POS`:
-   * - Chuẩn hóa địa chỉ 3 cấp mới / 4 cấp cũ qua `VnAdministrativeAddressCarrierService`.
-   * - Kiểm tra điểm uy tín khách hàng (`deliveryTrustScore` — `F04.3`): nếu khách thuộc diện `HIGH_RISK_RED` và cửa hàng bật `requireDepositOnHighRisk`, tự động yêu cầu đặt cọc tối thiểu 30% qua VietQR.
-   * - Kiểm tra trần chiết khấu (`maxDiscountPercent` — `F06.2`): nếu vượt trần của nhân viên Sale hoặc của SKU, tự động chuyển trạng thái đơn sang `PENDING_PRICE_APPROVAL` và bắn thông báo 1 chạm cho Quản lý.
-   * - Hỗ trợ tách đơn đa kho tự động (`F06.6`) và sinh mã VietQR động chuẩn EMVCo (`F06.4`).
+   * F06.1 – F06.6: Tạo đơn hàng từ `In-Chat POS` hoặc `Counter POS`
+   * Áp dụng Quy tắc Quà tặng kèm 0đ Động (`catalogConfig.freeGiftRules`) và Cấu hình Tài khoản Ngân hàng VietQR Động (`catalogConfig.vietQrBankConfig`) của Người bán.
    */
   public async createPosOrderWithSmartRouting(params: {
     shopId: string;
@@ -311,8 +302,8 @@ export class InChatPosAndOrderRouterService {
       throw new BadRequestException('POS_ORDER_MUST_HAVE_AT_LEAST_ONE_ITEM');
     }
 
-    const [shop, member] = await Promise.all([
-      this.shopRepo.findOne({ where: { id: shopId } }),
+    const [catalogConfig, member] = await Promise.all([
+      this.catalogService.getShopCatalogAndPosConfig(shopId),
       this.memberRepo.findOne({
         where: {
           shopId,
@@ -328,7 +319,6 @@ export class InChatPosAndOrderRouterService {
       ? 100
       : Math.max(0, Number(member?.maxDiscountPercent ?? 10));
 
-    // 1. Giải quyết hồ sơ khách hàng & đánh giá rủi ro bom hàng (F04.2 & F04.3)
     let customer: CustomerProfileEntity | null = null;
     if (dto.customerId) {
       customer = await this.customerRepo.findOne({
@@ -358,7 +348,6 @@ export class InChatPosAndOrderRouterService {
         )
       : null;
 
-    // 2. Chuẩn hóa địa chỉ 3 cấp mới <-> 4 cấp cũ qua Crosswalk Engine (Sprint 3B)
     const addressCrosswalk = this.addressCarrierService.resolveBidirectionalAddressCrosswalk({
       preferredMode: dto.addressTierMode || '3_TIER',
       provinceCode: dto.receiverProvinceCode || customer?.defaultProvinceCode || '01',
@@ -369,7 +358,6 @@ export class InChatPosAndOrderRouterService {
       addressLine: dto.receiverAddressLine || customer?.defaultAddressLine || null,
     });
 
-    // 3. Định tuyến kho & kiểm tra tách đơn đa kho (F06.6)
     const routingPlan = await this.previewWarehouseAllocationAndSplit({
       shopId,
       receiverProvinceCode: addressCrosswalk.fourTierAddress.provinceCode,
@@ -401,13 +389,13 @@ export class InChatPosAndOrderRouterService {
       );
     }
 
-    // 4. Tính toán chi tiết từng dòng hàng, giữ chỗ tồn kho và kiểm tra trần chiết khấu
     let minVariantMaxDiscount = 100;
     const orderLines: PosOrderLineItem[] = [];
     let subtotalAmount = 0;
     let totalItemDiscountAmount = 0;
     let totalWeightGrams = 0;
     let cogsSnapshotAmount = 0;
+    const orderedCategoryIds = new Set<string>();
 
     const primaryWh =
       routingPlan.recommendedSingleWarehouse ||
@@ -421,6 +409,10 @@ export class InChatPosAndOrderRouterService {
       });
       if (!variant) {
         throw new NotFoundException(`Biến thể sản phẩm không tồn tại.`);
+      }
+
+      if (variant.customCategoryId) {
+        orderedCategoryIds.add(variant.customCategoryId);
       }
 
       minVariantMaxDiscount = Math.min(
@@ -439,7 +431,6 @@ export class InChatPosAndOrderRouterService {
       const lineTotal = finalUnitPrice * qty;
       const unitCost = Number(variant.costPrice || 0);
 
-      // Giữ chỗ nguyên tử cho đơn hàng mới
       const allocWhId =
         routingPlan.allocationsByWarehouse.find((a) =>
           a.items.some((i) => i.variantId === variant.id),
@@ -487,33 +478,45 @@ export class InChatPosAndOrderRouterService {
       });
     }
 
-    // 5. Tự động kiểm tra Quy tắc Quà tặng kèm 0đ (`Free Gift Rules` — F05.7)
-    if (subtotalAmount >= 500000) {
-      const giftVariant = await this.variantRepo.findOne({
-        where: { shopId, isFreeGiftItem: true, isActive: true },
-      });
-      if (giftVariant) {
-        orderLines.push({
-          variantId: giftVariant.id,
-          productId: giftVariant.productId,
-          skuCode: giftVariant.skuCode,
-          barcode: giftVariant.barcode,
-          variantName: `[🎁 Quà tặng ĐH >= 500k] ${giftVariant.variantName}`,
-          imageUrl: giftVariant.imageUrl,
-          quantity: 1,
-          retailPrice: 0,
-          discountPercent: 100,
-          discountAmount: 0,
-          finalUnitPrice: 0,
-          lineTotalAmount: 0,
-          costPrice: Number(giftVariant.costPrice || 0),
-          weightGrams: Number(giftVariant.weightGrams || 100),
-          isBundleBom: false,
-          isFreeGift: true,
-          warehouseId: primaryWh.id,
-          warehouseName: primaryWh.name,
-        });
+    // 5. Đánh giá Quy tắc Quà tặng kèm 0đ Động do Người bán tự cấu hình (`catalogConfig.freeGiftRules` — F05.7)
+    const activeGiftRules = (catalogConfig.freeGiftRules || []).filter((r) => r.isActive);
+    for (const rule of activeGiftRules) {
+      if (subtotalAmount < Number(rule.minOrderSubtotalVnd || 0)) continue;
+      if (rule.requiredCategoryId && !orderedCategoryIds.has(rule.requiredCategoryId)) {
+        continue;
       }
+
+      const giftVariant = await this.variantRepo.findOne({
+        where: { id: rule.giftVariantId, shopId, isActive: true },
+      });
+      if (!giftVariant) continue;
+
+      const giftStock = await this.stockRepo.findOne({
+        where: { shopId, warehouseId: primaryWh.id, variantId: giftVariant.id },
+      });
+      const giftQty = Math.max(1, Number(rule.giftQty || 1));
+      if (!giftStock || giftStock.availableQty < giftQty) continue;
+
+      orderLines.push({
+        variantId: giftVariant.id,
+        productId: giftVariant.productId,
+        skuCode: giftVariant.skuCode,
+        barcode: giftVariant.barcode,
+        variantName: `[🎁 ${rule.ruleName}] ${giftVariant.variantName}`,
+        imageUrl: giftVariant.imageUrl,
+        quantity: giftQty,
+        retailPrice: 0,
+        discountPercent: 100,
+        discountAmount: 0,
+        finalUnitPrice: 0,
+        lineTotalAmount: 0,
+        costPrice: Number(giftVariant.costPrice || 0),
+        weightGrams: Number(giftVariant.weightGrams || 100) * giftQty,
+        isBundleBom: false,
+        isFreeGift: true,
+        warehouseId: primaryWh.id,
+        warehouseName: primaryWh.name,
+      });
     }
 
     const effectiveDiscountPercent =
@@ -531,7 +534,7 @@ export class InChatPosAndOrderRouterService {
     const customerShippingCharge = dto.isFreeShippingForCustomer ? 0 : shippingFeeAmount;
 
     const pointsRedeemed = Math.max(0, Number(dto.loyaltyPointsRedeemed || 0));
-    const pointsDiscountVnd = pointsRedeemed * 1000; // 1 điểm = 1.000đ
+    const pointsDiscountVnd = pointsRedeemed * 1000;
     const walletApplied = Math.max(0, Number(dto.walletCreditAppliedAmount || 0));
 
     const totalPayableAmount = Math.max(
@@ -543,7 +546,6 @@ export class InChatPosAndOrderRouterService {
         walletApplied,
     );
 
-    // Nếu khách hàng có rủi ro bom hàng cao (`HIGH_RISK_RED`), bắt buộc thu cọc trước tối thiểu 30% qua VietQR
     const isHighRiskCustomer = Boolean(enrichedCustomer?.trustEvaluation?.requireDepositVietQr);
     const depositRequiredAmount = isHighRiskCustomer
       ? Math.max(50000, Math.round(totalPayableAmount * 0.3))
@@ -570,9 +572,15 @@ export class InChatPosAndOrderRouterService {
     const orderCode = this.generateOrderCode();
     const vietQrAmount =
       depositRequiredAmount > 0 ? depositRequiredAmount : Math.max(1000, totalPayableAmount);
+    const bankCfg = catalogConfig.vietQrBankConfig;
     const vietqrPayload = this.vietQrService.buildDynamicVietQrPayload({
       orderCode,
       amountVnd: vietQrAmount,
+      bankBin: bankCfg?.bankBin,
+      bankShortName: bankCfg?.bankShortName,
+      accountNumber: bankCfg?.accountNumber,
+      accountName: bankCfg?.accountName,
+      transferPrefix: bankCfg?.transferPrefix,
     });
 
     const estimatedNetProfitAmount = totalPayableAmount - cogsSnapshotAmount - shippingFeeAmount;
@@ -645,7 +653,6 @@ export class InChatPosAndOrderRouterService {
       }),
     );
 
-    // 6. Nếu khách đặt các mặt hàng nằm ở nhiều kho khác nhau và bật `allowMultiWarehouseSplit`, tự động tách đơn con (F06.6)
     const splitChildOrders: PosOrderEntity[] = [];
     if (
       dto.allowMultiWarehouseSplit &&
@@ -655,7 +662,7 @@ export class InChatPosAndOrderRouterService {
       const childIds: string[] = [];
       for (let idx = 0; idx < routingPlan.allocationsByWarehouse.length; idx++) {
         const alloc = routingPlan.allocationsByWarehouse[idx];
-        const suffixLetter = String.fromCharCode(65 + idx); // A, B, C
+        const suffixLetter = String.fromCharCode(65 + idx);
         const childCode = `${orderCode}-${suffixLetter}`;
         const childLines = orderLines.filter((l) => l.warehouseId === alloc.warehouseId);
         const childSubtotal = childLines.reduce((s, l) => s + l.lineTotalAmount, 0);
@@ -684,7 +691,6 @@ export class InChatPosAndOrderRouterService {
       await this.orderRepo.save(primaryOrder);
     }
 
-    // 7. Nếu vượt trần giảm giá, bắn sự kiện và thông báo phê duyệt 1 chạm cho Quản lý (F06.3)
     if (requiresManagerDiscountApproval) {
       const managers = await this.memberRepo.find({
         where: { shopId, membershipStatus: MembershipStatusEnum.ACTIVE },
@@ -732,7 +738,6 @@ export class InChatPosAndOrderRouterService {
       }
     }
 
-    // 8. Trừ điểm tích lũy hoặc số dư Ví tiền thừa nếu có áp dụng trên đơn (F11.4)
     if (customer && pointsRedeemed > 0) {
       await this.rfmAndLoyaltyService
         .adjustCustomerWalletOrPoints({
@@ -767,7 +772,6 @@ export class InChatPosAndOrderRouterService {
         .catch(() => null);
     }
 
-    // 9. Bắn sự kiện InitiateCheckout / Purchase về Meta CAPI nếu có conversationId (F11.1)
     if (dto.conversationId) {
       await this.adsConversionSyncService
         .dispatchConversionEvent(shopId, {
@@ -797,7 +801,6 @@ export class InChatPosAndOrderRouterService {
 
   /**
    * F06.5: Gộp đơn trùng khách 1 chạm (`Merge Duplicate Orders`)
-   * Hợp nhất các mặt hàng mới vào đơn hàng chưa xuất kho để tiết kiệm phí vận chuyển.
    */
   public async mergeDuplicateOrdersOneClick(params: {
     shopId: string;
@@ -805,9 +808,12 @@ export class InChatPosAndOrderRouterService {
     dto: MergeDuplicatePosOrdersDto;
   }): Promise<PosOrderEntity> {
     const { shopId, actorUserId, dto } = params;
-    const primaryOrder = await this.orderRepo.findOne({
-      where: { id: dto.targetPrimaryOrderId, shopId },
-    });
+    const [primaryOrder, catalogConfig] = await Promise.all([
+      this.orderRepo.findOne({
+        where: { id: dto.targetPrimaryOrderId, shopId },
+      }),
+      this.catalogService.getShopCatalogAndPosConfig(shopId),
+    ]);
     if (!primaryOrder) {
       throw new NotFoundException('PRIMARY_POS_ORDER_NOT_FOUND');
     }
@@ -909,6 +915,7 @@ export class InChatPosAndOrderRouterService {
         Number(primaryOrder.walletCreditAppliedAmount || 0),
     );
 
+    const bankCfg = catalogConfig.vietQrBankConfig;
     primaryOrder.itemsJson = mergedLines;
     primaryOrder.mergedFromOrderIdsJson = Array.from(mergedFromIds);
     primaryOrder.totalWeightGrams = nextWeight;
@@ -925,6 +932,11 @@ export class InChatPosAndOrderRouterService {
     primaryOrder.vietqrPayloadJson = this.vietQrService.buildDynamicVietQrPayload({
       orderCode: primaryOrder.orderCode,
       amountVnd: primaryOrder.codCollectAmount || nextPayable,
+      bankBin: bankCfg?.bankBin,
+      bankShortName: bankCfg?.bankShortName,
+      accountNumber: bankCfg?.accountNumber,
+      accountName: bankCfg?.accountName,
+      transferPrefix: bankCfg?.transferPrefix,
     });
 
     return this.orderRepo.save(primaryOrder);

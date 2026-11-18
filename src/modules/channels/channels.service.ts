@@ -55,6 +55,11 @@ import { ConversationRoutingEngine } from './routing/conversation-routing.engine
 import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
 
+/**
+ * App ID cố định của công cụ Meta Business Suite / Facebook Page Inbox theo chuẩn Meta Handover Protocol
+ */
+export const META_BUSINESS_SUITE_INBOX_APP_ID = '263902037430900';
+
 export interface NormalizedOmnichannelEvent {
   externalPageId: string;
   externalThreadId: string;
@@ -66,7 +71,12 @@ export interface NormalizedOmnichannelEvent {
   interactionType: ConversationInteractionType;
   verb: 'add' | 'edited' | 'remove';
   isEchoFromPage: boolean;
-  eventSubtype: 'MESSAGE_OR_COMMENT' | 'DELIVERY_RECEIPT' | 'READ_RECEIPT';
+  isStandbyChannel?: boolean;
+  echoSourceAppId?: string | null;
+  eventSubtype: 'MESSAGE_OR_COMMENT' | 'DELIVERY_RECEIPT' | 'READ_RECEIPT' | 'HANDOVER_PROTOCOL';
+  handoverAction?: 'PASS_THREAD_CONTROL' | 'TAKE_THREAD_CONTROL' | 'REQUEST_THREAD_CONTROL' | null;
+  handoverTargetAppId?: string | null;
+  handoverMetadata?: string | null;
   watermarkTimestampMs?: number | null;
   deliveredMessageIds?: string[];
   sourcePostId: string | null;
@@ -208,14 +218,20 @@ export const DEFAULT_SUBSCRIBED_FIELDS_BY_PLATFORM: Record<ChannelTypeEnum, stri
     'message_deliveries',
     'message_reads',
     'message_echoes',
+    'messaging_handovers',
+    'standby',
     'feed',
     'live_videos',
     'group_feed',
   ],
   [ChannelTypeEnum.INSTAGRAM]: [
     'messages',
+    'messaging_postbacks',
     'messaging_referral',
-    'message_Read',
+    'message_reactions',
+    'message_reads',
+    'messaging_handovers',
+    'standby',
     'comments',
     'live_comments',
   ],
@@ -929,12 +945,16 @@ export class ChannelsService {
         : envs.omnichannelSaas.metaWebhookVerifyToken) ||
       'pancake_seller_os_verify_token';
 
-    const subscribedFields =
+    const rawSubscribedFields =
       params.overrideSubscribedFields && params.overrideSubscribedFields.length > 0
         ? params.overrideSubscribedFields
         : matchedProfile?.subscribedFields && matchedProfile.subscribedFields.length > 0
           ? matchedProfile.subscribedFields
           : DEFAULT_SUBSCRIBED_FIELDS_BY_PLATFORM[params.channelType] || [];
+    const subscribedFields = this.ensureMandatoryBidirectionalWebhookFields(
+      params.channelType,
+      rawSubscribedFields,
+    );
 
     return {
       saasProfile: matchedProfile,
@@ -2057,8 +2077,55 @@ export class ChannelsService {
   }
 
   /**
+   * Đảm bảo mọi kênh Facebook Fanpage & Instagram Business luôn có đủ các trường Webhook bắt buộc
+   * để nhận tin nhắn 2 chiều và đồng bộ song song với Meta Business Suite (`messages`, `message_echoes`, `standby`, `messaging_handovers`).
+   */
+  public ensureMandatoryBidirectionalWebhookFields(
+    channelType: ChannelTypeEnum,
+    fields?: string[] | null,
+  ): string[] {
+    const baseFields =
+      Array.isArray(fields) && fields.length > 0
+        ? [...fields]
+        : [...(DEFAULT_SUBSCRIBED_FIELDS_BY_PLATFORM[channelType] || [])];
+
+    if (channelType === ChannelTypeEnum.FACEBOOK_PAGE) {
+      const mandatoryFbFields = [
+        'messages',
+        'message_echoes',
+        'standby',
+        'messaging_handovers',
+        'messaging_postbacks',
+        'messaging_referrals',
+        'message_deliveries',
+        'message_reads',
+        'feed',
+        'live_videos',
+      ];
+      return Array.from(new Set([...baseFields, ...mandatoryFbFields]));
+    }
+
+    if (channelType === ChannelTypeEnum.INSTAGRAM) {
+      const mandatoryIgFields = [
+        'messages',
+        'messaging_postbacks',
+        'messaging_referral',
+        'message_reads',
+        'messaging_handovers',
+        'standby',
+        'comments',
+        'live_comments',
+      ];
+      return Array.from(new Set([...baseFields, ...mandatoryIgFields]));
+    }
+
+    return Array.from(new Set(baseFields));
+  }
+
+  /**
    * Tự động tiêm (`Auto-Inject`) và xác minh đăng ký Webhook (`subscribed_apps`) trên nền tảng
-   * ngay khi người dùng nhập Access Token.
+   * ngay khi người dùng nhập Access Token, đảm bảo luôn có `standby`, `messaging_handovers` và `message_echoes`
+   * để nhận tin nhắn khách hàng kể cả khi dùng song song với Meta Business Suite.
    */
   public async subscribeChannelWebhookOnPlatform(
     channel: ChannelIntegrationEntity,
@@ -2069,11 +2136,10 @@ export class ChannelsService {
     subscribedFields: string[];
     verifiedOnPlatform: boolean;
   }> {
-    const desiredFields =
-      customFields && customFields.length > 0
-        ? customFields
-        : DEFAULT_SUBSCRIBED_FIELDS_BY_PLATFORM[channel.channelType] ||
-          DEFAULT_SUBSCRIBED_FIELDS_BY_PLATFORM[ChannelTypeEnum.FACEBOOK_PAGE];
+    const desiredFields = this.ensureMandatoryBidirectionalWebhookFields(
+      channel.channelType,
+      customFields,
+    );
 
     if (
       channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
@@ -2098,6 +2164,36 @@ export class ChannelsService {
         };
       }
 
+      // Fallback: Nếu một số Page chưa được cấp quyền cho trường group_feed/live_videos, thử đăng ký tập trường cốt lõi
+      const coreMessagingFields = [
+        'messages',
+        'message_echoes',
+        'standby',
+        'messaging_handovers',
+        'messaging_postbacks',
+        'messaging_referrals',
+        'message_deliveries',
+        'message_reads',
+        'feed',
+      ];
+      const retryCoreRes = await this.callMetaGraphApi<{ success?: boolean }>({
+        apiVersion: apiVer,
+        path: `${channel.externalPageId}/subscribed_apps`,
+        method: 'POST',
+        body: {
+          subscribed_fields: coreMessagingFields,
+        },
+        accessToken: rawPageAccessToken,
+        appSecret: rawAppSecret,
+      });
+
+      if (retryCoreRes.ok) {
+        return {
+          subscribedFields: coreMessagingFields,
+          verifiedOnPlatform: true,
+        };
+      }
+
       return {
         subscribedFields: desiredFields,
         verifiedOnPlatform: false,
@@ -2107,6 +2203,144 @@ export class ChannelsService {
     return {
       subscribedFields: desiredFields,
       verifiedOnPlatform: true,
+    };
+  }
+
+  /**
+   * Giao thức Handover Protocol (Chiều 1: `take_thread_control`):
+   * Thu hồi quyền điều khiển luồng hội thoại từ Meta Business Suite (`263902037430900`) hoặc Secondary App về Primary App
+   * để đảm bảo hệ thống Seller OS luôn gửi và nhận sự kiện tức thì.
+   */
+  public async takeThreadControlFromBusinessSuite(params: {
+    channel: ChannelIntegrationEntity;
+    recipientPsid: string;
+    metadataNote?: string;
+  }): Promise<{ ok: boolean; errorMessage?: string | null }> {
+    const { channel, recipientPsid, metadataNote } = params;
+    if (
+      !recipientPsid ||
+      (channel.channelType !== ChannelTypeEnum.FACEBOOK_PAGE &&
+        channel.channelType !== ChannelTypeEnum.INSTAGRAM)
+    ) {
+      return { ok: false, errorMessage: 'UNSUPPORTED_CHANNEL_FOR_HANDOVER' };
+    }
+
+    const rawPageToken = this.messageCryptoService.decryptForConversation(
+      channel.accessTokenEncrypted,
+      channel.shopId,
+    );
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+
+    const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+    const res = await this.callMetaGraphApi<{ success?: boolean }>({
+      apiVersion: apiVer,
+      path: `${channel.externalPageId}/take_thread_control`,
+      method: 'POST',
+      body: {
+        recipient: { id: recipientPsid },
+        metadata: metadataNote || 'seller_os_auto_take_thread_control',
+      },
+      accessToken: rawPageToken,
+      appSecret: rawAppSecret,
+    });
+
+    return {
+      ok: res.ok,
+      errorMessage: res.errorMessage,
+    };
+  }
+
+  /**
+   * Giao thức Handover Protocol (Chiều 2: `pass_thread_control`):
+   * Chuyển quyền điều khiển luồng hội thoại sang Meta Business Suite / Page Inbox (`263902037430900`)
+   * giúp cuộc hội thoại hiển thị trong mục "Hộp thư chính (Main Inbox)" trên ứng dụng Meta Business Suite của chủ shop
+   * thay vì bị ẩn vào thư mục "Đã xong (Done)", trong khi hệ thống Seller OS vẫn nhận trọn vẹn tin nhắn qua kênh `standby` và `message_echoes`.
+   */
+  public async passThreadControlToBusinessSuite(params: {
+    channel: ChannelIntegrationEntity;
+    recipientPsid: string;
+    targetAppId?: string;
+    metadataNote?: string;
+  }): Promise<{ ok: boolean; errorMessage?: string | null }> {
+    const { channel, recipientPsid, targetAppId, metadataNote } = params;
+    if (
+      !recipientPsid ||
+      (channel.channelType !== ChannelTypeEnum.FACEBOOK_PAGE &&
+        channel.channelType !== ChannelTypeEnum.INSTAGRAM)
+    ) {
+      return { ok: false, errorMessage: 'UNSUPPORTED_CHANNEL_FOR_HANDOVER' };
+    }
+
+    const rawPageToken = this.messageCryptoService.decryptForConversation(
+      channel.accessTokenEncrypted,
+      channel.shopId,
+    );
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+
+    const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+    const res = await this.callMetaGraphApi<{ success?: boolean }>({
+      apiVersion: apiVer,
+      path: `${channel.externalPageId}/pass_thread_control`,
+      method: 'POST',
+      body: {
+        recipient: { id: recipientPsid },
+        target_app_id: (targetAppId || META_BUSINESS_SUITE_INBOX_APP_ID).trim(),
+        metadata: metadataNote || 'seller_os_sync_with_meta_business_suite',
+      },
+      accessToken: rawPageToken,
+      appSecret: rawAppSecret,
+    });
+
+    return {
+      ok: res.ok,
+      errorMessage: res.errorMessage,
+    };
+  }
+
+  /**
+   * Kiểm tra ứng dụng nào đang giữ quyền sở hữu hội thoại (`thread_owner`) trên Meta Messenger Platform
+   */
+  public async getThreadOwnerOnMeta(params: {
+    channel: ChannelIntegrationEntity;
+    recipientPsid: string;
+  }): Promise<{ ownerAppId: string | null; isOwnedByBusinessSuite: boolean }> {
+    const { channel, recipientPsid } = params;
+    if (!recipientPsid) {
+      return { ownerAppId: null, isOwnedByBusinessSuite: false };
+    }
+
+    const rawPageToken = this.messageCryptoService.decryptForConversation(
+      channel.accessTokenEncrypted,
+      channel.shopId,
+    );
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+
+    const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+    const res = await this.callMetaGraphApi<{
+      data?: Array<{ thread_owner?: { app_id?: string } }>;
+    }>({
+      apiVersion: apiVer,
+      path: `${channel.externalPageId}/thread_owner`,
+      queryParams: {
+        recipient: recipientPsid,
+      },
+      accessToken: rawPageToken,
+      appSecret: rawAppSecret,
+    });
+
+    const ownerAppId = res.data?.data?.[0]?.thread_owner?.app_id
+      ? String(res.data.data[0].thread_owner.app_id)
+      : null;
+
+    return {
+      ownerAppId,
+      isOwnedByBusinessSuite: ownerAppId === META_BUSINESS_SUITE_INBOX_APP_ID,
     };
   }
 
@@ -3352,17 +3586,21 @@ export class ChannelsService {
           }
         }
 
-        // 2. Duyệt toàn bộ mảng messaging[] (và standby[])
-        const messagingArrays = [
-          ...(Array.isArray(entryItem?.messaging) ? entryItem.messaging : []),
-          ...(Array.isArray(entryItem?.standby) ? entryItem.standby : []),
-        ];
+        // 2. Duyệt toàn bộ mảng messaging[] (kênh chính) và standby[] (kênh dự phòng khi Meta Business Suite 263902037430900 đang giữ Thread Control)
+        const primaryMessagingList = Array.isArray(entryItem?.messaging)
+          ? entryItem.messaging.map((item: any) => ({ item, isStandby: false }))
+          : [];
+        const standbyMessagingList = Array.isArray(entryItem?.standby)
+          ? entryItem.standby.map((item: any) => ({ item, isStandby: true }))
+          : [];
+        const messagingArrays = [...primaryMessagingList, ...standbyMessagingList];
 
         for (let mIdx = 0; mIdx < messagingArrays.length; mIdx++) {
-          const msgItem = messagingArrays[mIdx];
+          const { item: msgItem, isStandby } = messagingArrays[mIdx];
           if (!msgItem) continue;
 
           const isMessagingEcho = Boolean(msgItem?.message?.is_echo);
+          const echoSourceAppId = msgItem?.message?.app_id ? String(msgItem.message.app_id) : null;
           const resolvedPageId = String(
             entryPageId || (isMessagingEcho ? msgItem.sender?.id : msgItem.recipient?.id) || '',
           ).trim();
@@ -3371,6 +3609,55 @@ export class ChannelsService {
               ? msgItem.recipient?.id
               : msgItem.sender?.id || `psid_${fallbackLogId.slice(0, 8)}_${mIdx}`,
           );
+
+          // 2.1. Xử lý sự kiện chuyển giao luồng hội thoại Handover Protocol (pass_thread_control, take_thread_control, request_thread_control)
+          if (
+            msgItem.pass_thread_control ||
+            msgItem.take_thread_control ||
+            msgItem.request_thread_control
+          ) {
+            const handoverAction = msgItem.pass_thread_control
+              ? 'PASS_THREAD_CONTROL'
+              : msgItem.take_thread_control
+                ? 'TAKE_THREAD_CONTROL'
+                : 'REQUEST_THREAD_CONTROL';
+            const targetAppId = String(
+              msgItem.pass_thread_control?.new_owner_app_id ||
+                msgItem.take_thread_control?.previous_owner_app_id ||
+                msgItem.request_thread_control?.requested_owner_app_id ||
+                META_BUSINESS_SUITE_INBOX_APP_ID,
+            );
+            const handoverMeta = String(
+              msgItem.pass_thread_control?.metadata ||
+                msgItem.take_thread_control?.metadata ||
+                msgItem.request_thread_control?.metadata ||
+                '',
+            );
+
+            events.push({
+              externalPageId: resolvedPageId,
+              externalThreadId: `inbox_${customerPsid}`,
+              externalCustomerPsid: customerPsid,
+              externalMessageId: `handover_${handoverAction}_${msgItem.timestamp || Date.now()}_${mIdx}`,
+              customerName: `Khách ${channelType} #${customerPsid.slice(-4)}`,
+              messageText: '',
+              interactionType: 'INBOX',
+              verb: 'add',
+              isEchoFromPage: false,
+              isStandbyChannel: isStandby,
+              eventSubtype: 'HANDOVER_PROTOCOL',
+              handoverAction,
+              handoverTargetAppId: targetAppId,
+              handoverMetadata: handoverMeta,
+              sourcePostId: null,
+              sourceAdId: null,
+              ctwaClickId: null,
+              externalCommentId: null,
+              parentCommentId: null,
+              mediaAttachmentUrl: null,
+            });
+            continue;
+          }
 
           if (msgItem.read?.watermark) {
             events.push({
@@ -3466,6 +3753,8 @@ export class ChannelsService {
             interactionType: 'INBOX',
             verb: 'add',
             isEchoFromPage: isMessagingEcho,
+            isStandbyChannel: isStandby,
+            echoSourceAppId,
             eventSubtype: 'MESSAGE_OR_COMMENT',
             sourcePostId: referral?.post_id ? String(referral.post_id) : null,
             sourceAdId: referral?.ad_id ? String(referral.ad_id) : null,
@@ -3493,7 +3782,11 @@ export class ChannelsService {
     const firstEntry = Array.isArray(payload?.entry) ? payload.entry[0] : null;
     const firstChange = Array.isArray(firstEntry?.changes) ? firstEntry.changes[0] : null;
     const changeVal = firstChange?.value || null;
-    const firstMessaging = Array.isArray(firstEntry?.messaging) ? firstEntry.messaging[0] : null;
+    const firstMessaging = Array.isArray(firstEntry?.messaging)
+      ? firstEntry.messaging[0]
+      : Array.isArray(firstEntry?.standby)
+        ? firstEntry.standby[0]
+        : null;
 
     const isMessagingEcho = Boolean(firstMessaging?.message?.is_echo);
     const externalPageId = String(
@@ -4061,7 +4354,36 @@ export class ChannelsService {
       }
     }
 
-    // 0.5. Xử lý sự kiện `message_echoes` hoặc bình luận từ chính Fanpage (`isEchoFromPage === true`)
+    // 0.1. Xử lý sự kiện Handover Protocol (`PASS_THREAD_CONTROL`, `TAKE_THREAD_CONTROL`, `REQUEST_THREAD_CONTROL`)
+    // Đồng bộ trạng thái chủ sở hữu luồng hội thoại giữa Seller OS và Meta Business Suite (263902037430900)
+    if (normalized.eventSubtype === 'HANDOVER_PROTOCOL') {
+      if (
+        normalized.handoverAction === 'REQUEST_THREAD_CONTROL' &&
+        normalized.externalCustomerPsid
+      ) {
+        await this.passThreadControlToBusinessSuite({
+          channel,
+          recipientPsid: normalized.externalCustomerPsid,
+          targetAppId: normalized.handoverTargetAppId || META_BUSINESS_SUITE_INBOX_APP_ID,
+          metadataNote: 'auto_grant_requested_thread_control',
+        }).catch(() => null);
+      }
+
+      const targetConv = await this.conversationRepo.findOne({
+        where: {
+          shopId: channel.shopId,
+          channelIntegrationId: channel.id,
+          externalThreadId: normalized.externalThreadId,
+        },
+      });
+      return {
+        conversationId: targetConv?.id || null,
+        assignedAgentId: targetConv?.assignedAgentId || null,
+      };
+    }
+
+    // 0.5. Xử lý sự kiện `message_echoes` (tin nhắn gửi từ Meta Business Suite / Page Inbox 263902037430900)
+    // hoặc bình luận từ chính Fanpage (`isEchoFromPage === true`)
     if (normalized.isEchoFromPage) {
       const existingOutbound = await this.messageRepo.findOne({
         where: {
@@ -4086,13 +4408,52 @@ export class ChannelsService {
 
       if (!isRootTestCommentOnPost) {
         if (channel.platformConfigJson?.syncEchoMessagesFromNativeApp !== false) {
-          const echoConv = await this.conversationRepo.findOne({
+          let echoConv = await this.conversationRepo.findOne({
             where: {
               shopId: channel.shopId,
               channelIntegrationId: channel.id,
               externalThreadId: normalized.externalThreadId,
             },
+            withDeleted: true,
           });
+
+          // Nếu nhân viên nhắn tin cho khách từ Meta Business Suite trên một hội thoại chưa từng có trong DB,
+          // tự động khởi tạo ConversationEntity & làm giàu hồ sơ khách hàng từ recipient PSID để đồng bộ 100% về Seller OS!
+          if (!echoConv && normalized.interactionType === 'INBOX') {
+            const enrichedBuyer = await this.enrichCustomerProfileByPsid({
+              channel,
+              externalCustomerPsid: normalized.externalCustomerPsid,
+              fallbackName: normalized.customerName,
+              initialAvatarUrl: normalized.customerAvatarUrl,
+            });
+            const nowCreate = new Date();
+            echoConv = await this.conversationRepo.save(
+              this.conversationRepo.create({
+                type: ConversationTypeEnum.DIRECT,
+                shopId: channel.shopId,
+                channelType: channel.channelType,
+                channelIntegrationId: channel.id,
+                externalThreadId: normalized.externalThreadId,
+                interactionType: 'INBOX',
+                name: enrichedBuyer.name,
+                avatar: enrichedBuyer.avatarUrl || undefined,
+                lastMessage: normalized.messageText,
+                lastMessageAt: nowCreate,
+                lastAgentReplyAt: nowCreate,
+                supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
+                isGhostedByAgent: false,
+                activeTagIdsJson: [],
+              }),
+            );
+
+            const activeMembersForEcho = await this.getCachedShopActiveMembers(channel.shopId);
+            const echoParticipantIds = activeMembersForEcho.map((m) => m.userId);
+            await this.ensureConversationParticipants(echoConv.id, echoParticipantIds);
+          } else if (echoConv?.deletedAt) {
+            await this.conversationRepo.restore(echoConv.id);
+            echoConv.deletedAt = null;
+          }
+
           if (echoConv) {
             const recentThreshold = new Date(Date.now() - 15_000);
             const recentOutboundMsgs = await this.messageRepo.find({
@@ -5133,6 +5494,157 @@ export class ChannelsService {
                 messageText: String(cmt.text || '[Bình luận Instagram]'),
                 mediaAttachmentUrl: null,
               });
+            }
+          }
+        }
+      }
+
+      // Đồng bộ chủ động Tin nhắn Hộp thư 2 chiều (`/{page_id}/conversations` — bao gồm cả tin nhắn khách gửi
+      // và tin nhắn nhân viên gửi từ Meta Business Suite) để đảm bảo không bao giờ sót tin nhắn ngay cả khi Webhook trễ
+      if (
+        channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
+        channel.channelType === ChannelTypeEnum.INSTAGRAM
+      ) {
+        const convRes = await this.callMetaGraphApi<{
+          data?: Array<{
+            id: string;
+            updated_time?: string;
+            participants?: {
+              data?: Array<{ id?: string; name?: string; username?: string }>;
+            };
+            messages?: {
+              data?: Array<{
+                id: string;
+                message?: string;
+                created_time?: string;
+                from?: { id?: string; name?: string; username?: string };
+                to?: { data?: Array<{ id?: string; name?: string; username?: string }> };
+                attachments?: {
+                  data?: Array<{
+                    image_data?: { url?: string };
+                    video_data?: { url?: string };
+                    file_url?: string;
+                  }>;
+                };
+                sticker?: string;
+              }>;
+            };
+          }>;
+        }>({
+          apiVersion: apiVer,
+          path: `${channel.externalPageId}/conversations`,
+          queryParams: {
+            fields:
+              'id,updated_time,participants,messages.limit(10){id,message,created_time,from,to,attachments,sticker}',
+            limit: '10',
+          },
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (convRes.ok && Array.isArray(convRes.data?.data)) {
+          syncedFromLiveApi = true;
+          const candidateInboxMsgs: Array<{
+            mid: string;
+            customerPsid: string;
+            customerName: string;
+            isEchoFromPage: boolean;
+            text: string;
+            mediaUrl: string | null;
+          }> = [];
+
+          for (const threadObj of convRes.data.data) {
+            const participantsList = Array.isArray(threadObj?.participants?.data)
+              ? threadObj.participants.data
+              : [];
+            const customerParticipant = participantsList.find(
+              (p) => p?.id && String(p.id) !== channel.externalPageId,
+            );
+            const msgList = Array.isArray(threadObj?.messages?.data)
+              ? [...threadObj.messages.data].reverse()
+              : [];
+
+            for (const m of msgList) {
+              if (!m?.id) continue;
+              const fromId = String(m.from?.id || '');
+              const isEcho = Boolean(fromId && fromId === channel.externalPageId);
+              const resolvedPsid = String(
+                (!isEcho ? fromId : customerParticipant?.id || m.to?.data?.[0]?.id) || '',
+              );
+              if (!resolvedPsid) continue;
+
+              const resolvedCustomerName = String(
+                (!isEcho
+                  ? m.from?.name || m.from?.username
+                  : customerParticipant?.name || customerParticipant?.username) ||
+                  `Khách ${channel.pageShortCode} #${resolvedPsid.slice(-4)}`,
+              );
+              const firstAtt = Array.isArray(m.attachments?.data) ? m.attachments.data[0] : null;
+              const mediaUrl =
+                firstAtt?.image_data?.url ||
+                firstAtt?.video_data?.url ||
+                firstAtt?.file_url ||
+                m.sticker ||
+                null;
+              const text = String(m.message || (mediaUrl ? '[Khách hàng gửi tệp đính kèm]' : ''));
+              if (!text) continue;
+
+              candidateInboxMsgs.push({
+                mid: m.id,
+                customerPsid: resolvedPsid,
+                customerName: resolvedCustomerName,
+                isEchoFromPage: isEcho,
+                text,
+                mediaUrl,
+              });
+            }
+          }
+
+          if (candidateInboxMsgs.length > 0) {
+            const inboxMids = candidateInboxMsgs.map((m) => m.mid);
+            const existingInboxRows = await this.messageRepo.find({
+              where: {
+                shopId: channel.shopId,
+                externalMessageId: In(inboxMids),
+              },
+              select: ['externalMessageId'],
+            });
+            const existingMidSet = new Set(
+              existingInboxRows.map((r) => r.externalMessageId).filter(Boolean) as string[],
+            );
+
+            for (const item of candidateInboxMsgs) {
+              if (existingMidSet.has(item.mid)) continue;
+              const normalizedInboxEvt: NormalizedOmnichannelEvent = {
+                externalPageId: channel.externalPageId,
+                externalThreadId: `inbox_${item.customerPsid}`,
+                externalCustomerPsid: item.customerPsid,
+                externalMessageId: item.mid,
+                customerName: item.customerName,
+                customerAvatarUrl: null,
+                messageText: item.text,
+                interactionType: 'INBOX',
+                verb: 'add',
+                isEchoFromPage: item.isEchoFromPage,
+                echoSourceAppId: item.isEchoFromPage ? META_BUSINESS_SUITE_INBOX_APP_ID : null,
+                eventSubtype: 'MESSAGE_OR_COMMENT',
+                sourcePostId: null,
+                sourceAdId: null,
+                ctwaClickId: null,
+                externalCommentId: null,
+                parentCommentId: null,
+                mediaAttachmentUrl: item.mediaUrl,
+              };
+
+              const syncedInbox = await this.withConversationThreadLock(
+                channel.shopId,
+                channel.id,
+                normalizedInboxEvt.externalThreadId,
+                () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedInboxEvt),
+              );
+              if (syncedInbox.conversationId) {
+                newCommentsSynced += 1;
+              }
             }
           }
         }
