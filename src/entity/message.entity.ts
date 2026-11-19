@@ -4,6 +4,7 @@ import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 
 import { BaseModel } from './base-model';
 import { ConversationEntity } from './conversation.entity';
+import { CustomerAbuseReportItem } from './customer-profile.entity';
 import { UserEntity } from './user.entity';
 
 export enum MessageDirectionEnum {
@@ -36,6 +37,7 @@ export interface ExtractedPhoneTrustSummary {
   lookupSource: string;
   lookupSourceLabel: string;
   latestReportReason?: string | null;
+  reportedReasons?: CustomerAbuseReportItem[];
   checkedAt: string;
 }
 

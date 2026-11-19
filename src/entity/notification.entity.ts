@@ -5,6 +5,7 @@ import { BaseModel } from './base-model';
 import { UserEntity } from './user.entity';
 
 export interface NotificationMetadata {
+  shopId?: string;
   conversationId?: string;
   conversationName?: string;
   conversationType?: string;
@@ -19,6 +20,18 @@ export interface NotificationMetadata {
   actorName?: string;
   usedCount?: number;
   hourlyLimit?: number;
+  // Sprint 4 — POS, VietQR, Multi-Warehouse & Inventory Notification Metadata
+  orderId?: string;
+  orderCode?: string;
+  discountPercent?: number;
+  allowedMaxDiscountPercent?: number;
+  paidAmountVnd?: number;
+  bankTransactionId?: string;
+  transferId?: string;
+  transferCode?: string;
+  skuCode?: string;
+  warehouseId?: string;
+  serialNumber?: string;
   // Bổ sung cho đa ngôn ngữ (i18n) trên FE
   titleKey?: string;
   contentKey?: string;

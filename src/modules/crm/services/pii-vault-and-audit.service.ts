@@ -60,7 +60,7 @@ export class PiiVaultAndAuditService {
   public maskPhoneNumber(rawPhone?: string | null): string | null {
     if (!rawPhone) return null;
     const clean = this.normalizeLocalVietnamesePhone(rawPhone);
-    if (clean.length < 7) return '098***678';
+    if (clean.length < 7) return null;
     return `${clean.slice(0, 3)}***${clean.slice(-3)}`;
   }
 
@@ -87,7 +87,7 @@ export class PiiVaultAndAuditService {
     phoneSearchHash: string;
   } {
     const normalizedPhone = this.normalizeLocalVietnamesePhone(rawPhone);
-    const phoneMasked = this.maskPhoneNumber(normalizedPhone) || '098***678';
+    const phoneMasked = this.maskPhoneNumber(normalizedPhone) || '';
     const phoneEncrypted = this.messageCryptoService.encryptForConversation(
       normalizedPhone,
       `pii_vault:${shopId}`,
@@ -365,9 +365,7 @@ export class PiiVaultAndAuditService {
     }
 
     const decryptedPhone =
-      this.decryptPhoneInRam(params.shopId, customer.phoneEncrypted) ||
-      customer.phoneMasked ||
-      '0981234567';
+      this.decryptPhoneInRam(params.shopId, customer.phoneEncrypted) || customer.phoneMasked || '';
 
     const auditEntry = await this.recordSecurityAuditLog({
       shopId: params.shopId,
@@ -396,7 +394,7 @@ export class PiiVaultAndAuditService {
     return {
       customerId: customer.id,
       unmaskedPhone: decryptedPhone,
-      phoneMasked: customer.phoneMasked || this.maskPhoneNumber(decryptedPhone) || '098***678',
+      phoneMasked: customer.phoneMasked || this.maskPhoneNumber(decryptedPhone) || '',
       expiresInSeconds,
       expiresAt,
       hourlyQuotaLimit: hourlyLimit,

@@ -22,6 +22,7 @@ import { ChannelsService } from './channels.service';
 import { ConversationSlaProcessor } from './queues/conversation-sla.processor';
 import { ConversationRoutingEngine } from './routing/conversation-routing.engine';
 import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
+import { ChannelsPublicAvatarController } from './services/channels-public-avatar.controller';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
 import { OmnibusWebhookController } from './webhooks/omnibus-webhook.controller';
 
@@ -47,7 +48,7 @@ import { OmnibusWebhookController } from './webhooks/omnibus-webhook.controller'
     CrmModule,
     NotificationsModule,
   ],
-  controllers: [ChannelsController, OmnibusWebhookController],
+  controllers: [ChannelsController, ChannelsPublicAvatarController, OmnibusWebhookController],
   providers: [
     ChannelsService,
     ConversationRoutingEngine,

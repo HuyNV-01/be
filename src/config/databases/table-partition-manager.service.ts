@@ -19,6 +19,7 @@ export class TablePartitionManagerService implements OnApplicationBootstrap {
     'call_participants',
     'channel_webhook_logs',
     'security_audit_logs',
+    'inventory_movement_ledgers',
   ];
   private readonly MONTHS_AHEAD = 3;
 

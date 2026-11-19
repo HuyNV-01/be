@@ -56,76 +56,13 @@ export const DEFAULT_INDUSTRY_ATTRIBUTE_TEMPLATES: Record<
   ShopBusinessCategoryEnum,
   Array<{ key: string; label: string; placeholder: string }>
 > = {
-  [ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY]: [
-    {
-      key: 'preferred_product',
-      label: 'Nhóm sản phẩm quan tâm',
-      placeholder: 'VD: Gia dụng thông minh',
-    },
-    {
-      key: 'delivery_time_window',
-      label: 'Khung giờ nhận hàng',
-      placeholder: 'VD: Giờ hành chính 9h-17h',
-    },
-  ],
-  [ShopBusinessCategoryEnum.FASHION_APPAREL]: [
-    {
-      key: 'style_preference',
-      label: 'Phong cách yêu thích',
-      placeholder: 'VD: Công sở thanh lịch, màu pastel',
-    },
-    { key: 'shoe_size', label: 'Cỡ giày dép', placeholder: 'VD: Size 37' },
-  ],
-  [ShopBusinessCategoryEnum.COSMETICS_BEAUTY]: [
-    { key: 'skin_type', label: 'Loại da', placeholder: 'VD: Da hỗn hợp thiên dầu / Nhạy cảm' },
-    {
-      key: 'skin_concern',
-      label: 'Tình trạng quan tâm',
-      placeholder: 'VD: Mụn ẩn, dưỡng sáng, cấp ẩm',
-    },
-    {
-      key: 'allergy_history',
-      label: 'Tiền sử kích ứng',
-      placeholder: 'VD: Dị ứng cồn khô / hương liệu',
-    },
-  ],
-  [ShopBusinessCategoryEnum.ELECTRONICS_TECH]: [
-    {
-      key: 'device_model',
-      label: 'Thiết bị / Hệ sinh thái đang dùng',
-      placeholder: 'VD: iPhone 16 Pro Max / MacBook',
-    },
-    {
-      key: 'serial_imei',
-      label: 'Serial / IMEI bảo hành gần nhất',
-      placeholder: 'VD: SN-882910293',
-    },
-    {
-      key: 'warranty_tier',
-      label: 'Chế độ bảo hành',
-      placeholder: 'VD: Bảo hành 1 đổi 1 12 tháng',
-    },
-  ],
-  [ShopBusinessCategoryEnum.FOOD_BEVERAGE]: [
-    {
-      key: 'taste_preference',
-      label: 'Khẩu vị yêu thích',
-      placeholder: 'VD: Ít ngọt, cay vừa, không hành',
-    },
-    {
-      key: 'food_allergy',
-      label: 'Lưu ý dị ứng thực phẩm',
-      placeholder: 'VD: Dị ứng hải sản / đậu phộng',
-    },
-  ],
-  [ShopBusinessCategoryEnum.MOTHER_AND_BABY]: [
-    { key: 'baby_age_months', label: 'Tháng tuổi của bé', placeholder: 'VD: Bé 14 tháng tuổi' },
-    {
-      key: 'diaper_milk_brand',
-      label: 'Dòng bỉm / sữa đang dùng',
-      placeholder: 'VD: Bỉm dán size L, sữa số 2',
-    },
-  ],
+  [ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY]: [],
+  [ShopBusinessCategoryEnum.FASHION_APPAREL]: [],
+  [ShopBusinessCategoryEnum.COSMETICS_BEAUTY]: [],
+  [ShopBusinessCategoryEnum.ELECTRONICS_TECH]: [],
+  [ShopBusinessCategoryEnum.FOOD_BEVERAGE]: [],
+  [ShopBusinessCategoryEnum.MOTHER_AND_BABY]: [],
+  [ShopBusinessCategoryEnum.HOME_LIVING_APPLIANCES]: [],
 };
 
 @Injectable()
@@ -211,7 +148,7 @@ export class Customer360Service {
   }
 
   /**
-   * Cập nhật cấu hình Nguồn dữ liệu Tra cứu Uy tín SĐT & Cấu hình Ngành hàng Cửa hàng
+   * Cập nhật cấu hình nguồn tra cứu tín nhiệm & ngành hàng CRM 360° (tương thích cả tên field BE và alias FE)
    */
   public async updateShopCrmTrustAndIndustryConfig(params: {
     shopId: string;
@@ -229,90 +166,97 @@ export class Customer360Service {
     }
 
     const current = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
-    const nextCategory = params.dto.businessCategory ?? current.businessCategory;
-    const categoryChanged =
-      params.dto.businessCategory !== undefined &&
-      params.dto.businessCategory !== current.businessCategory;
+    const dto = params.dto;
 
-    const encryptedCustomApiKey =
-      params.dto.customLookupApiKey && params.dto.customLookupApiKey.trim()
-        ? this.messageCryptoService.encryptForConversation(
-            params.dto.customLookupApiKey.trim(),
-            `pii_vault:${params.shopId}`,
-          ).ciphertext
-        : current.customLookupApiKeyEncrypted || null;
+    const enabledSourcesSet = new Set(
+      Array.isArray(dto.enabledLookupSources)
+        ? dto.enabledLookupSources.map((s) => String(s).toUpperCase())
+        : [],
+    );
+
+    const resolvedUseCommunity =
+      dto.usePancakeCommunityNetwork ??
+      dto.enableCommunityTrustLookup ??
+      (enabledSourcesSet.size > 0
+        ? enabledSourcesSet.has('PANCAKE_COMMUNITY')
+        : current.usePancakeCommunityNetwork);
+
+    const resolvedUseCarrier3pl =
+      dto.useCarrier3plLookup ??
+      dto.enableCarrier3plTrustLookup ??
+      (enabledSourcesSet.size > 0
+        ? enabledSourcesSet.has('CARRIER_3PL')
+        : current.useCarrier3plLookup);
+
+    const resolvedAutoMaskPhone =
+      dto.autoMaskBuyerPhoneInChat ??
+      dto.autoMaskPhoneInChatMessages ??
+      current.autoMaskBuyerPhoneInChat;
+
+    const resolvedAutoExtractAddress =
+      dto.autoExtractAddressFromChat ??
+      dto.autoExtractPhoneAndAddressInChat ??
+      current.autoExtractAddressFromChat;
+
+    let encryptedCustomApiKey = current.customLookupApiKeyEncrypted || null;
+    if (dto.customLookupApiKey !== undefined) {
+      const trimmedKey = dto.customLookupApiKey.trim();
+      encryptedCustomApiKey = trimmedKey
+        ? this.messageCryptoService.encryptForConversation(trimmedKey, `pii_vault:${params.shopId}`)
+            .ciphertext
+        : null;
+    }
+
+    const nextCategory =
+      (dto.businessCategory as ShopBusinessCategoryEnum) || current.businessCategory;
 
     const nextConfig: CrmTrustAndIndustryConfig = {
       enableAutoTrustLookupOnPhone:
-        params.dto.enableAutoTrustLookupOnPhone ?? current.enableAutoTrustLookupOnPhone,
-      useInternalPosHistory: params.dto.useInternalPosHistory ?? current.useInternalPosHistory,
-      usePancakeCommunityNetwork:
-        params.dto.usePancakeCommunityNetwork ??
-        params.dto.enableCommunityTrustLookup ??
-        current.usePancakeCommunityNetwork,
-      useCarrier3plLookup:
-        params.dto.useCarrier3plLookup ??
-        params.dto.enableCarrier3plTrustLookup ??
-        current.useCarrier3plLookup,
-      enabledCarriers: params.dto.enabledCarriers ?? current.enabledCarriers,
+        dto.enableAutoTrustLookupOnPhone ?? current.enableAutoTrustLookupOnPhone,
+      useInternalPosHistory: dto.useInternalPosHistory ?? current.useInternalPosHistory,
+      usePancakeCommunityNetwork: resolvedUseCommunity,
+      useCarrier3plLookup: resolvedUseCarrier3pl,
+      enabledCarriers:
+        Array.isArray(dto.enabledCarriers) && dto.enabledCarriers.length > 0
+          ? (dto.enabledCarriers.filter((c) => ['GHN', 'GHTK', 'VTP', 'JT'].includes(c)) as Array<
+              'GHN' | 'GHTK' | 'VTP' | 'JT'
+            >)
+          : current.enabledCarriers,
       customLookupWebhookUrl:
-        params.dto.customLookupWebhookUrl !== undefined
-          ? params.dto.customLookupWebhookUrl?.trim() || null
+        dto.customLookupWebhookUrl !== undefined
+          ? dto.customLookupWebhookUrl?.trim() || null
           : current.customLookupWebhookUrl,
       customLookupApiKeyEncrypted: encryptedCustomApiKey,
       highRiskReturnRateThresholdPercent:
-        params.dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
+        dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
       highRiskReportedCountThreshold:
-        params.dto.highRiskReportedCountThreshold ?? current.highRiskReportedCountThreshold,
-      autoMaskBuyerPhoneInChat:
-        params.dto.autoMaskBuyerPhoneInChat ??
-        params.dto.autoMaskPhoneInChatMessages ??
-        current.autoMaskBuyerPhoneInChat,
-      autoExtractAddressFromChat:
-        params.dto.autoExtractAddressFromChat ??
-        params.dto.autoExtractPhoneAndAddressInChat ??
-        current.autoExtractAddressFromChat,
+        dto.highRiskReportedCountThreshold ?? current.highRiskReportedCountThreshold,
+      autoMaskBuyerPhoneInChat: resolvedAutoMaskPhone,
+      autoExtractAddressFromChat: resolvedAutoExtractAddress,
       businessCategory: nextCategory,
       showApparelMeasurementsInProfile:
-        params.dto.showApparelMeasurementsInProfile !== undefined
-          ? params.dto.showApparelMeasurementsInProfile
-          : categoryChanged
-            ? nextCategory === ShopBusinessCategoryEnum.FASHION_APPAREL
-            : current.showApparelMeasurementsInProfile,
-      customAttributeTemplates:
-        params.dto.customAttributeTemplates !== undefined
-          ? params.dto.customAttributeTemplates
-          : categoryChanged
-            ? DEFAULT_INDUSTRY_ATTRIBUTE_TEMPLATES[nextCategory] || []
-            : current.customAttributeTemplates,
+        dto.showApparelMeasurementsInProfile ?? current.showApparelMeasurementsInProfile,
+      customAttributeTemplates: Array.isArray(dto.customAttributeTemplates)
+        ? dto.customAttributeTemplates.map((tpl) => ({
+            key: tpl.key,
+            label: tpl.label,
+            placeholder: tpl.placeholder || '',
+          }))
+        : current.customAttributeTemplates,
       updatedAt: new Date().toISOString(),
     };
 
     shop.crmTrustAndIndustryConfigJson = nextConfig;
-    if (params.dto.requireDepositOnHighRisk !== undefined) {
-      shop.requireDepositOnHighRisk = params.dto.requireDepositOnHighRisk;
+    if (dto.requireDepositOnHighRisk !== undefined) {
+      shop.requireDepositOnHighRisk = dto.requireDepositOnHighRisk;
     }
-    await this.shopRepo.save(shop);
 
-    await this.piiVaultService.recordSecurityAuditLog({
-      shopId: params.shopId,
-      actorUserId: params.actorUserId,
-      actionCode: SecurityAuditActionCodeEnum.CRM_SETTINGS_UPDATE,
-      targetResourceType: 'SHOP_CRM_CONFIG',
-      targetResourceId: params.shopId,
-      afterSnapshotJson: {
-        businessCategory: nextConfig.businessCategory,
-        usePancakeCommunityNetwork: nextConfig.usePancakeCommunityNetwork,
-        useCarrier3plLookup: nextConfig.useCarrier3plLookup,
-        hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
-        requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
-      },
-    });
+    await this.shopRepo.save(shop);
 
     return {
       ...nextConfig,
-      requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
-      hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
+      requireDepositOnHighRisk: shop.requireDepositOnHighRisk ?? true,
+      hasCustomLookupApiKey: Boolean(nextConfig.customLookupApiKeyEncrypted),
     };
   }
 
@@ -341,12 +285,14 @@ export class Customer360Service {
       checkedAt: customer.lastTrustLookupAt || customer.updatedAt,
     });
 
-    const clone = { ...customer } as CustomerProfileEntity & {
+    // Bảo toàn nguyên vẹn prototype của BaseEntity (hasId, save, remove, softRemove...) khi gắn thêm trustEvaluation
+    const clone = Object.assign(Object.create(Object.getPrototypeOf(customer)), customer, {
+      trustEvaluation,
+    }) as CustomerProfileEntity & {
       trustEvaluation: DeliveryTrustEvaluationResult;
     };
-    delete (clone as any).phoneEncrypted;
-    delete (clone as any).phoneSearchHash;
-    clone.trustEvaluation = trustEvaluation;
+    delete (clone as unknown as Record<string, unknown>).phoneEncrypted;
+    delete (clone as unknown as Record<string, unknown>).phoneSearchHash;
     return clone;
   }
 
@@ -357,7 +303,7 @@ export class Customer360Service {
     const trust = enrichedCustomer.trustEvaluation;
     return {
       customerId: enrichedCustomer.id,
-      phoneMasked: enrichedCustomer.phoneMasked || '098***678',
+      phoneMasked: enrichedCustomer.phoneMasked || '',
       carrierName: carrierName || 'VN Telecom',
       score: trust.score,
       band: trust.band,
@@ -379,6 +325,7 @@ export class Customer360Service {
       lookupSourceLabel: trust.lookupSourceLabel,
       latestReportReason:
         trust.reportedReasons?.[0]?.reason || enrichedCustomer.blacklistReason || null,
+      reportedReasons: trust.reportedReasons || [],
       checkedAt: trust.checkedAt,
     };
   }
@@ -464,6 +411,8 @@ export class Customer360Service {
       firstExtractedPhone && crmConfig.enableAutoTrustLookupOnPhone !== false
         ? await this.trustScoreService.lookupPhoneReputationFromSources({
             rawPhone: firstExtractedPhone,
+            phoneSearchHash: encryptedPhonePack?.phoneSearchHash || null,
+            excludeShopId: shopId,
             config: crmConfig,
             decryptedCustomApiKey: decryptedCustomKey,
           })
@@ -564,7 +513,12 @@ export class Customer360Service {
       if (customerName && !customerName.includes('#') && customer.fullName.includes('#')) {
         customer.fullName = customerName;
       }
-      if (customerAvatarUrl && !customer.avatarUrl) {
+      if (
+        customerAvatarUrl &&
+        (!customer.avatarUrl ||
+          (customer.avatarUrl.includes('api.dicebear.com') &&
+            !customerAvatarUrl.includes('api.dicebear.com')))
+      ) {
         customer.avatarUrl = customerAvatarUrl;
       }
       if (extractedNer.provinceCode) {
@@ -724,26 +678,38 @@ export class Customer360Service {
   }
 
   /**
-   * Tra cứu / Làm mới chỉ số Nhận, Hoàn, Bị báo cáo từ nguồn dữ liệu bên ngoài (Pancake Community + 3PL GHN/GHTK + Custom Webhook)
+   * Tra cứu / Làm mới chỉ số Nhận, Hoàn, Bị báo cáo từ đa nguồn (POS nội bộ + Cộng đồng Pancake v2/POS + VTP/GHN/GHTK/J&T/Shopee + Custom Webhook)
    */
   public async refreshCustomerTrustLookup(params: {
     shopId: string;
     customerId: string;
     dto?: LookupPhoneTrustFromSourcesDto;
-  }): Promise<CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }> {
+  }): Promise<
+    CustomerProfileEntity & {
+      trustEvaluation: DeliveryTrustEvaluationResult;
+      lookupWarning?: string | null;
+    }
+  > {
     const customer = await this.customerRepo.findOne({
       where: { id: params.customerId, shopId: params.shopId },
     });
     if (!customer) {
-      throw new NotFoundException('CUSTOMER_PROFILE_NOT_FOUND');
+      throw new NotFoundException('Không tìm thấy hồ sơ khách hàng trong cửa hàng này');
     }
 
     const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
-    const decryptedPhone =
-      params.dto?.rawPhone?.trim() ||
-      this.piiVaultService.decryptPhoneInRam(params.shopId, customer.phoneEncrypted) ||
-      customer.phoneMasked ||
-      '0988123456';
+
+    // Giải mã SĐT an toàn trong RAM; nếu thất bại hoặc chưa có SĐT gốc vẫn tiếp tục tra cứu qua phoneSearchHash / phoneMasked
+    let decryptedPhone = params.dto?.rawPhone?.trim() || '';
+    if (!decryptedPhone && customer.phoneEncrypted) {
+      const candidate = this.piiVaultService.decryptPhoneInRam(
+        params.shopId,
+        customer.phoneEncrypted,
+      );
+      if (candidate && !candidate.includes('[')) {
+        decryptedPhone = candidate;
+      }
+    }
 
     const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
       params.shopId,
@@ -751,9 +717,15 @@ export class Customer360Service {
     );
 
     const lookupRes = await this.trustScoreService.lookupPhoneReputationFromSources({
-      rawPhone: decryptedPhone,
+      rawPhone: decryptedPhone || null,
+      phoneMasked: customer.phoneMasked || null,
+      phoneSearchHash: customer.phoneSearchHash || null,
+      excludeShopId: params.shopId,
+      customerId: customer.id,
       config: crmConfig,
       decryptedCustomApiKey: decryptedCustomKey,
+      overrideSources: params.dto?.sources || null,
+      overrideWebhookUrl: params.dto?.customWebhookUrl || null,
     });
 
     customer.networkDeliveredCount = Math.max(
@@ -767,16 +739,16 @@ export class Customer360Service {
     if (lookupRes.reportedCount > Number(customer.reportedCount || 0)) {
       customer.reportedCount = lookupRes.reportedCount;
     }
+
     const existingReports = Array.isArray(customer.reportedReasonsJson)
-      ? customer.reportedReasonsJson
+      ? [...customer.reportedReasonsJson]
       : [];
-    const existingIds = new Set(existingReports.map((r) => r.reportId));
-    for (const rep of lookupRes.reportedReasons) {
-      if (!existingIds.has(rep.reportId)) {
-        existingReports.push(rep);
-      }
-    }
-    customer.reportedReasonsJson = existingReports;
+    const mergedReports = this.trustScoreService.sortAndNormalizeAbuseReportsNewestFirst([
+      ...existingReports,
+      ...lookupRes.reportedReasons,
+    ]);
+    customer.reportedReasonsJson = mergedReports;
+    customer.reportedCount = Math.max(Number(customer.reportedCount || 0), mergedReports.length);
     customer.trustLookupSource = lookupRes.lookupSource;
     customer.lastTrustLookupAt = new Date();
 
@@ -787,6 +759,7 @@ export class Customer360Service {
       networkReturnedCount: customer.networkReturnedCount,
       reportedCount: customer.reportedCount,
       reportedReasons: customer.reportedReasonsJson,
+      sourceBreakdowns: lookupRes.sourceBreakdowns,
       isBlacklisted: customer.isBlacklisted,
       shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
       highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
@@ -798,13 +771,19 @@ export class Customer360Service {
     customer.deliveryTrustScore = evalRes.score;
 
     const saved = await this.customerRepo.save(customer);
-    const enriched = this.enrichCustomerWithTrustEvaluation(
+
+    const enrichedBase = this.enrichCustomerWithTrustEvaluation(
       saved,
       crmConfig.requireDepositOnHighRisk,
       crmConfig,
     );
+    enrichedBase.trustEvaluation = evalRes;
 
-    if (params.dto?.conversationId) {
+    const enriched = Object.assign(enrichedBase, {
+      lookupWarning: lookupRes.warningMessage,
+    });
+
+    if (params.dto?.conversationId && !params.dto.conversationId.startsWith('detail_')) {
       this.realtimeEmitter.emitToConversation(
         SOCKET_CONFIG.namespaces.CHAT,
         params.dto.conversationId,
@@ -970,274 +949,10 @@ export class Customer360Service {
   }
 
   /**
-   * Khởi tạo dữ liệu mẫu chuẩn nghiệp vụ cho cửa hàng mới nếu danh sách khách hàng đang trống
+   * Giữ phương thức tương thích ngược nhưng không tự động chèn dữ liệu khách hàng mẫu hardcode khi bảng `customer_profiles` đang trống.
    */
-  private async ensureSeededShopCustomersIfEmpty(shopId: string): Promise<void> {
-    const count = await this.customerRepo.count({ where: { shopId } });
-    if (count > 0) return;
-
-    const now = new Date();
-    const pack1 = this.piiVaultService.encryptRawPhoneForShop(shopId, '0988123456');
-    const pack2 = this.piiVaultService.encryptRawPhoneForShop(shopId, '0912345678');
-    const pack3 = this.piiVaultService.encryptRawPhoneForShop(shopId, '0977888999');
-
-    const seeds = [
-      this.customerRepo.create({
-        shopId,
-        code: 'KH-VIP-001',
-        fullName: 'Nguyễn Minh Anh',
-        avatarUrl: 'https://api.dicebear.com/7.x/initials/svg?seed=Nguyen+Minh+Anh',
-        phoneMasked: pack1.phoneMasked,
-        phoneEncrypted: pack1.phoneEncrypted,
-        phoneSearchHash: pack1.phoneSearchHash,
-        email: 'minhanh.nguyen@gmail.com',
-        defaultProvinceCode: 'VN-HN',
-        defaultProvinceName: 'Thành phố Hà Nội',
-        defaultDistrictCode: 'VN-HN-CG',
-        defaultDistrictName: 'Quận Cầu Giấy',
-        defaultWardCode: 'VN-HN-CG-QH',
-        defaultWardName: 'Phường Quan Hoa',
-        defaultHamletCode: 'VN-HN-CG-QH-H1',
-        defaultHamletName: 'Tổ dân phố số 1',
-        defaultAddressLine: 'Số 15 Ngõ 68 Cầu Giấy',
-        tier: CustomerTierEnum.VIP,
-        rfmScoreR: 5,
-        rfmScoreF: 5,
-        rfmScoreM: 5,
-        rfmSegmentCode: RfmSegmentCodeEnum.CHAMPIONS,
-        totalOrdersCount: 12,
-        successfulDeliveriesCount: 12,
-        returnedOrdersCount: 0,
-        networkDeliveredCount: 28,
-        networkReturnedCount: 0,
-        reportedCount: 0,
-        reportedReasonsJson: [],
-        trustLookupSource: PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
-        lastTrustLookupAt: now,
-        deliveryTrustScore: 98,
-        isBlacklisted: false,
-        lifetimeValueAmount: 18500000,
-        loyaltyPointsBalance: 1850,
-        walletCreditBalance: 250000,
-        industryCategory: ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY,
-        heightCm: 162,
-        weightKg: 51,
-        preferredSize: 'M',
-        customAttributesJson: [
-          {
-            key: 'preferred_product',
-            label: 'Nhóm sản phẩm quan tâm',
-            value: 'Sản phẩm cao cấp / Bộ sưu tập mới',
-          },
-          {
-            key: 'delivery_time_window',
-            label: 'Khung giờ nhận hàng',
-            value: 'Giờ hành chính (9h00 - 17h00)',
-          },
-        ],
-        notes: 'Khách VIP ưu tiên giao giờ hành chính.',
-        linkedExternalIdentitiesJson: [
-          {
-            channelType: ChannelTypeEnum.FACEBOOK_PAGE,
-            channelIntegrationId: null,
-            pageShortCode: 'FB-MAIN',
-            pageName: 'Fanpage Chính Thức',
-            externalUserId: 'psid_vip_001',
-            externalUsername: 'Nguyễn Minh Anh',
-            firstSeenAt: new Date(now.getTime() - 60 * 86400000).toISOString(),
-            lastSeenAt: now.toISOString(),
-          },
-          {
-            channelType: ChannelTypeEnum.ZALO_OA,
-            channelIntegrationId: null,
-            pageShortCode: 'ZALO-OA',
-            pageName: 'Zalo Official Account',
-            externalUserId: 'zalo_vip_001',
-            externalUsername: 'Minh Anh Nguyễn',
-            firstSeenAt: new Date(now.getTime() - 30 * 86400000).toISOString(),
-            lastSeenAt: now.toISOString(),
-          },
-        ],
-        recentOrdersSnapshotJson: [
-          {
-            orderId: 'ord_vip_01',
-            orderCode: 'DH-2611-089',
-            channelType: ChannelTypeEnum.FACEBOOK_PAGE,
-            pageShortCode: 'FB-MAIN',
-            totalAmount: 1650000,
-            status: 'DELIVERED_RECONCILED',
-            carrierCode: 'GHN',
-            trackingNumber: 'GHN8829102',
-            createdAt: new Date(now.getTime() - 3 * 86400000).toISOString(),
-          },
-          {
-            orderId: 'ord_vip_02',
-            orderCode: 'DH-2610-042',
-            channelType: ChannelTypeEnum.ZALO_OA,
-            pageShortCode: 'ZALO-OA',
-            totalAmount: 2150000,
-            status: 'DELIVERED_RECONCILED',
-            carrierCode: 'GHTK',
-            trackingNumber: 'S21902.GHTK.991',
-            createdAt: new Date(now.getTime() - 18 * 86400000).toISOString(),
-          },
-        ],
-        lastOrderAt: new Date(now.getTime() - 3 * 86400000),
-      }),
-      this.customerRepo.create({
-        shopId,
-        code: 'KH-GOLD-002',
-        fullName: 'Trần Thảo Vy',
-        avatarUrl: 'https://api.dicebear.com/7.x/initials/svg?seed=Tran+Thao+Vy',
-        phoneMasked: pack2.phoneMasked,
-        phoneEncrypted: pack2.phoneEncrypted,
-        phoneSearchHash: pack2.phoneSearchHash,
-        email: 'thaovy.tran@gmail.com',
-        defaultProvinceCode: 'VN-SG',
-        defaultProvinceName: 'Thành phố Hồ Chí Minh',
-        defaultDistrictCode: 'VN-SG-BT',
-        defaultDistrictName: 'Quận Bình Thạnh',
-        defaultWardCode: 'VN-SG-BT-P22',
-        defaultWardName: 'Phường 22',
-        defaultHamletCode: 'VN-SG-BT-P22-H1',
-        defaultHamletName: 'Khu phố 1',
-        defaultAddressLine: 'Park 5 Vinhomes Central Park, 208 Nguyễn Hữu Cảnh',
-        tier: CustomerTierEnum.GOLD,
-        rfmScoreR: 4,
-        rfmScoreF: 4,
-        rfmScoreM: 4,
-        rfmSegmentCode: RfmSegmentCodeEnum.LOYAL,
-        totalOrdersCount: 5,
-        successfulDeliveriesCount: 5,
-        returnedOrdersCount: 0,
-        networkDeliveredCount: 14,
-        networkReturnedCount: 1,
-        reportedCount: 0,
-        reportedReasonsJson: [],
-        trustLookupSource: PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
-        lastTrustLookupAt: now,
-        deliveryTrustScore: 90,
-        isBlacklisted: false,
-        lifetimeValueAmount: 6200000,
-        loyaltyPointsBalance: 620,
-        walletCreditBalance: 120000,
-        industryCategory: ShopBusinessCategoryEnum.COSMETICS_BEAUTY,
-        customAttributesJson: [
-          { key: 'skin_type', label: 'Loại da', value: 'Da hỗn hợp thiên dầu' },
-          { key: 'skin_concern', label: 'Tình trạng quan tâm', value: 'Dưỡng sáng & chống nắng' },
-        ],
-        notes: 'Khách thân thiết TP.HCM, hay mua qua Livestream.',
-        linkedExternalIdentitiesJson: [
-          {
-            channelType: ChannelTypeEnum.INSTAGRAM,
-            channelIntegrationId: null,
-            pageShortCode: 'IG-OFFICIAL',
-            pageName: 'Instagram Official',
-            externalUserId: 'ig_vy_002',
-            externalUsername: 'thaovy.official',
-            firstSeenAt: new Date(now.getTime() - 45 * 86400000).toISOString(),
-            lastSeenAt: now.toISOString(),
-          },
-        ],
-        recentOrdersSnapshotJson: [
-          {
-            orderId: 'ord_gold_01',
-            orderCode: 'DH-2611-051',
-            channelType: ChannelTypeEnum.INSTAGRAM,
-            pageShortCode: 'IG-OFFICIAL',
-            totalAmount: 1290000,
-            status: 'DELIVERED_RECONCILED',
-            carrierCode: 'GHN',
-            trackingNumber: 'GHN7712901',
-            createdAt: new Date(now.getTime() - 9 * 86400000).toISOString(),
-          },
-        ],
-        lastOrderAt: new Date(now.getTime() - 9 * 86400000),
-      }),
-      this.customerRepo.create({
-        shopId,
-        code: 'KH-RISK-003',
-        fullName: 'Lê Hoàng Nam (Cảnh báo hoàn đơn)',
-        avatarUrl: 'https://api.dicebear.com/7.x/initials/svg?seed=Le+Hoang+Nam',
-        phoneMasked: pack3.phoneMasked,
-        phoneEncrypted: pack3.phoneEncrypted,
-        phoneSearchHash: pack3.phoneSearchHash,
-        defaultProvinceCode: 'VN-SG',
-        defaultProvinceName: 'Thành phố Hồ Chí Minh',
-        defaultDistrictCode: 'VN-SG-Q10',
-        defaultDistrictName: 'Quận 10',
-        defaultWardCode: 'VN-SG-Q10-P12',
-        defaultWardName: 'Phường 12',
-        defaultHamletCode: 'VN-SG-Q10-P12-H1',
-        defaultHamletName: 'Khu phố 1',
-        defaultAddressLine: '120 Sư Vạn Hạnh',
-        tier: CustomerTierEnum.BLACKLIST,
-        rfmScoreR: 2,
-        rfmScoreF: 1,
-        rfmScoreM: 1,
-        rfmSegmentCode: RfmSegmentCodeEnum.AT_RISK,
-        totalOrdersCount: 3,
-        successfulDeliveriesCount: 0,
-        returnedOrdersCount: 3,
-        networkDeliveredCount: 1,
-        networkReturnedCount: 7,
-        reportedCount: 4,
-        reportedReasonsJson: [
-          {
-            reportId: 'rep_seed_01',
-            reason: 'Đặt 3 đơn COD liên tiếp nhưng shipper GHN gọi tắt máy không nhận hàng',
-            source: 'CARRIER_3PL_GHN',
-            reportedByName: 'Hệ thống Đối soát GHN & Pancake POS',
-            reportedAt: '2026-11-01T09:30:00.000Z',
-          },
-          {
-            reportId: 'rep_seed_02',
-            reason: 'Báo xấu từ Cộng đồng Shop: Khách đặt nhiều shop cùng lúc rồi từ chối nhận',
-            source: 'PANCAKE_COMMUNITY',
-            reportedByName: 'Cộng đồng Nhà bán hàng Pancake',
-            reportedAt: '2026-10-20T14:15:00.000Z',
-          },
-        ],
-        trustLookupSource: PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
-        lastTrustLookupAt: now,
-        deliveryTrustScore: 14,
-        isBlacklisted: true,
-        blacklistReason: 'Đặt 3 đơn COD liên tiếp nhưng tắt máy không nhận hàng (Bom hàng).',
-        lifetimeValueAmount: 0,
-        loyaltyPointsBalance: 0,
-        walletCreditBalance: 0,
-        industryCategory: ShopBusinessCategoryEnum.GENERAL_MULTI_CATEGORY,
-        notes: 'Bắt buộc yêu cầu chuyển khoản đặt cọc VietQR 100% trước khi gửi hàng.',
-        linkedExternalIdentitiesJson: [
-          {
-            channelType: ChannelTypeEnum.FACEBOOK_PAGE,
-            channelIntegrationId: null,
-            pageShortCode: 'FB-MAIN',
-            pageName: 'Fanpage Chính Thức',
-            externalUserId: 'psid_risk_003',
-            externalUsername: 'Hoàng Nam',
-            firstSeenAt: new Date(now.getTime() - 25 * 86400000).toISOString(),
-            lastSeenAt: now.toISOString(),
-          },
-        ],
-        recentOrdersSnapshotJson: [
-          {
-            orderId: 'ord_risk_01',
-            orderCode: 'DH-2610-911',
-            channelType: ChannelTypeEnum.FACEBOOK_PAGE,
-            pageShortCode: 'FB-MAIN',
-            totalAmount: 890000,
-            status: 'RETURNED',
-            carrierCode: 'GHTK',
-            trackingNumber: 'S21902.GHTK.404',
-            createdAt: new Date(now.getTime() - 14 * 86400000).toISOString(),
-          },
-        ],
-        lastOrderAt: new Date(now.getTime() - 14 * 86400000),
-      }),
-    ];
-
-    await this.customerRepo.save(seeds).catch(() => undefined);
+  private async ensureSeededShopCustomersIfEmpty(_shopId: string): Promise<void> {
+    return;
   }
 
   /**
@@ -1252,8 +967,6 @@ export class Customer360Service {
     page: number;
     limit: number;
   }> {
-    await this.ensureSeededShopCustomersIfEmpty(shopId);
-
     const page = Math.max(1, Number(query.page || 1));
     const limit = Math.min(100, Math.max(1, Number(query.limit || 25)));
     const crmConfig = await this.getShopCrmTrustAndIndustryConfig(shopId);

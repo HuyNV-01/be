@@ -16,6 +16,7 @@ import googleOauthConfig from './config/oauth/google-oauth.config';
 import { redisConfig, redisOption } from './config/redis/redis.config';
 import { TunnelGatewayModule } from './config/tunnel/tunnel.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { CatalogPosModule } from './modules/catalog-pos/catalog-pos.module';
 import { ChannelsModule } from './modules/channels/channels.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
@@ -64,6 +65,7 @@ import { parseExpiresIn } from './utils';
     IamModule,
     ChannelsModule,
     CrmModule,
+    CatalogPosModule,
     TagsModule,
     AuthModule,
     UserModule,
