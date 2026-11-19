@@ -148,7 +148,7 @@ export class Customer360Service {
   }
 
   /**
-   * Cập nhật cấu hình Nguồn dữ liệu Tra cứu Uy tín SĐT & Cấu hình Ngành hàng Cửa hàng
+   * Cập nhật cấu hình nguồn tra cứu tín nhiệm & ngành hàng CRM 360° (tương thích cả tên field BE và alias FE)
    */
   public async updateShopCrmTrustAndIndustryConfig(params: {
     shopId: string;
@@ -166,90 +166,97 @@ export class Customer360Service {
     }
 
     const current = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
-    const nextCategory = params.dto.businessCategory ?? current.businessCategory;
-    const categoryChanged =
-      params.dto.businessCategory !== undefined &&
-      params.dto.businessCategory !== current.businessCategory;
+    const dto = params.dto;
 
-    const encryptedCustomApiKey =
-      params.dto.customLookupApiKey && params.dto.customLookupApiKey.trim()
-        ? this.messageCryptoService.encryptForConversation(
-            params.dto.customLookupApiKey.trim(),
-            `pii_vault:${params.shopId}`,
-          ).ciphertext
-        : current.customLookupApiKeyEncrypted || null;
+    const enabledSourcesSet = new Set(
+      Array.isArray(dto.enabledLookupSources)
+        ? dto.enabledLookupSources.map((s) => String(s).toUpperCase())
+        : [],
+    );
+
+    const resolvedUseCommunity =
+      dto.usePancakeCommunityNetwork ??
+      dto.enableCommunityTrustLookup ??
+      (enabledSourcesSet.size > 0
+        ? enabledSourcesSet.has('PANCAKE_COMMUNITY')
+        : current.usePancakeCommunityNetwork);
+
+    const resolvedUseCarrier3pl =
+      dto.useCarrier3plLookup ??
+      dto.enableCarrier3plTrustLookup ??
+      (enabledSourcesSet.size > 0
+        ? enabledSourcesSet.has('CARRIER_3PL')
+        : current.useCarrier3plLookup);
+
+    const resolvedAutoMaskPhone =
+      dto.autoMaskBuyerPhoneInChat ??
+      dto.autoMaskPhoneInChatMessages ??
+      current.autoMaskBuyerPhoneInChat;
+
+    const resolvedAutoExtractAddress =
+      dto.autoExtractAddressFromChat ??
+      dto.autoExtractPhoneAndAddressInChat ??
+      current.autoExtractAddressFromChat;
+
+    let encryptedCustomApiKey = current.customLookupApiKeyEncrypted || null;
+    if (dto.customLookupApiKey !== undefined) {
+      const trimmedKey = dto.customLookupApiKey.trim();
+      encryptedCustomApiKey = trimmedKey
+        ? this.messageCryptoService.encryptForConversation(trimmedKey, `pii_vault:${params.shopId}`)
+            .ciphertext
+        : null;
+    }
+
+    const nextCategory =
+      (dto.businessCategory as ShopBusinessCategoryEnum) || current.businessCategory;
 
     const nextConfig: CrmTrustAndIndustryConfig = {
       enableAutoTrustLookupOnPhone:
-        params.dto.enableAutoTrustLookupOnPhone ?? current.enableAutoTrustLookupOnPhone,
-      useInternalPosHistory: params.dto.useInternalPosHistory ?? current.useInternalPosHistory,
-      usePancakeCommunityNetwork:
-        params.dto.usePancakeCommunityNetwork ??
-        params.dto.enableCommunityTrustLookup ??
-        current.usePancakeCommunityNetwork,
-      useCarrier3plLookup:
-        params.dto.useCarrier3plLookup ??
-        params.dto.enableCarrier3plTrustLookup ??
-        current.useCarrier3plLookup,
-      enabledCarriers: params.dto.enabledCarriers ?? current.enabledCarriers,
+        dto.enableAutoTrustLookupOnPhone ?? current.enableAutoTrustLookupOnPhone,
+      useInternalPosHistory: dto.useInternalPosHistory ?? current.useInternalPosHistory,
+      usePancakeCommunityNetwork: resolvedUseCommunity,
+      useCarrier3plLookup: resolvedUseCarrier3pl,
+      enabledCarriers:
+        Array.isArray(dto.enabledCarriers) && dto.enabledCarriers.length > 0
+          ? (dto.enabledCarriers.filter((c) => ['GHN', 'GHTK', 'VTP', 'JT'].includes(c)) as Array<
+              'GHN' | 'GHTK' | 'VTP' | 'JT'
+            >)
+          : current.enabledCarriers,
       customLookupWebhookUrl:
-        params.dto.customLookupWebhookUrl !== undefined
-          ? params.dto.customLookupWebhookUrl?.trim() || null
+        dto.customLookupWebhookUrl !== undefined
+          ? dto.customLookupWebhookUrl?.trim() || null
           : current.customLookupWebhookUrl,
       customLookupApiKeyEncrypted: encryptedCustomApiKey,
       highRiskReturnRateThresholdPercent:
-        params.dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
+        dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
       highRiskReportedCountThreshold:
-        params.dto.highRiskReportedCountThreshold ?? current.highRiskReportedCountThreshold,
-      autoMaskBuyerPhoneInChat:
-        params.dto.autoMaskBuyerPhoneInChat ??
-        params.dto.autoMaskPhoneInChatMessages ??
-        current.autoMaskBuyerPhoneInChat,
-      autoExtractAddressFromChat:
-        params.dto.autoExtractAddressFromChat ??
-        params.dto.autoExtractPhoneAndAddressInChat ??
-        current.autoExtractAddressFromChat,
+        dto.highRiskReportedCountThreshold ?? current.highRiskReportedCountThreshold,
+      autoMaskBuyerPhoneInChat: resolvedAutoMaskPhone,
+      autoExtractAddressFromChat: resolvedAutoExtractAddress,
       businessCategory: nextCategory,
       showApparelMeasurementsInProfile:
-        params.dto.showApparelMeasurementsInProfile !== undefined
-          ? params.dto.showApparelMeasurementsInProfile
-          : categoryChanged
-            ? nextCategory === ShopBusinessCategoryEnum.FASHION_APPAREL
-            : current.showApparelMeasurementsInProfile,
-      customAttributeTemplates:
-        params.dto.customAttributeTemplates !== undefined
-          ? params.dto.customAttributeTemplates
-          : categoryChanged
-            ? DEFAULT_INDUSTRY_ATTRIBUTE_TEMPLATES[nextCategory] || []
-            : current.customAttributeTemplates,
+        dto.showApparelMeasurementsInProfile ?? current.showApparelMeasurementsInProfile,
+      customAttributeTemplates: Array.isArray(dto.customAttributeTemplates)
+        ? dto.customAttributeTemplates.map((tpl) => ({
+            key: tpl.key,
+            label: tpl.label,
+            placeholder: tpl.placeholder || '',
+          }))
+        : current.customAttributeTemplates,
       updatedAt: new Date().toISOString(),
     };
 
     shop.crmTrustAndIndustryConfigJson = nextConfig;
-    if (params.dto.requireDepositOnHighRisk !== undefined) {
-      shop.requireDepositOnHighRisk = params.dto.requireDepositOnHighRisk;
+    if (dto.requireDepositOnHighRisk !== undefined) {
+      shop.requireDepositOnHighRisk = dto.requireDepositOnHighRisk;
     }
-    await this.shopRepo.save(shop);
 
-    await this.piiVaultService.recordSecurityAuditLog({
-      shopId: params.shopId,
-      actorUserId: params.actorUserId,
-      actionCode: SecurityAuditActionCodeEnum.CRM_SETTINGS_UPDATE,
-      targetResourceType: 'SHOP_CRM_CONFIG',
-      targetResourceId: params.shopId,
-      afterSnapshotJson: {
-        businessCategory: nextConfig.businessCategory,
-        usePancakeCommunityNetwork: nextConfig.usePancakeCommunityNetwork,
-        useCarrier3plLookup: nextConfig.useCarrier3plLookup,
-        hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
-        requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
-      },
-    });
+    await this.shopRepo.save(shop);
 
     return {
       ...nextConfig,
-      requireDepositOnHighRisk: shop.requireDepositOnHighRisk,
-      hasCustomLookupApiKey: Boolean(encryptedCustomApiKey),
+      requireDepositOnHighRisk: shop.requireDepositOnHighRisk ?? true,
+      hasCustomLookupApiKey: Boolean(nextConfig.customLookupApiKeyEncrypted),
     };
   }
 
@@ -671,26 +678,38 @@ export class Customer360Service {
   }
 
   /**
-   * Tra cứu / Làm mới chỉ số Nhận, Hoàn, Bị báo cáo từ nguồn dữ liệu bên ngoài (Pancake Community + 3PL GHN/GHTK + Custom Webhook)
+   * Tra cứu / Làm mới chỉ số Nhận, Hoàn, Bị báo cáo từ đa nguồn (POS nội bộ + Cộng đồng Pancake v2/POS + VTP/GHN/GHTK/J&T/Shopee + Custom Webhook)
    */
   public async refreshCustomerTrustLookup(params: {
     shopId: string;
     customerId: string;
     dto?: LookupPhoneTrustFromSourcesDto;
-  }): Promise<CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }> {
+  }): Promise<
+    CustomerProfileEntity & {
+      trustEvaluation: DeliveryTrustEvaluationResult;
+      lookupWarning?: string | null;
+    }
+  > {
     const customer = await this.customerRepo.findOne({
       where: { id: params.customerId, shopId: params.shopId },
     });
     if (!customer) {
-      throw new NotFoundException('CUSTOMER_PROFILE_NOT_FOUND');
+      throw new NotFoundException('Không tìm thấy hồ sơ khách hàng trong cửa hàng này');
     }
 
     const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
-    const decryptedPhone =
-      params.dto?.rawPhone?.trim() ||
-      this.piiVaultService.decryptPhoneInRam(params.shopId, customer.phoneEncrypted) ||
-      customer.phoneMasked ||
-      '';
+
+    // Giải mã SĐT an toàn trong RAM; nếu thất bại hoặc chưa có SĐT gốc vẫn tiếp tục tra cứu qua phoneSearchHash / phoneMasked
+    let decryptedPhone = params.dto?.rawPhone?.trim() || '';
+    if (!decryptedPhone && customer.phoneEncrypted) {
+      const candidate = this.piiVaultService.decryptPhoneInRam(
+        params.shopId,
+        customer.phoneEncrypted,
+      );
+      if (candidate && !candidate.includes('[')) {
+        decryptedPhone = candidate;
+      }
+    }
 
     const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
       params.shopId,
@@ -698,9 +717,15 @@ export class Customer360Service {
     );
 
     const lookupRes = await this.trustScoreService.lookupPhoneReputationFromSources({
-      rawPhone: decryptedPhone,
+      rawPhone: decryptedPhone || null,
+      phoneMasked: customer.phoneMasked || null,
+      phoneSearchHash: customer.phoneSearchHash || null,
+      excludeShopId: params.shopId,
+      customerId: customer.id,
       config: crmConfig,
       decryptedCustomApiKey: decryptedCustomKey,
+      overrideSources: params.dto?.sources || null,
+      overrideWebhookUrl: params.dto?.customWebhookUrl || null,
     });
 
     customer.networkDeliveredCount = Math.max(
@@ -714,16 +739,16 @@ export class Customer360Service {
     if (lookupRes.reportedCount > Number(customer.reportedCount || 0)) {
       customer.reportedCount = lookupRes.reportedCount;
     }
+
     const existingReports = Array.isArray(customer.reportedReasonsJson)
-      ? customer.reportedReasonsJson
+      ? [...customer.reportedReasonsJson]
       : [];
-    const existingIds = new Set(existingReports.map((r) => r.reportId));
-    for (const rep of lookupRes.reportedReasons) {
-      if (!existingIds.has(rep.reportId)) {
-        existingReports.push(rep);
-      }
-    }
-    customer.reportedReasonsJson = existingReports;
+    const mergedReports = this.trustScoreService.sortAndNormalizeAbuseReportsNewestFirst([
+      ...existingReports,
+      ...lookupRes.reportedReasons,
+    ]);
+    customer.reportedReasonsJson = mergedReports;
+    customer.reportedCount = Math.max(Number(customer.reportedCount || 0), mergedReports.length);
     customer.trustLookupSource = lookupRes.lookupSource;
     customer.lastTrustLookupAt = new Date();
 
@@ -734,6 +759,7 @@ export class Customer360Service {
       networkReturnedCount: customer.networkReturnedCount,
       reportedCount: customer.reportedCount,
       reportedReasons: customer.reportedReasonsJson,
+      sourceBreakdowns: lookupRes.sourceBreakdowns,
       isBlacklisted: customer.isBlacklisted,
       shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
       highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
@@ -745,13 +771,19 @@ export class Customer360Service {
     customer.deliveryTrustScore = evalRes.score;
 
     const saved = await this.customerRepo.save(customer);
-    const enriched = this.enrichCustomerWithTrustEvaluation(
+
+    const enrichedBase = this.enrichCustomerWithTrustEvaluation(
       saved,
       crmConfig.requireDepositOnHighRisk,
       crmConfig,
     );
+    enrichedBase.trustEvaluation = evalRes;
 
-    if (params.dto?.conversationId) {
+    const enriched = Object.assign(enrichedBase, {
+      lookupWarning: lookupRes.warningMessage,
+    });
+
+    if (params.dto?.conversationId && !params.dto.conversationId.startsWith('detail_')) {
       this.realtimeEmitter.emitToConversation(
         SOCKET_CONFIG.namespaces.CHAT,
         params.dto.conversationId,

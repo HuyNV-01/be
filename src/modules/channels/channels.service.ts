@@ -1393,6 +1393,48 @@ export class ChannelsService {
    * 2. Tự động đính kèm `appsecret_proof = HMAC-SHA256(accessToken, appSecret)`.
    * 3. Nếu người dùng nhập Token lấy từ Graph API Explorer (khác App ID), tự động fallback không kèm `appsecret_proof`.
    */
+  /**
+   * Kiểm tra xem URL ảnh đại diện có phải ảnh tạm (Dicebear) hoặc URL chữ ký Meta CDN (`fbsbx.com`) đã hết hạn (`ext`) hay không.
+   */
+  public isExpiredOrInvalidCustomerAvatarUrl(avatarUrl?: string | null): boolean {
+    if (!avatarUrl || !avatarUrl.trim()) return true;
+    const trimmed = avatarUrl.trim();
+    if (trimmed.includes('api.dicebear.com')) return true;
+
+    // URL proxy nội bộ luôn tự làm mới ở server nên không bao giờ coi là hết hạn
+    if (trimmed.includes('/channels/public-avatar/')) return false;
+
+    try {
+      const parsed = new URL(trimmed);
+      const extParam = parsed.searchParams.get('ext');
+      if (extParam) {
+        const extSec = Number(extParam);
+        if (Number.isFinite(extSec) && extSec > 0 && extSec * 1000 <= Date.now() + 60_000) {
+          return true;
+        }
+      }
+    } catch {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Tạo URL Proxy Avatar ổn định không hết hạn chữ ký `ext` và không lộ Page Access Token ra trình duyệt.
+   */
+  public buildCustomerAvatarProxyUrl(
+    shopId: string,
+    channelId: string,
+    externalCustomerPsid: string,
+  ): string {
+    const basePublic = (envs.tunnel.publicWebhookBaseUrl || envs.appUrl || '').replace(/\/+$/, '');
+    const relativePath = `/api/channels/public-avatar/${encodeURIComponent(shopId)}/${encodeURIComponent(channelId)}/${encodeURIComponent(externalCustomerPsid)}`;
+    return basePublic ? `${basePublic}${relativePath}` : relativePath;
+  }
+
+  /**
+   * Gọi trực tiếp Meta Graph API theo đường dẫn tương đối với `timeoutMs` tùy chỉnh (mặc định 8s, đồng bộ lịch sử 20s).
+   */
   public async callMetaGraphApi<T = any>(params: {
     apiVersion: string;
     path: string;
@@ -1401,6 +1443,7 @@ export class ChannelsService {
     body?: Record<string, unknown>;
     accessToken: string;
     appSecret?: string | null;
+    timeoutMs?: number;
   }): Promise<{
     ok: boolean;
     data: T | null;
@@ -1416,6 +1459,7 @@ export class ChannelsService {
     const cleanPath = params.path.replace(/^\/+/, '');
     const method = params.method || 'GET';
     const appSecretProof = this.computeAppSecretProof(cleanToken, params.appSecret);
+    const timeoutMs = Math.max(3000, Math.min(45000, Number(params.timeoutMs || 8000)));
 
     let lastErrorMsg: string | null = null;
     let lastErrorCode: number | undefined;
@@ -1430,7 +1474,7 @@ export class ChannelsService {
 
         const url = `https://graph.facebook.com/${ver}/${cleanPath}?${searchParams.toString()}`;
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
           const res = await fetch(url, {
@@ -1514,6 +1558,108 @@ export class ChannelsService {
       errorMessage: lastErrorMsg,
       errorCode: lastErrorCode,
     };
+  }
+
+  /**
+   * Đi theo URL phân trang `paging.next` tuyệt đối do Meta Graph API trả về (`until=...&__paging_token=...`),
+   * đảm bảo không bao giờ dừng sớm ở trang 1 khi edge `/conversations` hoặc `/messages` không trả `cursors.after`.
+   */
+  public async callMetaGraphAbsoluteUrl<T = any>(params: {
+    nextUrl: string;
+    accessToken: string;
+    appSecret?: string | null;
+    timeoutMs?: number;
+  }): Promise<{
+    ok: boolean;
+    data: T | null;
+    errorMessage: string | null;
+    errorCode?: number;
+  }> {
+    const cleanToken = params.accessToken.trim().replace(/^Bearer\s+/i, '');
+    const appSecretProof = this.computeAppSecretProof(cleanToken, params.appSecret);
+    const timeoutMs = Math.max(5000, Math.min(45000, Number(params.timeoutMs || 20000)));
+
+    let targetUrl: URL;
+    try {
+      targetUrl = new URL(params.nextUrl);
+      if (targetUrl.hostname !== 'graph.facebook.com') {
+        return {
+          ok: false,
+          data: null,
+          errorMessage: 'INVALID_META_PAGING_HOST',
+          errorCode: 400,
+        };
+      }
+      if (!targetUrl.searchParams.has('access_token')) {
+        targetUrl.searchParams.set('access_token', cleanToken);
+      }
+      if (appSecretProof && !targetUrl.searchParams.has('appsecret_proof')) {
+        targetUrl.searchParams.set('appsecret_proof', appSecretProof);
+      }
+    } catch {
+      return {
+        ok: false,
+        data: null,
+        errorMessage: 'INVALID_META_PAGING_URL',
+        errorCode: 400,
+      };
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(targetUrl.toString(), {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const json = (await res.json().catch(() => ({}))) as any;
+      if (res.ok && !json?.error) {
+        return { ok: true, data: json as T, errorMessage: null };
+      }
+
+      // Thử bỏ appsecret_proof nếu trang cấp token không khớp secret
+      if (
+        appSecretProof &&
+        String(json?.error?.message || '')
+          .toLowerCase()
+          .includes('appsecret_proof')
+      ) {
+        targetUrl.searchParams.delete('appsecret_proof');
+        const retryController = new AbortController();
+        const retryTimer = setTimeout(() => retryController.abort(), timeoutMs);
+        try {
+          const retryRes = await fetch(targetUrl.toString(), {
+            method: 'GET',
+            signal: retryController.signal,
+          });
+          clearTimeout(retryTimer);
+          const retryJson = (await retryRes.json().catch(() => ({}))) as any;
+          if (retryRes.ok && !retryJson?.error) {
+            return { ok: true, data: retryJson as T, errorMessage: null };
+          }
+        } catch {
+          clearTimeout(retryTimer);
+        }
+      }
+
+      return {
+        ok: false,
+        data: null,
+        errorMessage: String(json?.error?.message || `HTTP ${res.status}`),
+        errorCode: Number(json?.error?.code || res.status),
+      };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      return {
+        ok: false,
+        data: null,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        errorCode: 0,
+      };
+    }
   }
 
   /**
@@ -3388,41 +3534,62 @@ export class ChannelsService {
   }
 
   /**
-   * Tự động lấy Tên thật & Ảnh đại diện của khách hàng từ PSID (Facebook/Instagram) hoặc user_id (Zalo OA)
-   * kể cả khi sự kiện bình luận bài viết (`feed`) đã có sẵn tên nhưng thiếu `profile_pic`.
-   * Lưu cache Redis 24h để chịu tải cao.
+   * Pipeline 5 tầng phân giải Tên thật & Ảnh đại diện khách hàng từ PSID (hỗ trợ đầy đủ Page chạy Ads & Meta Business Suite):
+   * 1. Cache Redis (tự động bỏ qua nếu URL Meta đã hết hạn `ext`).
+   * 2. GET /{PSID}?fields=name,first_name,last_name,profile_pic.
+   * 3. GET /{pageId}/conversations?user_id={PSID}&fields=participants,senders,messages.limit(10){from{id,name,picture}}
+   *    (chạy bất kể đã có tên hay chưa khi thiếu avatar — khắc phục hạn chế CTWA Ads / Business Suite).
+   * 4. GET /{PSID}/picture?type=large&redirect=false (loại bỏ ảnh bóng mờ `is_silhouette`).
+   * 5. Lưu URL ảnh gốc vào Redis riêng (`psid_avatar_raw:...`) và trả về URL Proxy ổn định của Backend để trình duyệt không bao giờ lỗi 403/hết hạn.
    */
   private async enrichCustomerProfileByPsid(params: {
     channel: ChannelIntegrationEntity;
     externalCustomerPsid: string | null;
     fallbackName: string;
     initialAvatarUrl?: string | null;
-  }): Promise<{ name: string; avatarUrl: string }> {
-    const { channel, externalCustomerPsid, fallbackName, initialAvatarUrl } = params;
-    const defaultAvatar =
-      initialAvatarUrl || this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid);
+    forceRefresh?: boolean;
+  }): Promise<{ name: string; avatarUrl: string; rawCdnAvatarUrl: string | null }> {
+    const { channel, externalCustomerPsid, fallbackName, initialAvatarUrl, forceRefresh } = params;
+    const defaultAvatar = this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid);
 
     if (!externalCustomerPsid) {
-      return { name: fallbackName, avatarUrl: defaultAvatar };
-    }
-
-    if (initialAvatarUrl && !fallbackName.includes('#')) {
-      return { name: fallbackName, avatarUrl: initialAvatarUrl };
+      return {
+        name: fallbackName,
+        avatarUrl: initialAvatarUrl || defaultAvatar,
+        rawCdnAvatarUrl: initialAvatarUrl || null,
+      };
     }
 
     const cacheKey = `psid_profile:${channel.id}:${externalCustomerPsid}`;
-    try {
-      const cached = await this.redis.get(cacheKey);
-      if (cached) {
-        const parsed = JSON.parse(cached) as { name: string; avatarUrl: string | null };
-        if (parsed?.name && parsed?.avatarUrl) {
-          const bestName =
-            !fallbackName.includes('#') && parsed.name.includes('#') ? fallbackName : parsed.name;
-          return { name: bestName, avatarUrl: parsed.avatarUrl };
+    const rawAvatarCacheKey = `psid_avatar_raw:${channel.id}:${externalCustomerPsid}`;
+
+    if (!forceRefresh) {
+      try {
+        const cached = await this.redis.get(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached) as {
+            name: string;
+            avatarUrl: string | null;
+            rawCdnAvatarUrl?: string | null;
+          };
+          const cachedRaw = parsed?.rawCdnAvatarUrl || parsed?.avatarUrl || null;
+          if (
+            parsed?.name &&
+            parsed?.avatarUrl &&
+            !this.isExpiredOrInvalidCustomerAvatarUrl(cachedRaw)
+          ) {
+            const bestName =
+              !fallbackName.includes('#') && parsed.name.includes('#') ? fallbackName : parsed.name;
+            return {
+              name: bestName,
+              avatarUrl: parsed.avatarUrl,
+              rawCdnAvatarUrl: cachedRaw,
+            };
+          }
         }
+      } catch {
+        // Bỏ qua nếu Redis tạm gián đoạn
       }
-    } catch {
-      // Bỏ qua nếu Redis offline
     }
 
     const rawPageToken = this.messageCryptoService.decryptForConversation(
@@ -3434,7 +3601,11 @@ export class ChannelsService {
       rawPageToken.startsWith('oauth2_tok_') ||
       rawPageToken.startsWith('sandbox_')
     ) {
-      return { name: fallbackName, avatarUrl: defaultAvatar };
+      return {
+        name: fallbackName,
+        avatarUrl: initialAvatarUrl || defaultAvatar,
+        rawCdnAvatarUrl: initialAvatarUrl || null,
+      };
     }
 
     const rawAppSecret = channel.appSecretEncrypted
@@ -3447,11 +3618,13 @@ export class ChannelsService {
     ) {
       const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
       let resolvedFullName = fallbackName;
-      let resolvedAvatarUrl: string | null = initialAvatarUrl || null;
+      let resolvedRawAvatarUrl: string | null = !this.isExpiredOrInvalidCustomerAvatarUrl(
+        initialAvatarUrl,
+      )
+        ? initialAvatarUrl || null
+        : null;
 
-      // Bước 1: Gọi GET /{PSID}?fields=name,first_name,last_name,profile_pic
-      // Lý do kiến trúc: Meta Graph API v19.0–v27.1 cấm trường `picture.type(large)` trên node Messenger PSID
-      // và trả về lỗi (#100) Tried accessing nonexisting field (picture) on node type (User). Chỉ truy vấn `profile_pic`.
+      // Tầng 1: GET /{PSID}?fields=name,first_name,last_name,profile_pic
       const profileCall = await this.callMetaGraphApi<{
         name?: string;
         first_name?: string;
@@ -3461,10 +3634,14 @@ export class ChannelsService {
         apiVersion: apiVer,
         path: externalCustomerPsid,
         queryParams: {
-          fields: 'name,first_name,last_name,profile_pic',
+          fields:
+            channel.channelType === ChannelTypeEnum.INSTAGRAM
+              ? 'name,username,profile_pic'
+              : 'name,first_name,last_name,profile_pic',
         },
         accessToken: rawPageToken,
         appSecret: rawAppSecret,
+        timeoutMs: 7000,
       });
 
       if (
@@ -3487,37 +3664,60 @@ export class ChannelsService {
         if (candidateName) {
           resolvedFullName = candidateName;
         }
-        if (profileCall.data.profile_pic) {
-          resolvedAvatarUrl = profileCall.data.profile_pic;
+        if (
+          profileCall.data.profile_pic &&
+          !this.isExpiredOrInvalidCustomerAvatarUrl(profileCall.data.profile_pic)
+        ) {
+          resolvedRawAvatarUrl = profileCall.data.profile_pic;
         }
       }
 
-      // Bước 2: Nếu Fanpage chạy quảng cáo bị giới hạn quyền Business Asset User Profile Access trên GET /{PSID},
-      // tra cứu ngược qua GET /{externalPageId}/conversations?user_id={PSID}&fields=participants,senders,updated_time
-      if (resolvedFullName.includes('#') && channel.externalPageId) {
+      // Tầng 2: Với Page chạy Ads / Meta Business Suite khi Tầng 1 thiếu tên hoặc thiếu avatar,
+      // tra cứu qua GET /{pageId}/conversations?user_id={PSID} để lấy cả tên lẫn ảnh từ participant / message.from.picture
+      if ((resolvedFullName.includes('#') || !resolvedRawAvatarUrl) && channel.externalPageId) {
+        const convQueryParams: Record<string, string> = {
+          user_id: externalCustomerPsid,
+          fields:
+            'id,participants{id,name,username},senders{id,name,username},messages.limit(10){from{id,name,picture}}',
+          limit: '1',
+        };
+        if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
+          convQueryParams.platform = 'instagram';
+        }
+
         const convLookup = await this.callMetaGraphApi<{
           data?: Array<{
+            id?: string;
             participants?: {
               data?: Array<{ id?: string; name?: string; username?: string }>;
             };
             senders?: {
               data?: Array<{ id?: string; name?: string; username?: string }>;
             };
+            messages?: {
+              data?: Array<{
+                from?: {
+                  id?: string;
+                  name?: string;
+                  picture?: { data?: { url?: string; is_silhouette?: boolean } };
+                };
+              }>;
+            };
           }>;
         }>({
           apiVersion: apiVer,
           path: `${channel.externalPageId}/conversations`,
-          queryParams: {
-            user_id: externalCustomerPsid,
-            fields: 'participants,senders,updated_time',
-            limit: '1',
-          },
+          queryParams: convQueryParams,
           accessToken: rawPageToken,
           appSecret: rawAppSecret,
+          timeoutMs: 8000,
         });
 
-        if (convLookup.ok && Array.isArray(convLookup.data?.data) && convLookup.data.data[0]) {
-          const threadNode = convLookup.data.data[0];
+        // Fallback nhẹ hơn nếu Meta từ chối trường `picture` lồng trong `messages.from`
+        const threadNode =
+          convLookup.ok && Array.isArray(convLookup.data?.data) ? convLookup.data.data[0] : null;
+
+        if (threadNode) {
           const participantPool = [
             ...(Array.isArray(threadNode.participants?.data) ? threadNode.participants.data : []),
             ...(Array.isArray(threadNode.senders?.data) ? threadNode.senders.data : []),
@@ -3528,14 +3728,64 @@ export class ChannelsService {
               (String(p.id) === externalCustomerPsid || String(p.id) !== channel.externalPageId),
           );
           const buyerNameFromThread = matchedBuyer?.name || matchedBuyer?.username;
-          if (buyerNameFromThread) {
+          if (buyerNameFromThread && resolvedFullName.includes('#')) {
             resolvedFullName = String(buyerNameFromThread);
+          }
+
+          if (!resolvedRawAvatarUrl && Array.isArray(threadNode.messages?.data)) {
+            for (const msgNode of threadNode.messages.data) {
+              const fromId = String(msgNode?.from?.id || '');
+              if (fromId && fromId !== channel.externalPageId) {
+                if (msgNode.from?.name && resolvedFullName.includes('#')) {
+                  resolvedFullName = String(msgNode.from.name);
+                }
+                const picObj = msgNode.from?.picture?.data;
+                if (picObj?.url && !picObj.is_silhouette) {
+                  resolvedRawAvatarUrl = picObj.url;
+                  break;
+                }
+              }
+            }
+          }
+        } else if (resolvedFullName.includes('#')) {
+          const liteLookup = await this.callMetaGraphApi<{
+            data?: Array<{
+              participants?: { data?: Array<{ id?: string; name?: string; username?: string }> };
+              senders?: { data?: Array<{ id?: string; name?: string; username?: string }> };
+            }>;
+          }>({
+            apiVersion: apiVer,
+            path: `${channel.externalPageId}/conversations`,
+            queryParams: {
+              user_id: externalCustomerPsid,
+              fields: 'participants,senders,updated_time',
+              limit: '1',
+              ...(channel.channelType === ChannelTypeEnum.INSTAGRAM
+                ? { platform: 'instagram' }
+                : {}),
+            },
+            accessToken: rawPageToken,
+            appSecret: rawAppSecret,
+            timeoutMs: 7000,
+          });
+          const liteNode = liteLookup.ok ? liteLookup.data?.data?.[0] : null;
+          const pool = [
+            ...(liteNode?.participants?.data || []),
+            ...(liteNode?.senders?.data || []),
+          ];
+          const buyer = pool.find(
+            (p) =>
+              p?.id &&
+              (String(p.id) === externalCustomerPsid || String(p.id) !== channel.externalPageId),
+          );
+          if (buyer?.name || buyer?.username) {
+            resolvedFullName = String(buyer.name || buyer.username);
           }
         }
       }
 
-      // Bước 3: Nếu chưa có `profile_pic` (hoặc bị ẩn ở Bước 1), gọi endpoint chuyên biệt GET /{PSID}/picture?type=large&redirect=false
-      if (!resolvedAvatarUrl || resolvedAvatarUrl.includes('api.dicebear.com')) {
+      // Tầng 3: Gọi edge GET /{PSID}/picture?type=large&redirect=false (bỏ qua ảnh silhouette mặc định)
+      if (!resolvedRawAvatarUrl) {
         const picEdgeCall = await this.callMetaGraphApi<{
           data?: { url?: string; is_silhouette?: boolean };
         }>({
@@ -3547,36 +3797,175 @@ export class ChannelsService {
           },
           accessToken: rawPageToken,
           appSecret: rawAppSecret,
+          timeoutMs: 7000,
         });
 
-        if (picEdgeCall.ok && picEdgeCall.data?.data?.url) {
-          resolvedAvatarUrl = picEdgeCall.data.data.url;
+        if (picEdgeCall.ok && picEdgeCall.data?.data?.url && !picEdgeCall.data.data.is_silhouette) {
+          resolvedRawAvatarUrl = picEdgeCall.data.data.url;
         }
       }
 
-      if (resolvedAvatarUrl && !resolvedAvatarUrl.includes('api.dicebear.com')) {
-        const resolved = { name: resolvedFullName, avatarUrl: resolvedAvatarUrl };
-        await this.redis.set(cacheKey, JSON.stringify(resolved), 'EX', 86400).catch(() => null);
+      // Tầng 4: Nếu đã có ảnh thật từ Meta CDN, lưu URL gốc vào Redis & trả về Proxy URL ổn định
+      if (resolvedRawAvatarUrl && !resolvedRawAvatarUrl.includes('api.dicebear.com')) {
+        const stableProxyUrl = this.buildCustomerAvatarProxyUrl(
+          channel.shopId,
+          channel.id,
+          externalCustomerPsid,
+        );
+        await this.redis
+          .set(rawAvatarCacheKey, resolvedRawAvatarUrl, 'EX', 21600)
+          .catch(() => null);
+        const resolved = {
+          name: resolvedFullName,
+          avatarUrl: stableProxyUrl,
+          rawCdnAvatarUrl: resolvedRawAvatarUrl,
+        };
+        await this.redis.set(cacheKey, JSON.stringify(resolved), 'EX', 21600).catch(() => null);
         return resolved;
       }
 
+      // Tầng 5: Nếu Meta Business Suite vẫn chưa cấp quyền `profile_pic` (VD: khách mới bấm Ads CTWA chưa phản hồi tin thứ 2),
+      // cache ngắn 90 giây để tự động thử lại ngay ở tin nhắn kế tiếp.
       const fallbackWithResolvedName = {
         name: resolvedFullName,
         avatarUrl: this.buildFallbackCustomerAvatarUrl(resolvedFullName, externalCustomerPsid),
+        rawCdnAvatarUrl: null,
       };
       await this.redis
-        .set(cacheKey, JSON.stringify(fallbackWithResolvedName), 'EX', 120)
+        .set(cacheKey, JSON.stringify(fallbackWithResolvedName), 'EX', 90)
         .catch(() => null);
       return fallbackWithResolvedName;
     }
 
     const fallbackResolved = {
       name: fallbackName,
-      avatarUrl:
-        initialAvatarUrl || this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid),
+      avatarUrl: initialAvatarUrl || defaultAvatar,
+      rawCdnAvatarUrl: initialAvatarUrl || null,
     };
     await this.redis.set(cacheKey, JSON.stringify(fallbackResolved), 'EX', 120).catch(() => null);
     return fallbackResolved;
+  }
+
+  /**
+   * Phục vụ ảnh đại diện khách hàng qua Proxy Backend (`GET /api/channels/public-avatar/:shopId/:channelId/:psid`):
+   * - Đọc ảnh binary từ cache Redis 6 giờ (`psid_avatar_bin:...`) để phản hồi < 5ms.
+   * - Nếu cache hết hạn hoặc URL Meta CDN hết hạn `ext`, tự động gọi lại `enrichCustomerProfileByPsid(..., forceRefresh: true)`
+   *   bằng Page Access Token trên Server rồi tải ảnh về cache & stream cho trình duyệt.
+   */
+  public async getCustomerAvatarBinaryForProxy(params: {
+    shopId: string;
+    channelId: string;
+    externalCustomerPsid: string;
+  }): Promise<{ buffer: Buffer; contentType: string } | null> {
+    const binCacheKey = `psid_avatar_bin:${params.channelId}:${params.externalCustomerPsid}`;
+    const rawUrlCacheKey = `psid_avatar_raw:${params.channelId}:${params.externalCustomerPsid}`;
+
+    try {
+      const cachedBin = await this.redis.get(binCacheKey);
+      if (cachedBin) {
+        const parsed = JSON.parse(cachedBin) as { contentType: string; base64: string };
+        if (parsed?.base64) {
+          return {
+            buffer: Buffer.from(parsed.base64, 'base64'),
+            contentType: parsed.contentType || 'image/jpeg',
+          };
+        }
+      }
+    } catch {
+      // Bỏ qua lỗi đọc cache Redis
+    }
+
+    const channel = await this.channelRepo.findOne({
+      where: { id: params.channelId, shopId: params.shopId },
+    });
+    if (!channel) {
+      return null;
+    }
+
+    let rawCdnUrl = await this.redis.get(rawUrlCacheKey).catch(() => null);
+    if (!rawCdnUrl || this.isExpiredOrInvalidCustomerAvatarUrl(rawCdnUrl)) {
+      const refreshed = await this.enrichCustomerProfileByPsid({
+        channel,
+        externalCustomerPsid: params.externalCustomerPsid,
+        fallbackName: `Khách ${channel.pageShortCode}`,
+        forceRefresh: true,
+      });
+      rawCdnUrl = refreshed.rawCdnAvatarUrl;
+    }
+
+    const fetchImageBuffer = async (
+      targetUrl: string,
+    ): Promise<{ buffer: Buffer; contentType: string } | null> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(targetUrl, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) return null;
+        const contentType = res.headers.get('content-type') || 'image/jpeg';
+        if (!contentType.startsWith('image/')) return null;
+        const arrBuf = await res.arrayBuffer();
+        const buf = Buffer.from(arrBuf);
+        if (buf.length < 100) return null;
+        return { buffer: buf, contentType };
+      } catch {
+        clearTimeout(timer);
+        return null;
+      }
+    };
+
+    if (rawCdnUrl && !rawCdnUrl.includes('api.dicebear.com')) {
+      const downloaded = await fetchImageBuffer(rawCdnUrl);
+      if (downloaded) {
+        await this.redis
+          .set(
+            binCacheKey,
+            JSON.stringify({
+              contentType: downloaded.contentType,
+              base64: downloaded.buffer.toString('base64'),
+            }),
+            'EX',
+            21600,
+          )
+          .catch(() => null);
+        return downloaded;
+      }
+    }
+
+    // Fallback cuối: Thử gọi trực tiếp Graph API /{PSID}/picture?type=large&access_token=... trên Server
+    const rawPageToken = this.messageCryptoService.decryptForConversation(
+      channel.accessTokenEncrypted,
+      channel.shopId,
+    );
+    if (
+      rawPageToken &&
+      !rawPageToken.startsWith('oauth2_tok_') &&
+      !rawPageToken.startsWith('sandbox_')
+    ) {
+      const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+      const directGraphPicUrl = `https://graph.facebook.com/${apiVer}/${encodeURIComponent(params.externalCustomerPsid)}/picture?type=large&access_token=${encodeURIComponent(rawPageToken)}`;
+      const downloaded = await fetchImageBuffer(directGraphPicUrl);
+      if (downloaded) {
+        await this.redis
+          .set(
+            binCacheKey,
+            JSON.stringify({
+              contentType: downloaded.contentType,
+              base64: downloaded.buffer.toString('base64'),
+            }),
+            'EX',
+            21600,
+          )
+          .catch(() => null);
+        return downloaded;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -4990,7 +5379,7 @@ export class ChannelsService {
     if (
       !normalized.customerAvatarUrl &&
       conversation?.avatar &&
-      !conversation.avatar.includes('api.dicebear.com')
+      !this.isExpiredOrInvalidCustomerAvatarUrl(conversation.avatar)
     ) {
       normalized.customerAvatarUrl = conversation.avatar;
     }
@@ -5437,6 +5826,28 @@ export class ChannelsService {
               uid,
               SOCKET_CONFIG.events.CHAT.MESSAGE_EDITED,
               profileUpdatedPayload,
+            );
+          }
+
+          // Phát sự kiện CONVERSATION_UPDATED tới toàn bộ nhân sự để Sidebar & Header cập nhật avatar khách tức thì
+          const convAvatarUpdatedPayload = {
+            conversationId: savedConversation.id,
+            id: savedConversation.id,
+            ...(isNameUpgraded ? { name: freshProfile.name } : {}),
+            ...(isAvatarUpgraded ? { avatar: freshProfile.avatarUrl } : {}),
+          };
+          this.realtimeEmitter.emitToConversation(
+            SOCKET_CONFIG.namespaces.CHAT,
+            savedConversation.id,
+            SOCKET_CONFIG.events.CHAT.CONVERSATION_UPDATED,
+            convAvatarUpdatedPayload,
+          );
+          for (const uid of new Set(participantUserIds)) {
+            this.realtimeEmitter.emitToUser(
+              SOCKET_CONFIG.namespaces.CHAT,
+              uid,
+              SOCKET_CONFIG.events.CHAT.CONVERSATION_UPDATED,
+              convAvatarUpdatedPayload,
             );
           }
         })
@@ -6401,6 +6812,185 @@ export class ChannelsService {
     return this.syncSingleChannelHistoricalThreeMonthsInternal(channel, clampedDays, actorUserId);
   }
 
+  /**
+   * Chèn tin nhắn/bình luận lịch sử 3 tháng trực tiếp vào DB mà KHÔNG ghi đè `lastMessageAt` của tin mới hơn,
+   * KHÔNG reset trạng thái đã xem (`firstSeenAt`) và KHÔNG spam thông báo realtime cho tin cũ 2-3 tháng trước.
+   */
+  private async upsertHistoricalOmnichannelMessage(params: {
+    channel: ChannelIntegrationEntity;
+    event: NormalizedOmnichannelEvent;
+    activeMemberUserIds: string[];
+  }): Promise<{ conversationId: string | null; inserted: boolean }> {
+    const { channel, event, activeMemberUserIds } = params;
+
+    const existingMsg = await this.messageRepo.findOne({
+      where: {
+        shopId: channel.shopId,
+        externalMessageId: event.externalMessageId,
+      },
+      select: ['id', 'conversationId'],
+    });
+    if (existingMsg) {
+      return { conversationId: existingMsg.conversationId, inserted: false };
+    }
+
+    const msgTime = event.createdTimeIso ? new Date(event.createdTimeIso) : new Date();
+    const msgTimeIso = msgTime.toISOString();
+
+    const stableCustomerAvatar = event.externalCustomerPsid
+      ? this.buildCustomerAvatarProxyUrl(channel.shopId, channel.id, event.externalCustomerPsid)
+      : event.customerAvatarUrl ||
+        this.buildFallbackCustomerAvatarUrl(event.customerName, event.externalCustomerPsid);
+
+    let conversation = await this.conversationRepo.findOne({
+      where: {
+        shopId: channel.shopId,
+        channelIntegrationId: channel.id,
+        externalThreadId: event.externalThreadId,
+      },
+      withDeleted: true,
+    });
+
+    if (!conversation) {
+      conversation = this.conversationRepo.create({
+        type: ConversationTypeEnum.DIRECT,
+        shopId: channel.shopId,
+        channelType: channel.channelType,
+        channelIntegrationId: channel.id,
+        externalThreadId: event.externalThreadId,
+        interactionType: event.interactionType,
+        name: event.customerName,
+        avatar: stableCustomerAvatar,
+        lastMessage: event.messageText,
+        lastMessageType: event.mediaAttachmentUrl ? MessageTypeEnum.IMAGE : MessageTypeEnum.TEXT,
+        lastMessageAt: msgTime,
+        lastCustomerMessageAt: event.isEchoFromPage ? null : msgTime,
+        lastAgentReplyAt: event.isEchoFromPage ? msgTime : null,
+        supportStatus: event.isEchoFromPage
+          ? ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY
+          : ConversationSupportStatusEnum.WAITING_AGENT_REPLY,
+        firstSeenAt: event.isEchoFromPage ? msgTime : null,
+        firstSeenByAgentId: null,
+        isGhostedByAgent: false,
+        hasPhoneCollected: false,
+        sourceAdId: event.sourceAdId || null,
+        sourcePostId: event.sourcePostId || null,
+        ctwaClickId: event.ctwaClickId || null,
+        activeTagIdsJson: [],
+      });
+      conversation = await this.conversationRepo.save(conversation);
+
+      const encryptedLast = this.messageCryptoService.encryptForConversation(
+        event.messageText,
+        conversation.id,
+      );
+      await this.conversationRepo.update(conversation.id, {
+        lastMessage: encryptedLast.ciphertext,
+      });
+
+      if (activeMemberUserIds.length > 0) {
+        await this.ensureConversationParticipants(conversation.id, activeMemberUserIds);
+      }
+    } else {
+      if (conversation.deletedAt) {
+        await this.conversationRepo.restore(conversation.id);
+      }
+
+      const patchFields: Partial<ConversationEntity> = {};
+      if (
+        event.customerName &&
+        !event.customerName.includes('#') &&
+        (!conversation.name || conversation.name.includes('#'))
+      ) {
+        patchFields.name = event.customerName;
+      }
+      if (stableCustomerAvatar && this.isExpiredOrInvalidCustomerAvatarUrl(conversation.avatar)) {
+        patchFields.avatar = stableCustomerAvatar;
+      }
+
+      const currentLastMs = conversation.lastMessageAt
+        ? new Date(conversation.lastMessageAt).getTime()
+        : 0;
+      if (msgTime.getTime() >= currentLastMs) {
+        const encryptedLast = this.messageCryptoService.encryptForConversation(
+          event.messageText,
+          conversation.id,
+        );
+        patchFields.lastMessage = encryptedLast.ciphertext;
+        patchFields.lastMessageType = event.mediaAttachmentUrl
+          ? MessageTypeEnum.IMAGE
+          : MessageTypeEnum.TEXT;
+        patchFields.lastMessageAt = msgTime;
+        if (event.isEchoFromPage) {
+          patchFields.lastAgentReplyAt = msgTime;
+          patchFields.supportStatus = ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY;
+        } else {
+          patchFields.lastCustomerMessageAt = msgTime;
+        }
+      }
+
+      if (Object.keys(patchFields).length > 0) {
+        await this.conversationRepo.update(conversation.id, patchFields);
+      }
+
+      if (activeMemberUserIds.length > 0) {
+        await this.ensureConversationParticipants(conversation.id, activeMemberUserIds);
+      }
+    }
+
+    const encryptedContent = this.messageCryptoService.encryptForConversation(
+      event.messageText,
+      conversation.id,
+    );
+
+    const senderId = event.isEchoFromPage
+      ? `page:${channel.externalPageId || channel.id}`
+      : `ext:${channel.channelType.toLowerCase()}:${event.externalThreadId.slice(0, 18)}`;
+
+    const messageEntity = this.messageRepo.create({
+      shopId: channel.shopId,
+      conversationId: conversation.id,
+      senderId,
+      content: encryptedContent.ciphertext,
+      type: event.mediaAttachmentUrl ? MessageTypeEnum.IMAGE : MessageTypeEnum.TEXT,
+      direction: event.isEchoFromPage
+        ? MessageDirectionEnum.OUTBOUND
+        : MessageDirectionEnum.INBOUND,
+      status: MessageStatusEnum.DELIVERED,
+      externalMessageId: event.externalMessageId,
+      readBy: [],
+      deliveredTo: activeMemberUserIds,
+      isPinned: false,
+      metadata: {
+        isEncrypted: encryptedContent.isEncrypted,
+        encryptionAlg: encryptedContent.algorithm,
+        channelType: channel.channelType,
+        channelIntegrationId: channel.id,
+        pageShortCode: channel.pageShortCode,
+        pageName: channel.pageName,
+        channelAvatarUrl: channel.avatarUrl || null,
+        interactionType: event.interactionType,
+        externalCustomerPsid: event.externalCustomerPsid,
+        externalCustomerName: event.customerName,
+        externalCustomerAvatar: stableCustomerAvatar,
+        externalCommentId: event.externalCommentId,
+        parentCommentId: event.parentCommentId,
+        sourcePostId: event.sourcePostId,
+        sourceAdId: event.sourceAdId,
+        mediaAttachmentUrl: event.mediaAttachmentUrl,
+        isEchoFromPage: event.isEchoFromPage,
+        echoSourceAppId: event.echoSourceAppId || null,
+        syncedHistorical3m: true,
+        historicalCreatedAtIso: msgTimeIso,
+      } as any,
+      createdAt: msgTime,
+      updatedAt: msgTime,
+    });
+
+    await this.messageRepo.save(messageEntity);
+    return { conversationId: conversation.id, inserted: true };
+  }
+
   private async syncSingleChannelHistoricalThreeMonthsInternal(
     channel: ChannelIntegrationEntity,
     lookbackDays = 90,
@@ -6417,6 +7007,7 @@ export class ChannelsService {
     adPostsScanned: number;
     commentsSynced: number;
     syncedFromLiveApi: boolean;
+    warnings: string[];
     sinceIso: string;
     syncedAt: string;
   }> {
@@ -6425,6 +7016,7 @@ export class ChannelsService {
     const sinceUnixSec = Math.floor(sinceMs / 1000);
     const sinceIso = new Date(sinceMs).toISOString();
     const syncedAt = new Date(nowMs).toISOString();
+    const warnings: string[] = [];
 
     const rawPageToken = channel.accessTokenEncrypted
       ? this.messageCryptoService.decryptForConversation(
@@ -6450,6 +7042,7 @@ export class ChannelsService {
         adPostsScanned: 0,
         commentsSynced: 0,
         syncedFromLiveApi: false,
+        warnings: ['Kênh đang dùng token sandbox/chưa cấp quyền Meta thật.'],
         sinceIso,
         syncedAt,
       };
@@ -6460,6 +7053,17 @@ export class ChannelsService {
       : envs.omnichannelSaas.metaAppSecret || null;
     const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
 
+    const activeMembers = await this.getCachedShopActiveMembers(channel.shopId);
+    const activeMemberUserIds = activeMembers
+      .filter((m) => {
+        if (m.role === ShopRoleEnum.SHOP_OWNER || m.role === ShopRoleEnum.SHOP_MANAGER) {
+          return true;
+        }
+        const allowed = Array.isArray(m.allowedChannelIdsJson) ? m.allowedChannelIdsJson : [];
+        return allowed.length === 0 || allowed.includes(channel.id);
+      })
+      .map((m) => m.userId);
+
     let conversationsScanned = 0;
     let inboundMessagesSynced = 0;
     let outboundEchoMessagesSynced = 0;
@@ -6469,12 +7073,25 @@ export class ChannelsService {
     let syncedFromLiveApi = false;
 
     // =========================================================================
-    // PHẦN A: PHÂN TRANG LỊCH SỬ HỘP THƯ 3 THÁNG (`/{page_id}/conversations` & `/{thread_id}/messages`)
+    // PHẦN A: PHÂN TRANG SÂU HỘI THOẠI & TIN NHẮN HỘP THƯ TRONG 90 NGÀY
+    // Tách bước lấy danh sách thread (`limit=25`) và bước phân trang `/{threadId}/messages?limit=50`
+    // theo `paging.next` để tránh lỗi Meta Error #1 & không bao giờ đứt phân trang ở trang 1.
     // =========================================================================
     if (
       channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
       channel.channelType === ChannelTypeEnum.INSTAGRAM
     ) {
+      type GraphThreadSummary = {
+        id: string;
+        updated_time?: string;
+        participants?: {
+          data?: Array<{ id?: string; name?: string; username?: string }>;
+        };
+        senders?: {
+          data?: Array<{ id?: string; name?: string; username?: string }>;
+        };
+      };
+
       type GraphInboxMsgItem = {
         id: string;
         message?: string;
@@ -6491,6 +7108,81 @@ export class ChannelsService {
         sticker?: string;
       };
 
+      const discoveredThreads: GraphThreadSummary[] = [];
+      let nextConvUrl: string | null = null;
+      let convLimit = 25;
+      const MAX_CONVERSATION_PAGES = 80; // Tối đa 80 trang x 25 = 2.000 luồng hội thoại trong 3 tháng
+
+      for (let pageIdx = 0; pageIdx < MAX_CONVERSATION_PAGES; pageIdx++) {
+        const convPageRes = nextConvUrl
+          ? await this.callMetaGraphAbsoluteUrl<{
+              data?: GraphThreadSummary[];
+              paging?: { cursors?: { after?: string }; next?: string };
+            }>({
+              nextUrl: nextConvUrl,
+              accessToken: rawPageToken,
+              appSecret: rawAppSecret,
+              timeoutMs: 20000,
+            })
+          : await this.callMetaGraphApi<{
+              data?: GraphThreadSummary[];
+              paging?: { cursors?: { after?: string }; next?: string };
+            }>({
+              apiVersion: apiVer,
+              path: `${channel.externalPageId}/conversations`,
+              queryParams: {
+                fields: 'id,updated_time,participants,senders',
+                limit: String(convLimit),
+                ...(channel.channelType === ChannelTypeEnum.INSTAGRAM
+                  ? { platform: 'instagram' }
+                  : {}),
+              },
+              accessToken: rawPageToken,
+              appSecret: rawAppSecret,
+              timeoutMs: 20000,
+            });
+
+        if (!convPageRes.ok) {
+          // Tự động hạ limit xuống 10 nếu Meta báo lỗi quá tải dữ liệu (#1 / #2) ở trang đầu
+          if (
+            pageIdx === 0 &&
+            convLimit > 10 &&
+            (convPageRes.errorCode === 1 || convPageRes.errorCode === 2)
+          ) {
+            convLimit = 10;
+            pageIdx = -1;
+            continue;
+          }
+          warnings.push(
+            `Không thể tải trang hội thoại #${pageIdx + 1}: ${convPageRes.errorMessage || 'Lỗi Meta API'}`,
+          );
+          break;
+        }
+
+        syncedFromLiveApi = true;
+        const threads = Array.isArray(convPageRes.data?.data) ? convPageRes.data.data : [];
+        if (threads.length === 0) break;
+
+        let reachedOlderThanWindow = false;
+        for (const threadObj of threads) {
+          const threadUpdatedMs = threadObj.updated_time
+            ? Date.parse(threadObj.updated_time)
+            : nowMs;
+          if (!Number.isNaN(threadUpdatedMs) && threadUpdatedMs < sinceMs) {
+            reachedOlderThanWindow = true;
+            continue;
+          }
+          discoveredThreads.push(threadObj);
+        }
+
+        if (reachedOlderThanWindow || !convPageRes.data?.paging?.next) {
+          break;
+        }
+        nextConvUrl = convPageRes.data.paging.next;
+      }
+
+      conversationsScanned = discoveredThreads.length;
+
       const collectedHistoricalInboxMsgs: Array<{
         mid: string;
         customerPsid: string;
@@ -6502,127 +7194,57 @@ export class ChannelsService {
         createdTimeMs: number;
       }> = [];
 
-      let convAfterCursor: string | null = null;
-      const MAX_CONVERSATION_PAGES = 20; // Tối đa 20 trang x 50 = 1.000 luồng hội thoại trong 3 tháng
+      // Phân trang sâu từng luồng hội thoại theo `paging.next` cho tới đúng mốc 90 ngày
+      const MAX_MSG_PAGES_PER_THREAD = 40; // Tối đa 40 x 50 = 2.000 tin nhắn / khách hàng
+      for (const threadObj of discoveredThreads) {
+        const participantPool = [
+          ...(Array.isArray(threadObj.participants?.data) ? threadObj.participants.data : []),
+          ...(Array.isArray(threadObj.senders?.data) ? threadObj.senders.data : []),
+        ];
+        const customerParticipant = participantPool.find(
+          (p) => p?.id && String(p.id) !== channel.externalPageId,
+        );
 
-      for (let pageIdx = 0; pageIdx < MAX_CONVERSATION_PAGES; pageIdx++) {
-        const queryParams: Record<string, string> = {
-          fields:
-            'id,updated_time,participants,senders,messages.limit(100){id,message,created_time,from,to,attachments,sticker}',
-          limit: '50',
-        };
-        if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
-          queryParams.platform = 'instagram';
-        }
-        if (convAfterCursor) {
-          queryParams.after = convAfterCursor;
-        }
+        let nextMsgUrl: string | null = null;
+        for (let mPage = 0; mPage < MAX_MSG_PAGES_PER_THREAD; mPage++) {
+          const msgPageRes = nextMsgUrl
+            ? await this.callMetaGraphAbsoluteUrl<{
+                data?: GraphInboxMsgItem[];
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                nextUrl: nextMsgUrl,
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 20000,
+              })
+            : await this.callMetaGraphApi<{
+                data?: GraphInboxMsgItem[];
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                apiVersion: apiVer,
+                path: `${threadObj.id}/messages`,
+                queryParams: {
+                  fields: 'id,message,created_time,from,to,attachments,sticker',
+                  limit: '50',
+                },
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 20000,
+              });
 
-        const convPageRes = await this.callMetaGraphApi<{
-          data?: Array<{
-            id: string;
-            updated_time?: string;
-            participants?: {
-              data?: Array<{ id?: string; name?: string; username?: string }>;
-            };
-            senders?: {
-              data?: Array<{ id?: string; name?: string; username?: string }>;
-            };
-            messages?: {
-              data?: GraphInboxMsgItem[];
-              paging?: { cursors?: { after?: string }; next?: string };
-            };
-          }>;
-          paging?: { cursors?: { after?: string }; next?: string };
-        }>({
-          apiVersion: apiVer,
-          path: `${channel.externalPageId}/conversations`,
-          queryParams,
-          accessToken: rawPageToken,
-          appSecret: rawAppSecret,
-        });
-
-        if (!convPageRes.ok || !Array.isArray(convPageRes.data?.data)) {
-          break;
-        }
-        syncedFromLiveApi = true;
-
-        const threads = convPageRes.data.data;
-        if (threads.length === 0) {
-          break;
-        }
-
-        let reachedThreadsOlderThan3Months = false;
-
-        for (const threadObj of threads) {
-          const threadUpdatedMs = threadObj.updated_time
-            ? Date.parse(threadObj.updated_time)
-            : nowMs;
-          if (!Number.isNaN(threadUpdatedMs) && threadUpdatedMs < sinceMs) {
-            reachedThreadsOlderThan3Months = true;
-            continue;
+          if (!msgPageRes.ok || !Array.isArray(msgPageRes.data?.data)) {
+            break;
           }
 
-          conversationsScanned += 1;
+          const batchMsgs = msgPageRes.data.data;
+          if (batchMsgs.length === 0) break;
 
-          const participantPool = [
-            ...(Array.isArray(threadObj.participants?.data) ? threadObj.participants.data : []),
-            ...(Array.isArray(threadObj.senders?.data) ? threadObj.senders.data : []),
-          ];
-          const customerParticipant = participantPool.find(
-            (p) => p?.id && String(p.id) !== channel.externalPageId,
-          );
-
-          const allThreadMsgs: GraphInboxMsgItem[] = Array.isArray(threadObj.messages?.data)
-            ? [...threadObj.messages.data]
-            : [];
-
-          // Nếu luồng hội thoại có nhiều hơn 100 tin nhắn và tin nhắn cũ nhất trong trang đầu vẫn nằm trong 3 tháng gần nhất,
-          // phân trang tiếp `GET /{thread_id}/messages` cho đến khi chạm mốc 3 tháng (`sinceMs`)
-          let msgAfterCursor = threadObj.messages?.paging?.cursors?.after || null;
-          let hasNextMsgPage = Boolean(threadObj.messages?.paging?.next && msgAfterCursor);
-          const MAX_MSG_PAGES_PER_THREAD = 10;
-
-          for (
-            let mPage = 0;
-            mPage < MAX_MSG_PAGES_PER_THREAD && hasNextMsgPage && msgAfterCursor;
-            mPage++
-          ) {
-            const oldestInBatch = allThreadMsgs[allThreadMsgs.length - 1];
-            const oldestMs = oldestInBatch?.created_time
-              ? Date.parse(oldestInBatch.created_time)
-              : nowMs;
-            if (!Number.isNaN(oldestMs) && oldestMs < sinceMs) {
-              break;
-            }
-
-            const moreMsgsRes = await this.callMetaGraphApi<{
-              data?: GraphInboxMsgItem[];
-              paging?: { cursors?: { after?: string }; next?: string };
-            }>({
-              apiVersion: apiVer,
-              path: `${threadObj.id}/messages`,
-              queryParams: {
-                fields: 'id,message,created_time,from,to,attachments,sticker',
-                limit: '100',
-                after: msgAfterCursor,
-              },
-              accessToken: rawPageToken,
-              appSecret: rawAppSecret,
-            });
-
-            if (!moreMsgsRes.ok || !Array.isArray(moreMsgsRes.data?.data)) {
-              break;
-            }
-            allThreadMsgs.push(...moreMsgsRes.data.data);
-            msgAfterCursor = moreMsgsRes.data.paging?.cursors?.after || null;
-            hasNextMsgPage = Boolean(moreMsgsRes.data.paging?.next && msgAfterCursor);
-          }
-
-          for (const m of allThreadMsgs) {
+          let reachedOldMsg = false;
+          for (const m of batchMsgs) {
             if (!m?.id) continue;
             const createdMs = m.created_time ? Date.parse(m.created_time) : nowMs;
             if (!Number.isNaN(createdMs) && createdMs < sinceMs) {
+              reachedOldMsg = true;
               continue;
             }
 
@@ -6639,6 +7261,7 @@ export class ChannelsService {
                 : customerParticipant?.name || customerParticipant?.username) ||
                 `Khách ${channel.pageShortCode} #${resolvedPsid.slice(-4)}`,
             );
+
             const firstAtt = Array.isArray(m.attachments?.data) ? m.attachments.data[0] : null;
             const mediaUrl =
               firstAtt?.image_data?.url ||
@@ -6662,17 +7285,15 @@ export class ChannelsService {
               createdTimeMs: !Number.isNaN(createdMs) ? createdMs : nowMs,
             });
           }
-        }
 
-        const nextCursor = convPageRes.data.paging?.cursors?.after || null;
-        if (reachedThreadsOlderThan3Months || !convPageRes.data.paging?.next || !nextCursor) {
-          break;
+          if (reachedOldMsg || !msgPageRes.data?.paging?.next) {
+            break;
+          }
+          nextMsgUrl = msgPageRes.data.paging.next;
         }
-        convAfterCursor = nextCursor;
       }
 
       if (collectedHistoricalInboxMsgs.length > 0) {
-        // Sắp xếp theo thời gian từ cũ đến mới (`ASC`) để tái hiện chính xác dòng thời gian hội thoại 3 tháng
         collectedHistoricalInboxMsgs.sort((a, b) => a.createdTimeMs - b.createdTimeMs);
 
         const existingMidSet = new Set<string>();
@@ -6717,13 +7338,12 @@ export class ChannelsService {
             mediaAttachmentUrl: item.mediaUrl,
           };
 
-          const processed = await this.withConversationThreadLock(
-            channel.shopId,
-            channel.id,
-            normalizedInboxEvt.externalThreadId,
-            () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedInboxEvt),
-          );
-          if (processed.conversationId) {
+          const upsertRes = await this.upsertHistoricalOmnichannelMessage({
+            channel,
+            event: normalizedInboxEvt,
+            activeMemberUserIds,
+          });
+          if (upsertRes.inserted) {
             if (item.isEchoFromPage) {
               outboundEchoMessagesSynced += 1;
             } else {
@@ -6735,7 +7355,7 @@ export class ChannelsService {
     }
 
     // =========================================================================
-    // PHẦN B: PHÂN TRANG LỊCH SỬ BÀI VIẾT THƯỜNG, BÀI QUẢNG CÁO (`ads_posts`) & BÌNH LUẬN 3 THÁNG
+    // PHẦN B: PHÂN TRANG SÂU BÀI VIẾT THƯỜNG, BÀI ADS (`ads_posts`) & BÌNH LUẬN 90 NGÀY
     // =========================================================================
     const collectedHistoricalComments: Array<{
       postId: string;
@@ -6770,29 +7390,36 @@ export class ChannelsService {
       ];
 
       for (const edge of postEdges) {
-        let postAfterCursor: string | null = null;
-        const MAX_POST_PAGES = 10;
+        let nextPostUrl: string | null = null;
+        const MAX_POST_PAGES = 15;
 
         for (let pPage = 0; pPage < MAX_POST_PAGES; pPage++) {
-          const postRes = await this.callMetaGraphApi<{
-            data?: Array<{
-              id: string;
-              created_time?: string;
-            }>;
-            paging?: { cursors?: { after?: string }; next?: string };
-          }>({
-            apiVersion: apiVer,
-            path: edge.path,
-            queryParams: {
-              fields: 'id,created_time',
-              since: String(sinceUnixSec),
-              limit: '50',
-              ...(edge.extraParams || {}),
-              ...(postAfterCursor ? { after: postAfterCursor } : {}),
-            },
-            accessToken: rawPageToken,
-            appSecret: rawAppSecret,
-          });
+          const postRes = nextPostUrl
+            ? await this.callMetaGraphAbsoluteUrl<{
+                data?: Array<{ id: string; created_time?: string }>;
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                nextUrl: nextPostUrl,
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 15000,
+              })
+            : await this.callMetaGraphApi<{
+                data?: Array<{ id: string; created_time?: string }>;
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                apiVersion: apiVer,
+                path: edge.path,
+                queryParams: {
+                  fields: 'id,created_time',
+                  since: String(sinceUnixSec),
+                  limit: '50',
+                  ...(edge.extraParams || {}),
+                },
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 15000,
+              });
 
           if (!postRes.ok || !Array.isArray(postRes.data?.data)) {
             break;
@@ -6802,63 +7429,73 @@ export class ChannelsService {
           for (const post of postRes.data.data) {
             if (!post?.id) continue;
             discoveredPostIds.add(post.id);
-            if (edge.isAdEdge) {
-              adPostIds.add(post.id);
-            }
+            if (edge.isAdEdge) adPostIds.add(post.id);
           }
 
-          const nextPostCursor = postRes.data.paging?.cursors?.after || null;
-          if (!postRes.data.paging?.next || !nextPostCursor) {
-            break;
-          }
-          postAfterCursor = nextPostCursor;
+          if (!postRes.data.paging?.next) break;
+          nextPostUrl = postRes.data.paging.next;
         }
       }
 
       postsScanned = discoveredPostIds.size;
       adPostsScanned = adPostIds.size;
 
-      // Với từng bài viết (cả bài đăng thường lẫn bài chạy quảng cáo Dark Post), phân trang toàn bộ bình luận trong 3 tháng (`filter=stream`)
       for (const postId of discoveredPostIds) {
-        let cmtAfterCursor: string | null = null;
-        const MAX_CMT_PAGES_PER_POST = 10;
+        let nextCmtUrl: string | null = null;
+        const MAX_CMT_PAGES_PER_POST = 20;
 
         for (let cPage = 0; cPage < MAX_CMT_PAGES_PER_POST; cPage++) {
-          const cmtRes = await this.callMetaGraphApi<{
-            data?: Array<{
-              id: string;
-              message?: string;
-              created_time?: string;
-              from?: {
-                id?: string;
-                name?: string;
-                picture?: { data?: { url?: string } };
-              };
-              parent?: { id?: string };
-              attachment?: {
-                media?: { image?: { src?: string } };
-                url?: string;
-              };
-            }>;
-            paging?: { cursors?: { after?: string }; next?: string };
-          }>({
-            apiVersion: apiVer,
-            path: `${postId}/comments`,
-            queryParams: {
-              filter: 'stream',
-              since: String(sinceUnixSec),
-              limit: '100',
-              fields:
-                'id,message,created_time,from{id,name,picture.type(large)},parent{id},attachment,is_hidden',
-              ...(cmtAfterCursor ? { after: cmtAfterCursor } : {}),
-            },
-            accessToken: rawPageToken,
-            appSecret: rawAppSecret,
-          });
+          const cmtRes = nextCmtUrl
+            ? await this.callMetaGraphAbsoluteUrl<{
+                data?: Array<{
+                  id: string;
+                  message?: string;
+                  created_time?: string;
+                  from?: {
+                    id?: string;
+                    name?: string;
+                    picture?: { data?: { url?: string } };
+                  };
+                  parent?: { id?: string };
+                  attachment?: { media?: { image?: { src?: string } }; url?: string };
+                }>;
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                nextUrl: nextCmtUrl,
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 15000,
+              })
+            : await this.callMetaGraphApi<{
+                data?: Array<{
+                  id: string;
+                  message?: string;
+                  created_time?: string;
+                  from?: {
+                    id?: string;
+                    name?: string;
+                    picture?: { data?: { url?: string } };
+                  };
+                  parent?: { id?: string };
+                  attachment?: { media?: { image?: { src?: string } }; url?: string };
+                }>;
+                paging?: { cursors?: { after?: string }; next?: string };
+              }>({
+                apiVersion: apiVer,
+                path: `${postId}/comments`,
+                queryParams: {
+                  filter: 'stream',
+                  since: String(sinceUnixSec),
+                  limit: '100',
+                  fields:
+                    'id,message,created_time,from{id,name,picture.type(large)},parent{id},attachment,is_hidden',
+                },
+                accessToken: rawPageToken,
+                appSecret: rawAppSecret,
+                timeoutMs: 15000,
+              });
 
-          if (!cmtRes.ok || !Array.isArray(cmtRes.data?.data)) {
-            break;
-          }
+          if (!cmtRes.ok || !Array.isArray(cmtRes.data?.data)) break;
           syncedFromLiveApi = true;
 
           for (const cmt of cmtRes.data.data) {
@@ -6890,86 +7527,9 @@ export class ChannelsService {
             });
           }
 
-          const nextCmtCursor = cmtRes.data.paging?.cursors?.after || null;
-          if (!cmtRes.data.paging?.next || !nextCmtCursor) {
-            break;
-          }
-          cmtAfterCursor = nextCmtCursor;
+          if (!cmtRes.data.paging?.next) break;
+          nextCmtUrl = cmtRes.data.paging.next;
         }
-      }
-    } else if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
-      let igAfterCursor: string | null = null;
-      const MAX_IG_MEDIA_PAGES = 10;
-
-      for (let mPage = 0; mPage < MAX_IG_MEDIA_PAGES; mPage++) {
-        const igMediaRes = await this.callMetaGraphApi<{
-          data?: Array<{
-            id: string;
-            timestamp?: string;
-            comments?: {
-              data?: Array<{
-                id: string;
-                text?: string;
-                timestamp?: string;
-                username?: string;
-                from?: { id?: string; username?: string };
-                parent_id?: string;
-              }>;
-            };
-          }>;
-          paging?: { cursors?: { after?: string }; next?: string };
-        }>({
-          apiVersion: apiVer,
-          path: `${channel.externalPageId}/media`,
-          queryParams: {
-            fields:
-              'id,caption,timestamp,comments.limit(100){id,text,timestamp,username,from{id,username},parent_id}',
-            since: String(sinceUnixSec),
-            limit: '50',
-            ...(igAfterCursor ? { after: igAfterCursor } : {}),
-          },
-          accessToken: rawPageToken,
-          appSecret: rawAppSecret,
-        });
-
-        if (!igMediaRes.ok || !Array.isArray(igMediaRes.data?.data)) {
-          break;
-        }
-        syncedFromLiveApi = true;
-        postsScanned += igMediaRes.data.data.length;
-
-        for (const media of igMediaRes.data.data) {
-          const cmtList = Array.isArray(media.comments?.data) ? media.comments.data : [];
-          for (const cmt of cmtList) {
-            if (!cmt?.id || seenCommentIds.has(cmt.id)) continue;
-            const cmtMs = cmt.timestamp ? Date.parse(cmt.timestamp) : nowMs;
-            if (!Number.isNaN(cmtMs) && cmtMs < sinceMs) continue;
-
-            seenCommentIds.add(cmt.id);
-            const commenterId = String(cmt.from?.id || cmt.username || `ig_${cmt.id.slice(-6)}`);
-            const commenterName = String(
-              cmt.from?.username || cmt.username || `Khách IG #${commenterId.slice(-4)}`,
-            );
-            collectedHistoricalComments.push({
-              postId: media.id,
-              commentId: cmt.id,
-              parentCommentId: cmt.parent_id ? String(cmt.parent_id) : null,
-              commenterId,
-              commenterName,
-              commenterAvatar: null,
-              messageText: String(cmt.text || '[Bình luận Instagram]'),
-              mediaAttachmentUrl: null,
-              createdTimeIso: !Number.isNaN(cmtMs) ? new Date(cmtMs).toISOString() : syncedAt,
-              createdTimeMs: !Number.isNaN(cmtMs) ? cmtMs : nowMs,
-            });
-          }
-        }
-
-        const nextIgCursor = igMediaRes.data.paging?.cursors?.after || null;
-        if (!igMediaRes.data.paging?.next || !nextIgCursor) {
-          break;
-        }
-        igAfterCursor = nextIgCursor;
       }
     }
 
@@ -7022,17 +7582,23 @@ export class ChannelsService {
           mediaAttachmentUrl: item.mediaAttachmentUrl,
         };
 
-        const processed = await this.withConversationThreadLock(
-          channel.shopId,
-          channel.id,
-          normalizedEvt.externalThreadId,
-          () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedEvt),
-        );
-        if (processed.conversationId) {
+        const upsertRes = await this.upsertHistoricalOmnichannelMessage({
+          channel,
+          event: normalizedEvt,
+          activeMemberUserIds,
+        });
+        if (upsertRes.inserted) {
           commentsSynced += 1;
         }
       }
     }
+
+    // Phát sự kiện cập nhật kênh để mọi màn hình đang mở tự làm mới danh sách hội thoại
+    this.scheduleCoalescedShopChannelUpdate(channel.shopId, {
+      shopId: channel.shopId,
+      action: 'HISTORICAL_3M_SYNC_COMPLETED',
+      channelId: channel.id,
+    });
 
     return {
       channelId: channel.id,
@@ -7046,6 +7612,7 @@ export class ChannelsService {
       adPostsScanned,
       commentsSynced,
       syncedFromLiveApi,
+      warnings,
       sinceIso,
       syncedAt,
     };

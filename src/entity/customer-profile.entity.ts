@@ -36,10 +36,13 @@ export interface CustomerRecentOrderSnapshotItem {
 export type CustomerAbuseReportSourceType =
   | 'SHOP_INTERNAL'
   | 'PANCAKE_COMMUNITY'
+  | 'PANCAKE_V2'
+  | 'PANCAKE_POS'
   | 'CARRIER_3PL_GHN'
   | 'CARRIER_3PL_GHTK'
   | 'CARRIER_3PL_VTP'
   | 'CARRIER_3PL_JT'
+  | 'MARKETPLACE_SHOPEE'
   | 'CUSTOM_WEBHOOK_PROVIDER';
 
 export interface CustomerAbuseReportItem {
@@ -52,6 +55,8 @@ export interface CustomerAbuseReportItem {
   trackingNumber?: string | null;
   source: CustomerAbuseReportSourceType | string;
   sourceLabel?: string;
+  severity?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  isCarrierVerified?: boolean;
   reportedByName: string;
   reportedAt: string;
 }

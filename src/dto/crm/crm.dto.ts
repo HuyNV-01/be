@@ -530,13 +530,27 @@ export class ReportCustomerPhoneAbuseDto {
   @IsString()
   orderCode?: string;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  trackingNumber?: string;
+
   @ApiPropertyOptional({
     description:
-      'Nguồn ghi nhận báo cáo (SHOP_INTERNAL | PANCAKE_COMMUNITY | CARRIER_3PL_GHN | CARRIER_3PL_GHTK)',
+      'Nguồn ghi nhận báo cáo (SHOP_INTERNAL | PANCAKE_COMMUNITY | PANCAKE_V2 | PANCAKE_POS | CARRIER_3PL_GHN | CARRIER_3PL_GHTK | CARRIER_3PL_VTP | CARRIER_3PL_JT | MARKETPLACE_SHOPEE)',
   })
   @IsOptional()
   @IsString()
-  source?: 'SHOP_INTERNAL' | 'PANCAKE_COMMUNITY' | 'CARRIER_3PL_GHN' | 'CARRIER_3PL_GHTK';
+  source?:
+    | 'SHOP_INTERNAL'
+    | 'PANCAKE_COMMUNITY'
+    | 'PANCAKE_V2'
+    | 'PANCAKE_POS'
+    | 'CARRIER_3PL_GHN'
+    | 'CARRIER_3PL_GHTK'
+    | 'CARRIER_3PL_VTP'
+    | 'CARRIER_3PL_JT'
+    | 'MARKETPLACE_SHOPEE';
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -601,15 +615,32 @@ export class UpdateShopCrmConfigDto {
   @IsBoolean()
   usePancakeCommunityNetwork?: boolean;
 
+  // Alias tương thích FE `updateShopCrmConfigApi` để ValidationPipe không loại bỏ cấu hình
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableCommunityTrustLookup?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   useCarrier3plLookup?: boolean;
 
+  // Alias tương thích FE `updateShopCrmConfigApi`
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enableCarrier3plTrustLookup?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsArray()
-  enabledCarriers?: Array<'GHN' | 'GHTK' | 'VTP' | 'JT'>;
+  enabledLookupSources?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  enabledCarriers?: Array<'GHN' | 'GHTK' | 'VTP' | 'JT' | 'SHOPEE'>;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -639,53 +670,18 @@ export class UpdateShopCrmConfigDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  autoRequireDepositBelowTrustScore?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsBoolean()
   autoMaskBuyerPhoneInChat?: boolean;
 
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  autoExtractAddressFromChat?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  requireDepositOnHighRisk?: boolean;
-
-  @ApiPropertyOptional({ enum: ShopBusinessCategoryEnum })
-  @IsOptional()
-  @IsEnum(ShopBusinessCategoryEnum)
-  businessCategory?: ShopBusinessCategoryEnum;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  showApparelMeasurementsInProfile?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsArray()
-  customAttributeTemplates?: Array<{
-    key: string;
-    label: string;
-    placeholder?: string;
-  }>;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  enableCommunityTrustLookup?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  enableCarrier3plTrustLookup?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsArray()
-  enabledLookupSources?: string[];
-
+  // Alias tương thích FE `updateShopCrmConfigApi`
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -694,13 +690,23 @@ export class UpdateShopCrmConfigDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
+  autoExtractAddressFromChat?: boolean;
+
+  // Alias tương thích FE `updateShopCrmConfigApi`
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
   autoExtractPhoneAndAddressInChat?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  autoRequireDepositBelowTrustScore?: number;
+  @IsString()
+  businessCategory?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  showApparelMeasurementsInProfile?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -711,6 +717,16 @@ export class UpdateShopCrmConfigDto {
   @IsOptional()
   @IsArray()
   defaultCustomAttributeKeys?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  customAttributeTemplates?: Array<{ key: string; label: string; placeholder?: string }>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requireDepositOnHighRisk?: boolean;
 }
 
 export class MergeCustomerProfilesDto {
