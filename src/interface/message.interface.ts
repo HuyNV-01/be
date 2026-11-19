@@ -103,6 +103,9 @@ export interface MessageMetadata {
   externalCustomerName?: string;
   externalCustomerAvatar?: string | null;
   externalCustomerPsid?: string | null;
+  isPageEcho?: boolean;
+  echoSourceAppId?: string | null;
+  echoSourceAppLabel?: string | null;
   skipPlatformDispatch?: boolean;
   marketplaceOrder?: Record<string, any>;
   externalCommentId?: string;

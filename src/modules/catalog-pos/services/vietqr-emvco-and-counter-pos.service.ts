@@ -79,8 +79,8 @@ export class VietQrEmvcoAndCounterPosService {
   }): VietQrEmvcoPayloadInfo {
     const bankBin = (params.bankBin || '970422').trim();
     const bankShortName = (params.bankShortName || 'MBBank').trim();
-    const accountNumber = (params.accountNumber || '0988123456888').trim();
-    const accountName = (params.accountName || 'CONG TY TNHH PANCAKE SELLER OS').trim();
+    const accountNumber = (params.accountNumber || '').trim();
+    const accountName = (params.accountName || '').trim();
     const prefix = (params.transferPrefix || 'SEVQR ORD').trim();
     const amountVnd = Math.max(1000, Math.round(Number(params.amountVnd || 0)));
     const cleanOrderCode = params.orderCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
@@ -109,11 +109,13 @@ export class VietQrEmvcoAndCounterPosService {
     const crcHex = this.computeEmvcoCrc16CcittFalse(payloadWithoutCrc);
     const emvcoRawPayload = `${payloadWithoutCrc}${crcHex}`;
 
-    const qrImageUrl = `https://img.vietqr.io/image/${encodeURIComponent(
-      bankBin,
-    )}-${encodeURIComponent(accountNumber)}-compact2.png?amount=${amountVnd}&addInfo=${encodeURIComponent(
-      transferReferenceCode,
-    )}&accountName=${encodeURIComponent(accountName)}`;
+    const qrImageUrl = accountNumber
+      ? `https://img.vietqr.io/image/${encodeURIComponent(
+          bankBin,
+        )}-${encodeURIComponent(accountNumber)}-compact2.png?amount=${amountVnd}&addInfo=${encodeURIComponent(
+          transferReferenceCode,
+        )}&accountName=${encodeURIComponent(accountName)}`
+      : '';
 
     return {
       bankBin,

@@ -8,6 +8,7 @@ import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.entity';
 import { MessageEntity } from 'src/entity/message.entity';
+import { PosOrderEntity } from 'src/entity/pos-order.entity';
 import { SecurityAuditLogEntity } from 'src/entity/security-audit-log.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -31,6 +32,7 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     TypeOrmModule.forFeature([
       CustomerProfileEntity,
       CustomerWalletLedgerEntity,
+      PosOrderEntity,
       AdsConversionEventLogEntity,
       SecurityAuditLogEntity,
       ConversationEntity,

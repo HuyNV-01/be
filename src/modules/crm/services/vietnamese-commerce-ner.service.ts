@@ -108,7 +108,7 @@ export class VietnameseCommerceNerService {
    */
   public formatMaskedPhone(localPhone: string): string {
     const clean = (localPhone || '').replace(/\D/g, '');
-    if (clean.length < 7) return '098***678';
+    if (clean.length < 7) return '';
     return `${clean.slice(0, 3)}***${clean.slice(-3)}`;
   }
 
@@ -125,9 +125,15 @@ export class VietnameseCommerceNerService {
     if (!rawText || !rawText.trim()) return [];
 
     let normalizedForPhone = ` ${this.normalizeUnicodeDigits(rawText)} `;
-    for (const item of VIETNAMESE_NUMBER_WORDS_MAP) {
-      normalizedForPhone = normalizedForPhone.replace(item.pattern, item.digit);
-    }
+    const wordNumberSeqRegex =
+      /(?:(?:(?:không|khong|k0|zero|zê\s*rô|một|mốt|mot|nhất|nhat|hai|nhị|nhi|ba|tam|bốn|tư|bon|tu|tứ|năm|lăm|nam|lam|ngũ|ngu|sáu|sau|lục|luc|bảy|bẩy|bay|thất|that|tám|bát|bat|chín|chin|cửu|cuu)\b|\d)[\s._\-()]*){8,12}/gi;
+    normalizedForPhone = normalizedForPhone.replace(wordNumberSeqRegex, (seq) => {
+      let replaced = seq;
+      for (const item of VIETNAMESE_NUMBER_WORDS_MAP) {
+        replaced = replaced.replace(item.pattern, item.digit);
+      }
+      return replaced;
+    });
 
     // Thay thế ký tự đồng hình (homoglyphs) O/o -> 0 và I/l -> 1 khi đứng cạnh chữ số
     normalizedForPhone = normalizedForPhone
@@ -240,8 +246,7 @@ export class VietnameseCommerceNerService {
     const sanitizedNormalized = Array.isArray(extracted.normalizedPhones)
       ? extracted.normalizedPhones.map((item) => {
           const masked =
-            item.maskedPhone ||
-            (item.localPhone ? this.formatMaskedPhone(item.localPhone) : '098***678');
+            item.maskedPhone || (item.localPhone ? this.formatMaskedPhone(item.localPhone) : '');
           return {
             rawMatch: masked,
             maskedPhone: masked,
@@ -548,8 +553,6 @@ export class VietnameseCommerceNerService {
         mergedProvinceName: matchedProvince.mergedIntoProvinceName || matchedProvince.name,
         wards: [],
       };
-    } else if (!matchedDistrict && matchedProvince && matchedProvince.districts.length > 0) {
-      matchedDistrict = matchedProvince.districts[0];
     }
 
     if (!matchedWard && matchedDistrict && dynamicWardName) {
@@ -570,8 +573,24 @@ export class VietnameseCommerceNerService {
         mergedProvinceName: matchedProvince?.mergedIntoProvinceName || matchedProvince?.name,
         hamlets: [],
       };
-    } else if (!matchedWard && matchedDistrict && matchedDistrict.wards.length > 0) {
-      matchedWard = matchedDistrict.wards[0];
+    } else if (!matchedWard && !matchedDistrict && matchedProvince && dynamicWardName) {
+      const dynWardSlug = this.stripDiacritics(dynamicWardName)
+        .replace(/[^a-z0-9]+/g, '-')
+        .toUpperCase();
+      matchedWard = {
+        code: `${matchedProvince.code}-${dynWardSlug.slice(0, 12)}`,
+        name: dynamicWardName,
+        aliases: [this.stripDiacritics(dynamicWardName)],
+        ghnWardCode: matchedProvince.districts[0]?.wards[0]?.ghnWardCode || '10001',
+        ghtkWardName: dynamicWardName,
+        legacyProvinceCode: matchedProvince.code,
+        legacyProvinceName: matchedProvince.name,
+        legacyDistrictCode: undefined,
+        legacyDistrictName: undefined,
+        mergedProvinceCode: matchedProvince.mergedIntoProvinceCode || matchedProvince.code,
+        mergedProvinceName: matchedProvince.mergedIntoProvinceName || matchedProvince.name,
+        hamlets: [],
+      };
     }
 
     // 6. Khớp Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm / KĐT / Đường phố
@@ -592,31 +611,39 @@ export class VietnameseCommerceNerService {
       }
     }
 
-    // 7. Kiểm tra các mẫu câu chứa Địa chỉ chi tiết
+    // 7. Kiểm tra chặt chẽ các mẫu câu chứa Địa chỉ giao hàng thực tế (Chống bắt nhầm câu hội thoại thông thường)
     const explicitAddressPrefixMatch = textWithoutPhones.match(
-      /(?:địa\s*chỉ|dia\s*chi|đ\/c|d\/c|dc|nhận\s*tại|giao\s*về|ship\s*về|gửi\s*về|nhà\s*ở|ở\s*địa\s*chỉ)[:\s\-]+([^\n!?]{4,160})/i,
+      /(?:địa\s*chỉ|dia\s*chi|đ\/c|d\/c|nhận\s*tại|giao\s*về|ship\s*về|gửi\s*về|nhà\s*ở|ở\s*địa\s*chỉ)[:\s\-]+([^\n!?]{5,160})/i,
     );
 
     const structuralAddressMatch = textWithoutPhones.match(
-      /\b((?:số\s*nhà|số|sn|ngõ|ngách|hẻm|đường|phố|tòa\s*nhà|tòa|chung\s*cư|khu\s*đô\s*thị|kđt|thôn|xóm|ấp|bản|làng|khóm|tiểu\s*khu|tổ\s*dân\s*phố|tdp|tổ\s*\d+|khu\s*phố|kp)\s+[^\n!?]{3,140})/i,
+      /\b((?:số\s*nhà|sn\s*\d+|ngõ\s*\d+|ngách\s*\d+|hẻm\s*\d+|tòa\s*nhà|chung\s*cư|khu\s*đô\s*thị|kđt|tổ\s*dân\s*phố|tdp\s*\d+|khu\s*phố\s*\d+|thôn\s+[A-Za-zÀ-ỹ0-9]+|ấp\s+[A-Za-zÀ-ỹ0-9]+)\s*[^\n!?]{3,140})/i,
     );
 
     const streetNumberPatternMatch = textWithoutPhones.match(
       /\b(\d+[A-Za-z0-9/]*\s+(?:ngõ|ngách|hẻm|đường|phố|Nguyễn|Trần|Lê|Phạm|Hoàng|Phan|Vũ|Đặng|Bùi|Đỗ|Hồ|Ngô|Dương|Lý|Cầu\s*Giấy|Xuân\s*Thủy|Láng\s*Hạ|Xã\s*Đàn|Quang\s*Trung|Điện\s*Biên\s*Phủ|Giải\s*Phóng|Trường\s*Chinh|Minh\s*Khai|Sư\s*Vạn\s*Hạnh|Cách\s*Mạng\s*Tháng\s*8|Lê\s*Lợi|Hai\s*Bà\s*Trưng|Hùng\s*Vương|Trần\s*Hưng\s*Đạo|Lý\s*Thường\s*Kiệt)[^\n!?]{2,110})/i,
     );
 
-    const adminKeywordInText =
-      /\b(?:phường|p\.|xã|thị\s*trấn|đặc\s*khu|quận|q\.|huyện|thị\s*xã|tỉnh|thành\s*phố|tp\.|thôn|ấp|bản|khu\s*phố|tổ\s*dân\s*phố)\s+[A-Za-zÀ-ỹ0-9]+/i.test(
-        textWithoutPhones,
+    const hasMultiLevelAdminMatch =
+      Boolean(matchedProvince && (matchedDistrict || matchedWard || matchedHamlet)) ||
+      Boolean(matchedDistrict && matchedWard);
+
+    const hasAdminWithDetail =
+      Boolean(matchedProvince || matchedDistrict || matchedWard) &&
+      Boolean(
+        explicitAddressPrefixMatch ||
+          structuralAddressMatch ||
+          streetNumberPatternMatch ||
+          dynamicWardName ||
+          dynamicDistrictName ||
+          dynamicHamlet,
       );
 
     if (
-      !matchedProvince &&
-      !matchedDistrict &&
+      !hasMultiLevelAdminMatch &&
+      !hasAdminWithDetail &&
       !explicitAddressPrefixMatch &&
-      !structuralAddressMatch &&
-      !streetNumberPatternMatch &&
-      !adminKeywordInText
+      !streetNumberPatternMatch
     ) {
       return {
         hasAddressDetected: false,

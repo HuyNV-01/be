@@ -73,6 +73,7 @@ export interface NormalizedOmnichannelEvent {
   isEchoFromPage: boolean;
   isStandbyChannel?: boolean;
   echoSourceAppId?: string | null;
+  createdTimeIso?: string | null;
   eventSubtype: 'MESSAGE_OR_COMMENT' | 'DELIVERY_RECEIPT' | 'READ_RECEIPT' | 'HANDOVER_PROTOCOL';
   handoverAction?: 'PASS_THREAD_CONTROL' | 'TAKE_THREAD_CONTROL' | 'REQUEST_THREAD_CONTROL' | null;
   handoverTargetAppId?: string | null;
@@ -285,6 +286,15 @@ export class ChannelsService {
   private readonly inMemoryThreadLocks = new Map<string, Promise<unknown>>();
   private readonly coalescedChannelUpdateTimers = new Map<string, NodeJS.Timeout>();
   private isPollingOrganicComments = false;
+  private isPollingFastInboxDelta = false;
+
+  public resolveEchoSourceAppLabel(appId?: string | null): string {
+    const clean = String(appId || '').trim();
+    if (!clean || clean === META_BUSINESS_SUITE_INBOX_APP_ID) {
+      return 'Meta Business Suite / Page Inbox';
+    }
+    return `Ứng dụng liên kết Page (Pancake v2 / App #${clean.slice(-6)})`;
+  }
 
   constructor(
     @InjectRepository(ChannelIntegrationEntity)
@@ -3435,17 +3445,23 @@ export class ChannelsService {
       channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
       channel.channelType === ChannelTypeEnum.INSTAGRAM
     ) {
+      const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+      let resolvedFullName = fallbackName;
+      let resolvedAvatarUrl: string | null = initialAvatarUrl || null;
+
+      // Bước 1: Gọi GET /{PSID}?fields=name,first_name,last_name,profile_pic
+      // Lý do kiến trúc: Meta Graph API v19.0–v27.1 cấm trường `picture.type(large)` trên node Messenger PSID
+      // và trả về lỗi (#100) Tried accessing nonexisting field (picture) on node type (User). Chỉ truy vấn `profile_pic`.
       const profileCall = await this.callMetaGraphApi<{
         name?: string;
         first_name?: string;
         last_name?: string;
         profile_pic?: string;
-        picture?: { data?: { url?: string } };
       }>({
-        apiVersion: channel.apiVersion || 'v27.1',
+        apiVersion: apiVer,
         path: externalCustomerPsid,
         queryParams: {
-          fields: 'name,first_name,last_name,profile_pic,picture.type(large)',
+          fields: 'name,first_name,last_name,profile_pic',
         },
         accessToken: rawPageToken,
         appSecret: rawAppSecret,
@@ -3458,8 +3474,6 @@ export class ChannelsService {
             profileCall.errorMessage || '',
           ))
       ) {
-        // Chủ động tự phục hồi Page Access Token ngay lúc nhận tin nhắn của người mua
-        // để khi người bán bấm gửi tin trả lời thì Page Token đã sống 100%!
         void this.tokenDoctorService.autoHealChannelPageAccessToken(
           channel,
           'INBOUND_BUYER_MESSAGE_PREEMPTIVE_HEAL',
@@ -3467,19 +3481,93 @@ export class ChannelsService {
       }
 
       if (profileCall.ok && profileCall.data) {
-        const fullName =
+        const candidateName =
           profileCall.data.name ||
-          [profileCall.data.first_name, profileCall.data.last_name].filter(Boolean).join(' ') ||
-          fallbackName;
-        const avatarUrl =
-          profileCall.data.picture?.data?.url ||
-          profileCall.data.profile_pic ||
-          initialAvatarUrl ||
-          this.buildFallbackCustomerAvatarUrl(fullName, externalCustomerPsid);
-        const resolved = { name: fullName, avatarUrl };
+          [profileCall.data.first_name, profileCall.data.last_name].filter(Boolean).join(' ');
+        if (candidateName) {
+          resolvedFullName = candidateName;
+        }
+        if (profileCall.data.profile_pic) {
+          resolvedAvatarUrl = profileCall.data.profile_pic;
+        }
+      }
+
+      // Bước 2: Nếu Fanpage chạy quảng cáo bị giới hạn quyền Business Asset User Profile Access trên GET /{PSID},
+      // tra cứu ngược qua GET /{externalPageId}/conversations?user_id={PSID}&fields=participants,senders,updated_time
+      if (resolvedFullName.includes('#') && channel.externalPageId) {
+        const convLookup = await this.callMetaGraphApi<{
+          data?: Array<{
+            participants?: {
+              data?: Array<{ id?: string; name?: string; username?: string }>;
+            };
+            senders?: {
+              data?: Array<{ id?: string; name?: string; username?: string }>;
+            };
+          }>;
+        }>({
+          apiVersion: apiVer,
+          path: `${channel.externalPageId}/conversations`,
+          queryParams: {
+            user_id: externalCustomerPsid,
+            fields: 'participants,senders,updated_time',
+            limit: '1',
+          },
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (convLookup.ok && Array.isArray(convLookup.data?.data) && convLookup.data.data[0]) {
+          const threadNode = convLookup.data.data[0];
+          const participantPool = [
+            ...(Array.isArray(threadNode.participants?.data) ? threadNode.participants.data : []),
+            ...(Array.isArray(threadNode.senders?.data) ? threadNode.senders.data : []),
+          ];
+          const matchedBuyer = participantPool.find(
+            (p) =>
+              p?.id &&
+              (String(p.id) === externalCustomerPsid || String(p.id) !== channel.externalPageId),
+          );
+          const buyerNameFromThread = matchedBuyer?.name || matchedBuyer?.username;
+          if (buyerNameFromThread) {
+            resolvedFullName = String(buyerNameFromThread);
+          }
+        }
+      }
+
+      // Bước 3: Nếu chưa có `profile_pic` (hoặc bị ẩn ở Bước 1), gọi endpoint chuyên biệt GET /{PSID}/picture?type=large&redirect=false
+      if (!resolvedAvatarUrl || resolvedAvatarUrl.includes('api.dicebear.com')) {
+        const picEdgeCall = await this.callMetaGraphApi<{
+          data?: { url?: string; is_silhouette?: boolean };
+        }>({
+          apiVersion: apiVer,
+          path: `${externalCustomerPsid}/picture`,
+          queryParams: {
+            type: 'large',
+            redirect: 'false',
+          },
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (picEdgeCall.ok && picEdgeCall.data?.data?.url) {
+          resolvedAvatarUrl = picEdgeCall.data.data.url;
+        }
+      }
+
+      if (resolvedAvatarUrl && !resolvedAvatarUrl.includes('api.dicebear.com')) {
+        const resolved = { name: resolvedFullName, avatarUrl: resolvedAvatarUrl };
         await this.redis.set(cacheKey, JSON.stringify(resolved), 'EX', 86400).catch(() => null);
         return resolved;
       }
+
+      const fallbackWithResolvedName = {
+        name: resolvedFullName,
+        avatarUrl: this.buildFallbackCustomerAvatarUrl(resolvedFullName, externalCustomerPsid),
+      };
+      await this.redis
+        .set(cacheKey, JSON.stringify(fallbackWithResolvedName), 'EX', 120)
+        .catch(() => null);
+      return fallbackWithResolvedName;
     }
 
     const fallbackResolved = {
@@ -3487,7 +3575,7 @@ export class ChannelsService {
       avatarUrl:
         initialAvatarUrl || this.buildFallbackCustomerAvatarUrl(fallbackName, externalCustomerPsid),
     };
-    await this.redis.set(cacheKey, JSON.stringify(fallbackResolved), 'EX', 3600).catch(() => null);
+    await this.redis.set(cacheKey, JSON.stringify(fallbackResolved), 'EX', 120).catch(() => null);
     return fallbackResolved;
   }
 
@@ -3515,6 +3603,80 @@ export class ChannelsService {
             const changeObj = entryItem.changes[cIdx];
             const changeVal = changeObj?.value;
             if (!changeVal) continue;
+
+            // Hỗ trợ gói Webhook `changes[]` có `field === 'messages' | 'message_echoes'` khi Fanpage kết nối đồng thời Pancake v2 & Meta Business Suite
+            if (
+              (changeObj?.field === 'messages' || changeObj?.field === 'message_echoes') &&
+              (changeVal.message || changeVal.sender || changeVal.recipient)
+            ) {
+              const senderIdInChange = String(changeVal.sender?.id || '').trim();
+              const recipientIdInChange = String(changeVal.recipient?.id || '').trim();
+              const isChangeEcho =
+                changeObj?.field === 'message_echoes' ||
+                Boolean(changeVal.message?.is_echo) ||
+                Boolean(changeVal.is_echo) ||
+                Boolean(entryPageId && senderIdInChange === entryPageId);
+              const resolvedChangePageId =
+                entryPageId || (isChangeEcho ? senderIdInChange : recipientIdInChange);
+              const resolvedChangePsid = isChangeEcho
+                ? recipientIdInChange || String(changeVal.recipient_id || '')
+                : senderIdInChange || String(changeVal.sender_id || '');
+
+              if (resolvedChangePsid) {
+                const changeMid = String(
+                  changeVal.message?.mid ||
+                    changeVal.mid ||
+                    changeVal.id ||
+                    `chg_mid_${fallbackLogId}_${eIdx}_${cIdx}`,
+                );
+                const changeText = String(
+                  changeVal.message?.text || changeVal.text || '[Tin nhắn đính kèm từ nền tảng]',
+                );
+                const changeTs = changeVal.timestamp
+                  ? new Date(
+                      Number(changeVal.timestamp) < 10_000_000_000
+                        ? Number(changeVal.timestamp) * 1000
+                        : Number(changeVal.timestamp),
+                    ).toISOString()
+                  : null;
+
+                events.push({
+                  externalPageId: resolvedChangePageId,
+                  externalThreadId: `inbox_${resolvedChangePsid}`,
+                  externalCustomerPsid: resolvedChangePsid,
+                  externalMessageId: changeMid,
+                  customerName: String(
+                    (!isChangeEcho ? changeVal.sender?.name : changeVal.recipient?.name) ||
+                      `Khách ${channelType} #${resolvedChangePsid.slice(-4)}`,
+                  ),
+                  customerAvatarUrl: !isChangeEcho
+                    ? changeVal.sender?.profile_pic || changeVal.sender?.picture?.data?.url || null
+                    : null,
+                  messageText: changeText,
+                  interactionType: 'INBOX',
+                  verb: 'add',
+                  isEchoFromPage: isChangeEcho,
+                  echoSourceAppId: changeVal.message?.app_id
+                    ? String(changeVal.message.app_id)
+                    : changeVal.app_id
+                      ? String(changeVal.app_id)
+                      : null,
+                  createdTimeIso: changeTs,
+                  eventSubtype: 'MESSAGE_OR_COMMENT',
+                  sourcePostId: changeVal.referral?.post_id
+                    ? String(changeVal.referral.post_id)
+                    : null,
+                  sourceAdId: changeVal.referral?.ad_id ? String(changeVal.referral.ad_id) : null,
+                  ctwaClickId: changeVal.referral?.ctwa_clid
+                    ? String(changeVal.referral.ctwa_clid)
+                    : null,
+                  externalCommentId: null,
+                  parentCommentId: null,
+                  mediaAttachmentUrl: null,
+                });
+                continue;
+              }
+            }
 
             const isCommentField =
               changeObj?.field === 'feed' ||
@@ -3599,15 +3761,24 @@ export class ChannelsService {
           const { item: msgItem, isStandby } = messagingArrays[mIdx];
           if (!msgItem) continue;
 
-          const isMessagingEcho = Boolean(msgItem?.message?.is_echo);
-          const echoSourceAppId = msgItem?.message?.app_id ? String(msgItem.message.app_id) : null;
+          const senderIdRaw = String(msgItem?.sender?.id || '').trim();
+          const recipientIdRaw = String(msgItem?.recipient?.id || '').trim();
+          const isMessagingEcho =
+            Boolean(msgItem?.message?.is_echo) ||
+            Boolean(msgItem?.is_echo) ||
+            Boolean(entryPageId && senderIdRaw && senderIdRaw === entryPageId);
+          const echoSourceAppId = msgItem?.message?.app_id
+            ? String(msgItem.message.app_id)
+            : msgItem?.app_id
+              ? String(msgItem.app_id)
+              : null;
           const resolvedPageId = String(
-            entryPageId || (isMessagingEcho ? msgItem.sender?.id : msgItem.recipient?.id) || '',
+            entryPageId || (isMessagingEcho ? senderIdRaw : recipientIdRaw) || '',
           ).trim();
           const customerPsid = String(
             isMessagingEcho
-              ? msgItem.recipient?.id
-              : msgItem.sender?.id || `psid_${fallbackLogId.slice(0, 8)}_${mIdx}`,
+              ? recipientIdRaw || msgItem?.recipient?.id
+              : senderIdRaw || `psid_${fallbackLogId.slice(0, 8)}_${mIdx}`,
           );
 
           // 2.1. Xử lý sự kiện chuyển giao luồng hội thoại Handover Protocol (pass_thread_control, take_thread_control, request_thread_control)
@@ -3739,22 +3910,33 @@ export class ChannelsService {
             ? String(firstAttachment.payload.url)
             : null;
 
+          const msgTimestampIso = msgItem.timestamp
+            ? new Date(
+                Number(msgItem.timestamp) < 10_000_000_000
+                  ? Number(msgItem.timestamp) * 1000
+                  : Number(msgItem.timestamp),
+              ).toISOString()
+            : null;
+
           events.push({
             externalPageId: resolvedPageId,
             externalThreadId: `inbox_${customerPsid}`,
             externalCustomerPsid: customerPsid,
             externalMessageId: msgId,
             customerName: String(
-              msgItem.sender?.name || `Khách ${channelType} #${customerPsid.slice(-4)}`,
+              (!isMessagingEcho ? msgItem.sender?.name : msgItem.recipient?.name) ||
+                `Khách ${channelType} #${customerPsid.slice(-4)}`,
             ),
-            customerAvatarUrl:
-              msgItem.sender?.profile_pic || msgItem.sender?.picture?.data?.url || null,
+            customerAvatarUrl: !isMessagingEcho
+              ? msgItem.sender?.profile_pic || msgItem.sender?.picture?.data?.url || null
+              : null,
             messageText: text,
             interactionType: 'INBOX',
             verb: 'add',
             isEchoFromPage: isMessagingEcho,
             isStandbyChannel: isStandby,
             echoSourceAppId,
+            createdTimeIso: msgTimestampIso,
             eventSubtype: 'MESSAGE_OR_COMMENT',
             sourcePostId: referral?.post_id ? String(referral.post_id) : null,
             sourceAdId: referral?.ad_id ? String(referral.ad_id) : null,
@@ -3788,14 +3970,25 @@ export class ChannelsService {
         ? firstEntry.standby[0]
         : null;
 
-    const isMessagingEcho = Boolean(firstMessaging?.message?.is_echo);
-    const externalPageId = String(
+    const candidateEntryPageId = String(
       payload?.pageId ||
         payload?.externalPageId ||
         payload?.recipientId ||
         payload?.oa_id ||
         payload?.shop_id ||
         firstEntry?.id ||
+        '',
+    ).trim();
+    const isMessagingEcho =
+      Boolean(firstMessaging?.message?.is_echo) ||
+      Boolean(payload?.isEcho) ||
+      Boolean(
+        candidateEntryPageId &&
+          String(firstMessaging?.sender?.id || payload?.senderId || '').trim() ===
+            candidateEntryPageId,
+      );
+    const externalPageId = String(
+      candidateEntryPageId ||
         (isMessagingEcho ? firstMessaging?.sender?.id : firstMessaging?.recipient?.id) ||
         '',
     ).trim();
@@ -3980,7 +4173,7 @@ export class ChannelsService {
       ),
       interactionType: resolvedInteractionType,
       verb,
-      isEchoFromPage: Boolean(payload?.isEcho),
+      isEchoFromPage: isMessagingEcho,
       eventSubtype: 'MESSAGE_OR_COMMENT',
       sourcePostId: payload?.postId ? String(payload.postId) : null,
       sourceAdId: payload?.adId ? String(payload.adId) : null,
@@ -4482,13 +4675,20 @@ export class ChannelsService {
               };
             }
 
-            const now = new Date();
+            const now = normalized.createdTimeIso
+              ? new Date(normalized.createdTimeIso)
+              : new Date();
             const encryptedEcho = this.messageCryptoService.encryptForConversation(
               normalized.messageText,
               echoConv.id,
             );
+            const resolvedEchoSenderId =
+              echoConv.assignedAgentId || channel.createdBy || 'page_echo';
+            const echoSourceLabel = this.resolveEchoSourceAppLabel(normalized.echoSourceAppId);
+
             await this.conversationRepo.update(echoConv.id, {
               lastMessage: encryptedEcho.ciphertext,
+              lastMessageSenderId: resolvedEchoSenderId,
               lastMessageAt: now,
               lastAgentReplyAt: now,
               supportStatus: ConversationSupportStatusEnum.WAITING_CUSTOMER_REPLY,
@@ -4497,26 +4697,39 @@ export class ChannelsService {
               isGhostedByAgent: false,
             });
 
+            const echoMetadata = {
+              isEncrypted: encryptedEcho.isEncrypted,
+              encryptionAlg: encryptedEcho.algorithm,
+              isPageEcho: true,
+              echoSourceAppId: normalized.echoSourceAppId || META_BUSINESS_SUITE_INBOX_APP_ID,
+              echoSourceAppLabel: echoSourceLabel,
+              channelType: channel.channelType,
+              channelIntegrationId: channel.id,
+              externalPageId: channel.externalPageId,
+              pageShortCode: channel.pageShortCode,
+              pageName: channel.pageName,
+              channelAvatarUrl: channel.avatarUrl || null,
+              platformDeliveryStatus: 'DISPATCHED',
+              platformExternalId: normalized.externalMessageId,
+              externalCommentId: normalized.externalCommentId || undefined,
+              externalPostId: normalized.sourcePostId || undefined,
+              mediaAttachmentUrl: normalized.mediaAttachmentUrl || undefined,
+            };
+
             const echoMsg = this.messageRepo.create({
               conversationId: echoConv.id,
-              senderId: echoConv.assignedAgentId || channel.createdBy || 'page_echo',
+              senderId: resolvedEchoSenderId,
               shopId: channel.shopId,
               direction: MessageDirectionEnum.OUTBOUND,
               externalMessageId: normalized.externalMessageId,
               content: encryptedEcho.ciphertext,
               type: MessageTypeEnum.TEXT,
               status: MessageStatusEnum.SENT,
-              readBy: [],
-              deliveredTo: [],
+              extractedEntitiesJson: null,
+              readBy: [resolvedEchoSenderId],
+              deliveredTo: [resolvedEchoSenderId],
               isPinned: false,
-              metadata: {
-                isEncrypted: encryptedEcho.isEncrypted,
-                encryptionAlg: encryptedEcho.algorithm,
-                platformDeliveryStatus: 'DISPATCHED',
-                platformExternalId: normalized.externalMessageId,
-                externalCommentId: normalized.externalCommentId || undefined,
-                externalPostId: normalized.sourcePostId || undefined,
-              } as any,
+              metadata: echoMetadata as any,
               createdAt: now,
               updatedAt: now,
             });
@@ -4524,8 +4737,18 @@ export class ChannelsService {
             const echoPayload = {
               ...savedEcho,
               content: normalized.messageText,
+              extractedEntitiesJson: null,
+              metadata: echoMetadata,
               createdAt: now.toISOString(),
               updatedAt: now.toISOString(),
+              sender: {
+                id: resolvedEchoSenderId,
+                name: `${channel.pageName} (${echoSourceLabel})`,
+                originalName: channel.pageName,
+                email: '',
+                nickname: channel.pageShortCode,
+                avatar: channel.avatarUrl || null,
+              },
             };
             this.realtimeEmitter.emitToConversation(
               SOCKET_CONFIG.namespaces.CHAT,
@@ -4720,16 +4943,6 @@ export class ChannelsService {
       });
     }
 
-    // Làm giàu Tên & Avatar của khách hàng từ PSID (lưu vào cột text không lo tràn ký tự)
-    const enrichedCustomer = await this.enrichCustomerProfileByPsid({
-      channel,
-      externalCustomerPsid: normalized.externalCustomerPsid,
-      fallbackName: normalized.customerName,
-      initialAvatarUrl: normalized.customerAvatarUrl,
-    });
-    normalized.customerName = enrichedCustomer.name;
-    normalized.customerAvatarUrl = enrichedCustomer.avatarUrl;
-
     let conversation = await this.conversationRepo.findOne({
       where: {
         shopId: channel.shopId,
@@ -4739,7 +4952,50 @@ export class ChannelsService {
       withDeleted: true,
     });
 
-    const now = new Date();
+    // Kiểm tra nhanh bộ nhớ đệm Redis (< 1ms) cho Tên & Avatar của PSID; nếu chưa có hoặc còn dùng avatar chữ cái tạm,
+    // phát tin nhắn Realtime ngay lập tức (< 30ms) rồi làm giàu Tên & Avatar thật từ Meta Graph API bất đồng bộ để không gây độ trễ nhận tin!
+    let needsAsyncPsidProfileEnrichment = false;
+    if (normalized.externalCustomerPsid) {
+      const fastCacheKey = `psid_profile:${channel.id}:${normalized.externalCustomerPsid}`;
+      const cachedProfileRaw = await this.redis.get(fastCacheKey).catch(() => null);
+      if (cachedProfileRaw) {
+        try {
+          const parsedFast = JSON.parse(cachedProfileRaw) as {
+            name?: string;
+            avatarUrl?: string | null;
+          };
+          if (parsedFast?.name && !parsedFast.name.includes('#')) {
+            normalized.customerName = parsedFast.name;
+          }
+          if (parsedFast?.avatarUrl && !parsedFast.avatarUrl.includes('api.dicebear.com')) {
+            normalized.customerAvatarUrl = parsedFast.avatarUrl;
+          } else {
+            needsAsyncPsidProfileEnrichment = true;
+          }
+        } catch {
+          needsAsyncPsidProfileEnrichment = true;
+        }
+      } else {
+        needsAsyncPsidProfileEnrichment = true;
+      }
+    }
+
+    if (
+      conversation?.name &&
+      !conversation.name.includes('#') &&
+      normalized.customerName.includes('#')
+    ) {
+      normalized.customerName = conversation.name;
+    }
+    if (
+      !normalized.customerAvatarUrl &&
+      conversation?.avatar &&
+      !conversation.avatar.includes('api.dicebear.com')
+    ) {
+      normalized.customerAvatarUrl = conversation.avatar;
+    }
+
+    const now = normalized.createdTimeIso ? new Date(normalized.createdTimeIso) : new Date();
 
     if (!conversation) {
       conversation = this.conversationRepo.create({
@@ -4875,27 +5131,32 @@ export class ChannelsService {
       order: { createdAt: 'DESC' },
       take: 25,
     });
-    let hasMarkedPrevOutboundRead = false;
+    const prevOutUpdatePromises: Promise<unknown>[] = [];
     for (const prevOut of unreadPreviousOutbounds) {
       const readSet = new Set(Array.isArray(prevOut.readBy) ? prevOut.readBy : []);
       const deliveredSet = new Set(Array.isArray(prevOut.deliveredTo) ? prevOut.deliveredTo : []);
       if (!readSet.has(inboundSenderId) || prevOut.status !== MessageStatusEnum.READ) {
         readSet.add(inboundSenderId);
         deliveredSet.add(inboundSenderId);
-        await this.messageRepo.update(
-          { id: prevOut.id, createdAt: prevOut.createdAt },
-          {
-            status: MessageStatusEnum.READ,
-            readBy: Array.from(readSet),
-            deliveredTo: Array.from(deliveredSet),
-            metadata: {
-              ...(prevOut.metadata || {}),
-              buyerReadAt: nowIso,
-            } as any,
-          },
+        prevOutUpdatePromises.push(
+          this.messageRepo.update(
+            { id: prevOut.id, createdAt: prevOut.createdAt },
+            {
+              status: MessageStatusEnum.READ,
+              readBy: Array.from(readSet),
+              deliveredTo: Array.from(deliveredSet),
+              metadata: {
+                ...(prevOut.metadata || {}),
+                buyerReadAt: nowIso,
+              } as any,
+            },
+          ),
         );
-        hasMarkedPrevOutboundRead = true;
       }
+    }
+    const hasMarkedPrevOutboundRead = prevOutUpdatePromises.length > 0;
+    if (hasMarkedPrevOutboundRead) {
+      await Promise.all(prevOutUpdatePromises);
     }
 
     if (hasMarkedPrevOutboundRead) {
@@ -5100,6 +5361,88 @@ export class ChannelsService {
       );
     }
 
+    if (needsAsyncPsidProfileEnrichment && normalized.externalCustomerPsid) {
+      void this.enrichCustomerProfileByPsid({
+        channel,
+        externalCustomerPsid: normalized.externalCustomerPsid,
+        fallbackName: normalized.customerName,
+        initialAvatarUrl: normalized.customerAvatarUrl,
+      })
+        .then(async (freshProfile) => {
+          const isAvatarUpgraded =
+            Boolean(freshProfile.avatarUrl) &&
+            !freshProfile.avatarUrl.includes('api.dicebear.com') &&
+            freshProfile.avatarUrl !== resolvedCustomerAvatar;
+          const isNameUpgraded =
+            Boolean(freshProfile.name) &&
+            !freshProfile.name.includes('#') &&
+            freshProfile.name !== normalized.customerName;
+
+          if (!isAvatarUpgraded && !isNameUpgraded) {
+            return;
+          }
+
+          await this.conversationRepo.update(savedConversation.id, {
+            ...(isNameUpgraded ? { name: freshProfile.name } : {}),
+            ...(isAvatarUpgraded ? { avatar: freshProfile.avatarUrl } : {}),
+          });
+
+          const updatedMsgMeta = {
+            ...(savedMsg.metadata || {}),
+            externalCustomerName: freshProfile.name,
+            externalCustomerAvatar: freshProfile.avatarUrl,
+          };
+          await this.messageRepo.update(
+            { id: savedMsg.id, createdAt: savedMsg.createdAt },
+            { metadata: updatedMsgMeta as any },
+          );
+
+          await this.customer360Service
+            .resolveOrUpsertCustomerFromOmnichannelEvent({
+              shopId: channel.shopId,
+              conversation: savedConversation,
+              channelType: channel.channelType,
+              channelIntegrationId: channel.id,
+              pageShortCode: channel.pageShortCode,
+              pageName: channel.pageName,
+              externalUserId: normalized.externalCustomerPsid || normalized.externalThreadId,
+              customerName: freshProfile.name,
+              customerAvatarUrl: freshProfile.avatarUrl,
+              extractedNer,
+            })
+            .catch(() => null);
+
+          const profileUpdatedPayload = {
+            id: savedMsg.id,
+            conversationId: savedConversation.id,
+            content: maskedMessageText,
+            metadata: updatedMsgMeta,
+            sender: {
+              id: inboundSenderId,
+              name: freshProfile.name,
+              email: '',
+              avatar: freshProfile.avatarUrl,
+            },
+          };
+
+          this.realtimeEmitter.emitToConversation(
+            SOCKET_CONFIG.namespaces.CHAT,
+            savedConversation.id,
+            SOCKET_CONFIG.events.CHAT.MESSAGE_EDITED,
+            profileUpdatedPayload,
+          );
+          for (const uid of new Set(participantUserIds)) {
+            this.realtimeEmitter.emitToUser(
+              SOCKET_CONFIG.namespaces.CHAT,
+              uid,
+              SOCKET_CONFIG.events.CHAT.MESSAGE_EDITED,
+              profileUpdatedPayload,
+            );
+          }
+        })
+        .catch(() => null);
+    }
+
     // Gom nhịp cập nhật danh sách kênh để tránh quá tải khi có hàng trăm tin nhắn đến cùng lúc
     this.scheduleCoalescedShopChannelUpdate(channel.shopId, {
       shopId: channel.shopId,
@@ -5119,6 +5462,211 @@ export class ChannelsService {
    * - Tự động chạy định kỳ mỗi 25 giây để quét các bài viết thường (Organic Posts chưa chạy quảng cáo) trên Fanpage / Instagram.
    * - Khắc phục triệt để độ trễ hoặc việc Meta Graph API không bắn Webhook `feed` tức thì cho các bài viết thường hoặc khi App ở chế độ Dev.
    */
+  /**
+   * Động cơ Đồng bộ Siêu tốc Hộp thư & Tin nhắn Echo 2 chiều (`Fast Inbox & Echo Delta Sync — 8s`):
+   * - Chạy mỗi 8 giây song song trên các Fanpage / Instagram đang hoạt động để kéo tức thì tin nhắn mới từ người mua
+   *   và tin nhắn phản hồi từ Pancake v2 / Meta Business Suite ngay cả khi Meta giữ quyền Primary Receiver.
+   */
+  @Cron('*/8 * * * * *')
+  async pollActiveChannelsFastInboxAndEchoDelta(): Promise<void> {
+    if (this.isPollingFastInboxDelta) {
+      return;
+    }
+    this.isPollingFastInboxDelta = true;
+    try {
+      const activeSocialChannels = await this.channelRepo.find({
+        where: {
+          isActive: true,
+          channelType: In([ChannelTypeEnum.FACEBOOK_PAGE, ChannelTypeEnum.INSTAGRAM]),
+        },
+        order: { updatedAt: 'DESC' },
+        take: 25,
+      });
+
+      await Promise.allSettled(
+        activeSocialChannels.map((ch) => this.syncSingleChannelInboxDeltaOnly(ch)),
+      );
+    } finally {
+      this.isPollingFastInboxDelta = false;
+    }
+  }
+
+  private async syncSingleChannelInboxDeltaOnly(
+    channel: ChannelIntegrationEntity,
+  ): Promise<number> {
+    const rawPageToken = channel.accessTokenEncrypted
+      ? this.messageCryptoService.decryptForConversation(
+          channel.accessTokenEncrypted,
+          channel.shopId,
+        )
+      : '';
+    if (
+      !rawPageToken ||
+      rawPageToken.startsWith('oauth2_tok_') ||
+      rawPageToken.startsWith('sandbox_')
+    ) {
+      return 0;
+    }
+
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+    const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+
+    const convRes = await this.callMetaGraphApi<{
+      data?: Array<{
+        id: string;
+        updated_time?: string;
+        participants?: {
+          data?: Array<{ id?: string; name?: string; username?: string }>;
+        };
+        messages?: {
+          data?: Array<{
+            id: string;
+            message?: string;
+            created_time?: string;
+            from?: { id?: string; name?: string; username?: string };
+            to?: { data?: Array<{ id?: string; name?: string; username?: string }> };
+            attachments?: {
+              data?: Array<{
+                image_data?: { url?: string };
+                video_data?: { url?: string };
+                file_url?: string;
+              }>;
+            };
+            sticker?: string;
+          }>;
+        };
+      }>;
+    }>({
+      apiVersion: apiVer,
+      path: `${channel.externalPageId}/conversations`,
+      queryParams: {
+        fields:
+          'id,updated_time,participants,messages.limit(8){id,message,created_time,from,to,attachments,sticker}',
+        limit: '8',
+      },
+      accessToken: rawPageToken,
+      appSecret: rawAppSecret,
+    });
+
+    if (!convRes.ok || !Array.isArray(convRes.data?.data)) {
+      return 0;
+    }
+
+    const candidateInboxMsgs: Array<{
+      mid: string;
+      customerPsid: string;
+      customerName: string;
+      isEchoFromPage: boolean;
+      text: string;
+      mediaUrl: string | null;
+      createdTimeIso: string | null;
+    }> = [];
+
+    for (const threadObj of convRes.data.data) {
+      const participantsList = Array.isArray(threadObj?.participants?.data)
+        ? threadObj.participants.data
+        : [];
+      const customerParticipant = participantsList.find(
+        (p) => p?.id && String(p.id) !== channel.externalPageId,
+      );
+      const msgList = Array.isArray(threadObj?.messages?.data)
+        ? [...threadObj.messages.data].reverse()
+        : [];
+
+      for (const m of msgList) {
+        if (!m?.id) continue;
+        const fromId = String(m.from?.id || '').trim();
+        const isEcho = Boolean(fromId && fromId === channel.externalPageId);
+        const resolvedPsid = String(
+          (!isEcho ? fromId : customerParticipant?.id || m.to?.data?.[0]?.id) || '',
+        ).trim();
+        if (!resolvedPsid) continue;
+
+        const resolvedCustomerName = String(
+          (!isEcho
+            ? m.from?.name || m.from?.username
+            : customerParticipant?.name || customerParticipant?.username) ||
+            `Khách ${channel.pageShortCode} #${resolvedPsid.slice(-4)}`,
+        );
+        const firstAtt = Array.isArray(m.attachments?.data) ? m.attachments.data[0] : null;
+        const mediaUrl =
+          firstAtt?.image_data?.url ||
+          firstAtt?.video_data?.url ||
+          firstAtt?.file_url ||
+          m.sticker ||
+          null;
+        const text = String(m.message || (mediaUrl ? '[Khách hàng gửi tệp đính kèm]' : ''));
+        if (!text) continue;
+
+        candidateInboxMsgs.push({
+          mid: m.id,
+          customerPsid: resolvedPsid,
+          customerName: resolvedCustomerName,
+          isEchoFromPage: isEcho,
+          text,
+          mediaUrl,
+          createdTimeIso: m.created_time || null,
+        });
+      }
+    }
+
+    if (candidateInboxMsgs.length === 0) {
+      return 0;
+    }
+
+    const inboxMids = candidateInboxMsgs.map((m) => m.mid);
+    const existingInboxRows = await this.messageRepo.find({
+      where: {
+        shopId: channel.shopId,
+        externalMessageId: In(inboxMids),
+      },
+      select: ['externalMessageId'],
+    });
+    const existingMidSet = new Set(
+      existingInboxRows.map((r) => r.externalMessageId).filter(Boolean) as string[],
+    );
+
+    let syncedCount = 0;
+    for (const item of candidateInboxMsgs) {
+      if (existingMidSet.has(item.mid)) continue;
+      const normalizedInboxEvt: NormalizedOmnichannelEvent = {
+        externalPageId: channel.externalPageId,
+        externalThreadId: `inbox_${item.customerPsid}`,
+        externalCustomerPsid: item.customerPsid,
+        externalMessageId: item.mid,
+        customerName: item.customerName,
+        customerAvatarUrl: null,
+        messageText: item.text,
+        interactionType: 'INBOX',
+        verb: 'add',
+        isEchoFromPage: item.isEchoFromPage,
+        echoSourceAppId: item.isEchoFromPage ? META_BUSINESS_SUITE_INBOX_APP_ID : null,
+        createdTimeIso: item.createdTimeIso,
+        eventSubtype: 'MESSAGE_OR_COMMENT',
+        sourcePostId: null,
+        sourceAdId: null,
+        ctwaClickId: null,
+        externalCommentId: null,
+        parentCommentId: null,
+        mediaAttachmentUrl: item.mediaUrl,
+      };
+
+      const syncedInbox = await this.withConversationThreadLock(
+        channel.shopId,
+        channel.id,
+        normalizedInboxEvt.externalThreadId,
+        () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedInboxEvt),
+      );
+      if (syncedInbox.conversationId) {
+        syncedCount += 1;
+      }
+    }
+
+    return syncedCount;
+  }
+
   @Cron('*/25 * * * * *')
   async pollActiveChannelsOrganicPostsAndComments(): Promise<void> {
     if (this.isPollingOrganicComments) {
@@ -5703,46 +6251,6 @@ export class ChannelsService {
       }
     }
 
-    // Khi người bán bấm nút "Đồng bộ bình luận bài viết" trong môi trường Sandbox / Local Offline
-    // (không có kết nối mạng ra Graph API thật), tự động tạo 1 bình luận bài viết thường (Organic Post)
-    // để người bán kiểm thử đầy đủ luồng nhận & phản hồi bình luận.
-    if (isManualTrigger && !syncedFromLiveApi && newCommentsSynced === 0) {
-      const organicPostId = `${channel.externalPageId}_${String(Date.now()).slice(-6)}`;
-      const organicCommentId = `cmt_organic_${Date.now()}`;
-      const commenterId = `psid_organic_${String(Date.now()).slice(-5)}`;
-      const commenterName = `Khách bình luận bài viết ${channel.pageShortCode}`;
-      const fallbackEvt: NormalizedOmnichannelEvent = {
-        externalPageId: channel.externalPageId,
-        externalThreadId: `cmt_${organicPostId}_${commenterId}`,
-        externalCustomerPsid: commenterId,
-        externalMessageId: organicCommentId,
-        customerName: commenterName,
-        customerAvatarUrl: this.buildFallbackCustomerAvatarUrl(commenterName, commenterId),
-        messageText: `Shop ơi bài viết mới đăng (chưa chạy quảng cáo) mẫu này còn hàng không ạ? Tư vấn giúp mình nhé!`,
-        interactionType: 'COMMENT',
-        verb: 'add',
-        isEchoFromPage: false,
-        eventSubtype: 'MESSAGE_OR_COMMENT',
-        sourcePostId: organicPostId,
-        sourceAdId: null,
-        ctwaClickId: null,
-        externalCommentId: organicCommentId,
-        parentCommentId: null,
-        mediaAttachmentUrl: null,
-      };
-
-      const processed = await this.withConversationThreadLock(
-        channel.shopId,
-        channel.id,
-        fallbackEvt.externalThreadId,
-        () => this.processSingleNormalizedOmnichannelEvent(channel, fallbackEvt),
-      );
-      if (processed.conversationId) {
-        postsScanned = Math.max(postsScanned, 1);
-        newCommentsSynced += 1;
-      }
-    }
-
     return {
       channelId: channel.id,
       pageName: channel.pageName,
@@ -5750,6 +6258,795 @@ export class ChannelsService {
       postsScanned,
       newCommentsSynced,
       syncedFromLiveApi,
+      syncedAt,
+    };
+  }
+
+  /**
+   * Động cơ Đồng bộ Toàn bộ Lịch sử Tin nhắn & Bình luận của Khách hàng trong 3 Tháng Gần nhất (`90-Day Deep Cursor-Paginated Backfill Engine`):
+   * 1. Quét phân trang đệ quy toàn bộ Hội thoại Hộp thư (`GET /{page_id}/conversations` & `GET /{thread_id}/messages` qua con trỏ `paging.cursors.after`)
+   *    lùi về 90 ngày (`sinceMs = Date.now() - lookbackDays * 86_400_000`).
+   *    - Tự động dừng phân trang sớm ngay khi `thread.updated_time < sinceMs` hoặc `message.created_time < sinceMs`.
+   *    - Phân loại chính xác tin nhắn khách gửi (`INBOUND`) và tin nhắn từ Page / Pancake v2 / Meta Business Suite gửi đi (`OUTBOUND` / `isEchoFromPage: true`).
+   *    - Bảo toàn nguyên vẹn thời gian gốc `created_time` (`createdTimeIso`) của từng tin nhắn lịch sử.
+   * 2. Quét phân trang đệ quy toàn bộ Bài viết Công khai (`published_posts`, `feed`), Bài viết Quảng cáo (`ads_posts?include_inline_create=true`),
+   *    và Media Instagram (`/{ig_user_id}/media`) có tham số `since={sinceUnixSec}`.
+   *    - Với từng bài viết, phân trang sâu `GET /{post_id}/comments?filter=stream&since={sinceUnixSec}&limit=100` để lấy đầy đủ cả bình luận gốc và bình luận trả lời cấp 2 trong vòng 3 tháng gần nhất.
+   */
+  async syncAllShopHistoricalThreeMonths(
+    shopId: string,
+    lookbackDays = 90,
+    actorUserId?: string,
+  ): Promise<{
+    shopId: string;
+    lookbackDays: number;
+    sinceIso: string;
+    untilIso: string;
+    channelsChecked: number;
+    conversationsScanned: number;
+    inboundMessagesSynced: number;
+    outboundEchoMessagesSynced: number;
+    postsScanned: number;
+    adPostsScanned: number;
+    commentsSynced: number;
+    results: Array<{
+      channelId: string;
+      pageName: string;
+      pageShortCode: string;
+      conversationsScanned: number;
+      inboundMessagesSynced: number;
+      outboundEchoMessagesSynced: number;
+      postsScanned: number;
+      adPostsScanned: number;
+      commentsSynced: number;
+      syncedFromLiveApi: boolean;
+      sinceIso: string;
+      syncedAt: string;
+    }>;
+  }> {
+    const clampedDays = Math.min(180, Math.max(1, Number(lookbackDays || 90)));
+    const sinceIso = new Date(Date.now() - clampedDays * 86_400_000).toISOString();
+    const untilIso = new Date().toISOString();
+
+    const channels = await this.channelRepo.find({
+      where: {
+        shopId,
+        isActive: true,
+        channelType: In([ChannelTypeEnum.FACEBOOK_PAGE, ChannelTypeEnum.INSTAGRAM]),
+      },
+      order: { createdAt: 'ASC' },
+    });
+
+    const results: Array<{
+      channelId: string;
+      pageName: string;
+      pageShortCode: string;
+      conversationsScanned: number;
+      inboundMessagesSynced: number;
+      outboundEchoMessagesSynced: number;
+      postsScanned: number;
+      adPostsScanned: number;
+      commentsSynced: number;
+      syncedFromLiveApi: boolean;
+      sinceIso: string;
+      syncedAt: string;
+    }> = [];
+
+    let totalConversationsScanned = 0;
+    let totalInboundMessagesSynced = 0;
+    let totalOutboundEchoMessagesSynced = 0;
+    let totalPostsScanned = 0;
+    let totalAdPostsScanned = 0;
+    let totalCommentsSynced = 0;
+
+    for (const ch of channels) {
+      const res = await this.syncSingleChannelHistoricalThreeMonthsInternal(
+        ch,
+        clampedDays,
+        actorUserId,
+      );
+      totalConversationsScanned += res.conversationsScanned;
+      totalInboundMessagesSynced += res.inboundMessagesSynced;
+      totalOutboundEchoMessagesSynced += res.outboundEchoMessagesSynced;
+      totalPostsScanned += res.postsScanned;
+      totalAdPostsScanned += res.adPostsScanned;
+      totalCommentsSynced += res.commentsSynced;
+      results.push(res);
+    }
+
+    return {
+      shopId,
+      lookbackDays: clampedDays,
+      sinceIso,
+      untilIso,
+      channelsChecked: channels.length,
+      conversationsScanned: totalConversationsScanned,
+      inboundMessagesSynced: totalInboundMessagesSynced,
+      outboundEchoMessagesSynced: totalOutboundEchoMessagesSynced,
+      postsScanned: totalPostsScanned,
+      adPostsScanned: totalAdPostsScanned,
+      commentsSynced: totalCommentsSynced,
+      results,
+    };
+  }
+
+  async syncChannelHistoricalThreeMonths(
+    shopId: string,
+    channelId: string,
+    lookbackDays = 90,
+    actorUserId?: string,
+  ): Promise<{
+    channelId: string;
+    pageName: string;
+    pageShortCode: string;
+    lookbackDays: number;
+    conversationsScanned: number;
+    inboundMessagesSynced: number;
+    outboundEchoMessagesSynced: number;
+    postsScanned: number;
+    adPostsScanned: number;
+    commentsSynced: number;
+    syncedFromLiveApi: boolean;
+    sinceIso: string;
+    syncedAt: string;
+  }> {
+    const channel = await this.channelRepo.findOne({
+      where: { id: channelId, shopId },
+    });
+    if (!channel) {
+      throw new NotFoundException('CHANNEL_INTEGRATION_NOT_FOUND');
+    }
+
+    const clampedDays = Math.min(180, Math.max(1, Number(lookbackDays || 90)));
+    return this.syncSingleChannelHistoricalThreeMonthsInternal(channel, clampedDays, actorUserId);
+  }
+
+  private async syncSingleChannelHistoricalThreeMonthsInternal(
+    channel: ChannelIntegrationEntity,
+    lookbackDays = 90,
+    _actorUserId?: string,
+  ): Promise<{
+    channelId: string;
+    pageName: string;
+    pageShortCode: string;
+    lookbackDays: number;
+    conversationsScanned: number;
+    inboundMessagesSynced: number;
+    outboundEchoMessagesSynced: number;
+    postsScanned: number;
+    adPostsScanned: number;
+    commentsSynced: number;
+    syncedFromLiveApi: boolean;
+    sinceIso: string;
+    syncedAt: string;
+  }> {
+    const nowMs = Date.now();
+    const sinceMs = nowMs - lookbackDays * 86_400_000;
+    const sinceUnixSec = Math.floor(sinceMs / 1000);
+    const sinceIso = new Date(sinceMs).toISOString();
+    const syncedAt = new Date(nowMs).toISOString();
+
+    const rawPageToken = channel.accessTokenEncrypted
+      ? this.messageCryptoService.decryptForConversation(
+          channel.accessTokenEncrypted,
+          channel.shopId,
+        )
+      : '';
+    const isSandboxOrOfflineToken =
+      !rawPageToken ||
+      rawPageToken.startsWith('oauth2_tok_') ||
+      rawPageToken.startsWith('sandbox_');
+
+    if (isSandboxOrOfflineToken) {
+      return {
+        channelId: channel.id,
+        pageName: channel.pageName,
+        pageShortCode: channel.pageShortCode,
+        lookbackDays,
+        conversationsScanned: 0,
+        inboundMessagesSynced: 0,
+        outboundEchoMessagesSynced: 0,
+        postsScanned: 0,
+        adPostsScanned: 0,
+        commentsSynced: 0,
+        syncedFromLiveApi: false,
+        sinceIso,
+        syncedAt,
+      };
+    }
+
+    const rawAppSecret = channel.appSecretEncrypted
+      ? this.messageCryptoService.decryptForConversation(channel.appSecretEncrypted, channel.shopId)
+      : envs.omnichannelSaas.metaAppSecret || null;
+    const apiVer = this.normalizeGraphApiVersion(channel.apiVersion, channel.channelType);
+
+    let conversationsScanned = 0;
+    let inboundMessagesSynced = 0;
+    let outboundEchoMessagesSynced = 0;
+    let postsScanned = 0;
+    let adPostsScanned = 0;
+    let commentsSynced = 0;
+    let syncedFromLiveApi = false;
+
+    // =========================================================================
+    // PHẦN A: PHÂN TRANG LỊCH SỬ HỘP THƯ 3 THÁNG (`/{page_id}/conversations` & `/{thread_id}/messages`)
+    // =========================================================================
+    if (
+      channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE ||
+      channel.channelType === ChannelTypeEnum.INSTAGRAM
+    ) {
+      type GraphInboxMsgItem = {
+        id: string;
+        message?: string;
+        created_time?: string;
+        from?: { id?: string; name?: string; username?: string };
+        to?: { data?: Array<{ id?: string; name?: string; username?: string }> };
+        attachments?: {
+          data?: Array<{
+            image_data?: { url?: string };
+            video_data?: { url?: string };
+            file_url?: string;
+          }>;
+        };
+        sticker?: string;
+      };
+
+      const collectedHistoricalInboxMsgs: Array<{
+        mid: string;
+        customerPsid: string;
+        customerName: string;
+        isEchoFromPage: boolean;
+        text: string;
+        mediaUrl: string | null;
+        createdTimeIso: string;
+        createdTimeMs: number;
+      }> = [];
+
+      let convAfterCursor: string | null = null;
+      const MAX_CONVERSATION_PAGES = 20; // Tối đa 20 trang x 50 = 1.000 luồng hội thoại trong 3 tháng
+
+      for (let pageIdx = 0; pageIdx < MAX_CONVERSATION_PAGES; pageIdx++) {
+        const queryParams: Record<string, string> = {
+          fields:
+            'id,updated_time,participants,senders,messages.limit(100){id,message,created_time,from,to,attachments,sticker}',
+          limit: '50',
+        };
+        if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
+          queryParams.platform = 'instagram';
+        }
+        if (convAfterCursor) {
+          queryParams.after = convAfterCursor;
+        }
+
+        const convPageRes = await this.callMetaGraphApi<{
+          data?: Array<{
+            id: string;
+            updated_time?: string;
+            participants?: {
+              data?: Array<{ id?: string; name?: string; username?: string }>;
+            };
+            senders?: {
+              data?: Array<{ id?: string; name?: string; username?: string }>;
+            };
+            messages?: {
+              data?: GraphInboxMsgItem[];
+              paging?: { cursors?: { after?: string }; next?: string };
+            };
+          }>;
+          paging?: { cursors?: { after?: string }; next?: string };
+        }>({
+          apiVersion: apiVer,
+          path: `${channel.externalPageId}/conversations`,
+          queryParams,
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (!convPageRes.ok || !Array.isArray(convPageRes.data?.data)) {
+          break;
+        }
+        syncedFromLiveApi = true;
+
+        const threads = convPageRes.data.data;
+        if (threads.length === 0) {
+          break;
+        }
+
+        let reachedThreadsOlderThan3Months = false;
+
+        for (const threadObj of threads) {
+          const threadUpdatedMs = threadObj.updated_time
+            ? Date.parse(threadObj.updated_time)
+            : nowMs;
+          if (!Number.isNaN(threadUpdatedMs) && threadUpdatedMs < sinceMs) {
+            reachedThreadsOlderThan3Months = true;
+            continue;
+          }
+
+          conversationsScanned += 1;
+
+          const participantPool = [
+            ...(Array.isArray(threadObj.participants?.data) ? threadObj.participants.data : []),
+            ...(Array.isArray(threadObj.senders?.data) ? threadObj.senders.data : []),
+          ];
+          const customerParticipant = participantPool.find(
+            (p) => p?.id && String(p.id) !== channel.externalPageId,
+          );
+
+          const allThreadMsgs: GraphInboxMsgItem[] = Array.isArray(threadObj.messages?.data)
+            ? [...threadObj.messages.data]
+            : [];
+
+          // Nếu luồng hội thoại có nhiều hơn 100 tin nhắn và tin nhắn cũ nhất trong trang đầu vẫn nằm trong 3 tháng gần nhất,
+          // phân trang tiếp `GET /{thread_id}/messages` cho đến khi chạm mốc 3 tháng (`sinceMs`)
+          let msgAfterCursor = threadObj.messages?.paging?.cursors?.after || null;
+          let hasNextMsgPage = Boolean(threadObj.messages?.paging?.next && msgAfterCursor);
+          const MAX_MSG_PAGES_PER_THREAD = 10;
+
+          for (
+            let mPage = 0;
+            mPage < MAX_MSG_PAGES_PER_THREAD && hasNextMsgPage && msgAfterCursor;
+            mPage++
+          ) {
+            const oldestInBatch = allThreadMsgs[allThreadMsgs.length - 1];
+            const oldestMs = oldestInBatch?.created_time
+              ? Date.parse(oldestInBatch.created_time)
+              : nowMs;
+            if (!Number.isNaN(oldestMs) && oldestMs < sinceMs) {
+              break;
+            }
+
+            const moreMsgsRes = await this.callMetaGraphApi<{
+              data?: GraphInboxMsgItem[];
+              paging?: { cursors?: { after?: string }; next?: string };
+            }>({
+              apiVersion: apiVer,
+              path: `${threadObj.id}/messages`,
+              queryParams: {
+                fields: 'id,message,created_time,from,to,attachments,sticker',
+                limit: '100',
+                after: msgAfterCursor,
+              },
+              accessToken: rawPageToken,
+              appSecret: rawAppSecret,
+            });
+
+            if (!moreMsgsRes.ok || !Array.isArray(moreMsgsRes.data?.data)) {
+              break;
+            }
+            allThreadMsgs.push(...moreMsgsRes.data.data);
+            msgAfterCursor = moreMsgsRes.data.paging?.cursors?.after || null;
+            hasNextMsgPage = Boolean(moreMsgsRes.data.paging?.next && msgAfterCursor);
+          }
+
+          for (const m of allThreadMsgs) {
+            if (!m?.id) continue;
+            const createdMs = m.created_time ? Date.parse(m.created_time) : nowMs;
+            if (!Number.isNaN(createdMs) && createdMs < sinceMs) {
+              continue;
+            }
+
+            const fromId = String(m.from?.id || '').trim();
+            const isEcho = Boolean(fromId && fromId === channel.externalPageId);
+            const resolvedPsid = String(
+              (!isEcho ? fromId : customerParticipant?.id || m.to?.data?.[0]?.id) || '',
+            ).trim();
+            if (!resolvedPsid) continue;
+
+            const resolvedCustomerName = String(
+              (!isEcho
+                ? m.from?.name || m.from?.username
+                : customerParticipant?.name || customerParticipant?.username) ||
+                `Khách ${channel.pageShortCode} #${resolvedPsid.slice(-4)}`,
+            );
+            const firstAtt = Array.isArray(m.attachments?.data) ? m.attachments.data[0] : null;
+            const mediaUrl =
+              firstAtt?.image_data?.url ||
+              firstAtt?.video_data?.url ||
+              firstAtt?.file_url ||
+              m.sticker ||
+              null;
+            const text = String(m.message || (mediaUrl ? '[Khách hàng gửi tệp đính kèm]' : ''));
+            if (!text) continue;
+
+            collectedHistoricalInboxMsgs.push({
+              mid: m.id,
+              customerPsid: resolvedPsid,
+              customerName: resolvedCustomerName,
+              isEchoFromPage: isEcho,
+              text,
+              mediaUrl,
+              createdTimeIso: !Number.isNaN(createdMs)
+                ? new Date(createdMs).toISOString()
+                : syncedAt,
+              createdTimeMs: !Number.isNaN(createdMs) ? createdMs : nowMs,
+            });
+          }
+        }
+
+        const nextCursor = convPageRes.data.paging?.cursors?.after || null;
+        if (reachedThreadsOlderThan3Months || !convPageRes.data.paging?.next || !nextCursor) {
+          break;
+        }
+        convAfterCursor = nextCursor;
+      }
+
+      if (collectedHistoricalInboxMsgs.length > 0) {
+        // Sắp xếp theo thời gian từ cũ đến mới (`ASC`) để tái hiện chính xác dòng thời gian hội thoại 3 tháng
+        collectedHistoricalInboxMsgs.sort((a, b) => a.createdTimeMs - b.createdTimeMs);
+
+        const existingMidSet = new Set<string>();
+        const CHUNK_SIZE = 200;
+        for (let i = 0; i < collectedHistoricalInboxMsgs.length; i += CHUNK_SIZE) {
+          const midBatch = collectedHistoricalInboxMsgs.slice(i, i + CHUNK_SIZE).map((x) => x.mid);
+          const rows = await this.messageRepo.find({
+            where: {
+              shopId: channel.shopId,
+              externalMessageId: In(midBatch),
+            },
+            select: ['externalMessageId'],
+          });
+          for (const r of rows) {
+            if (r.externalMessageId) existingMidSet.add(r.externalMessageId);
+          }
+        }
+
+        for (const item of collectedHistoricalInboxMsgs) {
+          if (existingMidSet.has(item.mid)) continue;
+          existingMidSet.add(item.mid);
+
+          const normalizedInboxEvt: NormalizedOmnichannelEvent = {
+            externalPageId: channel.externalPageId,
+            externalThreadId: `inbox_${item.customerPsid}`,
+            externalCustomerPsid: item.customerPsid,
+            externalMessageId: item.mid,
+            customerName: item.customerName,
+            customerAvatarUrl: null,
+            messageText: item.text,
+            interactionType: 'INBOX',
+            verb: 'add',
+            isEchoFromPage: item.isEchoFromPage,
+            echoSourceAppId: item.isEchoFromPage ? META_BUSINESS_SUITE_INBOX_APP_ID : null,
+            createdTimeIso: item.createdTimeIso,
+            eventSubtype: 'MESSAGE_OR_COMMENT',
+            sourcePostId: null,
+            sourceAdId: null,
+            ctwaClickId: null,
+            externalCommentId: null,
+            parentCommentId: null,
+            mediaAttachmentUrl: item.mediaUrl,
+          };
+
+          const processed = await this.withConversationThreadLock(
+            channel.shopId,
+            channel.id,
+            normalizedInboxEvt.externalThreadId,
+            () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedInboxEvt),
+          );
+          if (processed.conversationId) {
+            if (item.isEchoFromPage) {
+              outboundEchoMessagesSynced += 1;
+            } else {
+              inboundMessagesSynced += 1;
+            }
+          }
+        }
+      }
+    }
+
+    // =========================================================================
+    // PHẦN B: PHÂN TRANG LỊCH SỬ BÀI VIẾT THƯỜNG, BÀI QUẢNG CÁO (`ads_posts`) & BÌNH LUẬN 3 THÁNG
+    // =========================================================================
+    const collectedHistoricalComments: Array<{
+      postId: string;
+      commentId: string;
+      parentCommentId: string | null;
+      commenterId: string;
+      commenterName: string;
+      commenterAvatar: string | null;
+      messageText: string;
+      mediaAttachmentUrl: string | null;
+      createdTimeIso: string;
+      createdTimeMs: number;
+    }> = [];
+    const seenCommentIds = new Set<string>();
+
+    if (channel.channelType === ChannelTypeEnum.FACEBOOK_PAGE) {
+      const discoveredPostIds = new Set<string>();
+      const adPostIds = new Set<string>();
+
+      const postEdges: Array<{
+        path: string;
+        isAdEdge: boolean;
+        extraParams?: Record<string, string>;
+      }> = [
+        { path: `${channel.externalPageId}/published_posts`, isAdEdge: false },
+        { path: `${channel.externalPageId}/feed`, isAdEdge: false },
+        {
+          path: `${channel.externalPageId}/ads_posts`,
+          isAdEdge: true,
+          extraParams: { include_inline_create: 'true' },
+        },
+      ];
+
+      for (const edge of postEdges) {
+        let postAfterCursor: string | null = null;
+        const MAX_POST_PAGES = 10;
+
+        for (let pPage = 0; pPage < MAX_POST_PAGES; pPage++) {
+          const postRes = await this.callMetaGraphApi<{
+            data?: Array<{
+              id: string;
+              created_time?: string;
+            }>;
+            paging?: { cursors?: { after?: string }; next?: string };
+          }>({
+            apiVersion: apiVer,
+            path: edge.path,
+            queryParams: {
+              fields: 'id,created_time',
+              since: String(sinceUnixSec),
+              limit: '50',
+              ...(edge.extraParams || {}),
+              ...(postAfterCursor ? { after: postAfterCursor } : {}),
+            },
+            accessToken: rawPageToken,
+            appSecret: rawAppSecret,
+          });
+
+          if (!postRes.ok || !Array.isArray(postRes.data?.data)) {
+            break;
+          }
+          syncedFromLiveApi = true;
+
+          for (const post of postRes.data.data) {
+            if (!post?.id) continue;
+            discoveredPostIds.add(post.id);
+            if (edge.isAdEdge) {
+              adPostIds.add(post.id);
+            }
+          }
+
+          const nextPostCursor = postRes.data.paging?.cursors?.after || null;
+          if (!postRes.data.paging?.next || !nextPostCursor) {
+            break;
+          }
+          postAfterCursor = nextPostCursor;
+        }
+      }
+
+      postsScanned = discoveredPostIds.size;
+      adPostsScanned = adPostIds.size;
+
+      // Với từng bài viết (cả bài đăng thường lẫn bài chạy quảng cáo Dark Post), phân trang toàn bộ bình luận trong 3 tháng (`filter=stream`)
+      for (const postId of discoveredPostIds) {
+        let cmtAfterCursor: string | null = null;
+        const MAX_CMT_PAGES_PER_POST = 10;
+
+        for (let cPage = 0; cPage < MAX_CMT_PAGES_PER_POST; cPage++) {
+          const cmtRes = await this.callMetaGraphApi<{
+            data?: Array<{
+              id: string;
+              message?: string;
+              created_time?: string;
+              from?: {
+                id?: string;
+                name?: string;
+                picture?: { data?: { url?: string } };
+              };
+              parent?: { id?: string };
+              attachment?: {
+                media?: { image?: { src?: string } };
+                url?: string;
+              };
+            }>;
+            paging?: { cursors?: { after?: string }; next?: string };
+          }>({
+            apiVersion: apiVer,
+            path: `${postId}/comments`,
+            queryParams: {
+              filter: 'stream',
+              since: String(sinceUnixSec),
+              limit: '100',
+              fields:
+                'id,message,created_time,from{id,name,picture.type(large)},parent{id},attachment,is_hidden',
+              ...(cmtAfterCursor ? { after: cmtAfterCursor } : {}),
+            },
+            accessToken: rawPageToken,
+            appSecret: rawAppSecret,
+          });
+
+          if (!cmtRes.ok || !Array.isArray(cmtRes.data?.data)) {
+            break;
+          }
+          syncedFromLiveApi = true;
+
+          for (const cmt of cmtRes.data.data) {
+            if (!cmt?.id || seenCommentIds.has(cmt.id)) continue;
+            const cmtMs = cmt.created_time ? Date.parse(cmt.created_time) : nowMs;
+            if (!Number.isNaN(cmtMs) && cmtMs < sinceMs) continue;
+
+            seenCommentIds.add(cmt.id);
+            const commenterId = String(cmt.from?.id || `fb_user_${cmt.id.slice(-6)}`);
+            const commenterName = String(
+              cmt.from?.name || `Khách bình luận #${commenterId.slice(-4)}`,
+            );
+            const commenterAvatar = cmt.from?.picture?.data?.url || null;
+            const mediaUrl = cmt.attachment?.media?.image?.src || cmt.attachment?.url || null;
+
+            collectedHistoricalComments.push({
+              postId,
+              commentId: cmt.id,
+              parentCommentId: cmt.parent?.id ? String(cmt.parent.id) : null,
+              commenterId,
+              commenterName,
+              commenterAvatar,
+              messageText: String(
+                cmt.message || '[Khách hàng gửi bình luận kèm hình ảnh/nhãn dán]',
+              ),
+              mediaAttachmentUrl: mediaUrl,
+              createdTimeIso: !Number.isNaN(cmtMs) ? new Date(cmtMs).toISOString() : syncedAt,
+              createdTimeMs: !Number.isNaN(cmtMs) ? cmtMs : nowMs,
+            });
+          }
+
+          const nextCmtCursor = cmtRes.data.paging?.cursors?.after || null;
+          if (!cmtRes.data.paging?.next || !nextCmtCursor) {
+            break;
+          }
+          cmtAfterCursor = nextCmtCursor;
+        }
+      }
+    } else if (channel.channelType === ChannelTypeEnum.INSTAGRAM) {
+      let igAfterCursor: string | null = null;
+      const MAX_IG_MEDIA_PAGES = 10;
+
+      for (let mPage = 0; mPage < MAX_IG_MEDIA_PAGES; mPage++) {
+        const igMediaRes = await this.callMetaGraphApi<{
+          data?: Array<{
+            id: string;
+            timestamp?: string;
+            comments?: {
+              data?: Array<{
+                id: string;
+                text?: string;
+                timestamp?: string;
+                username?: string;
+                from?: { id?: string; username?: string };
+                parent_id?: string;
+              }>;
+            };
+          }>;
+          paging?: { cursors?: { after?: string }; next?: string };
+        }>({
+          apiVersion: apiVer,
+          path: `${channel.externalPageId}/media`,
+          queryParams: {
+            fields:
+              'id,caption,timestamp,comments.limit(100){id,text,timestamp,username,from{id,username},parent_id}',
+            since: String(sinceUnixSec),
+            limit: '50',
+            ...(igAfterCursor ? { after: igAfterCursor } : {}),
+          },
+          accessToken: rawPageToken,
+          appSecret: rawAppSecret,
+        });
+
+        if (!igMediaRes.ok || !Array.isArray(igMediaRes.data?.data)) {
+          break;
+        }
+        syncedFromLiveApi = true;
+        postsScanned += igMediaRes.data.data.length;
+
+        for (const media of igMediaRes.data.data) {
+          const cmtList = Array.isArray(media.comments?.data) ? media.comments.data : [];
+          for (const cmt of cmtList) {
+            if (!cmt?.id || seenCommentIds.has(cmt.id)) continue;
+            const cmtMs = cmt.timestamp ? Date.parse(cmt.timestamp) : nowMs;
+            if (!Number.isNaN(cmtMs) && cmtMs < sinceMs) continue;
+
+            seenCommentIds.add(cmt.id);
+            const commenterId = String(cmt.from?.id || cmt.username || `ig_${cmt.id.slice(-6)}`);
+            const commenterName = String(
+              cmt.from?.username || cmt.username || `Khách IG #${commenterId.slice(-4)}`,
+            );
+            collectedHistoricalComments.push({
+              postId: media.id,
+              commentId: cmt.id,
+              parentCommentId: cmt.parent_id ? String(cmt.parent_id) : null,
+              commenterId,
+              commenterName,
+              commenterAvatar: null,
+              messageText: String(cmt.text || '[Bình luận Instagram]'),
+              mediaAttachmentUrl: null,
+              createdTimeIso: !Number.isNaN(cmtMs) ? new Date(cmtMs).toISOString() : syncedAt,
+              createdTimeMs: !Number.isNaN(cmtMs) ? cmtMs : nowMs,
+            });
+          }
+        }
+
+        const nextIgCursor = igMediaRes.data.paging?.cursors?.after || null;
+        if (!igMediaRes.data.paging?.next || !nextIgCursor) {
+          break;
+        }
+        igAfterCursor = nextIgCursor;
+      }
+    }
+
+    if (collectedHistoricalComments.length > 0) {
+      collectedHistoricalComments.sort((a, b) => a.createdTimeMs - b.createdTimeMs);
+
+      const existingCommentIdSet = new Set<string>();
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < collectedHistoricalComments.length; i += CHUNK_SIZE) {
+        const cmtBatch = collectedHistoricalComments
+          .slice(i, i + CHUNK_SIZE)
+          .map((c) => c.commentId);
+        const rows = await this.messageRepo.find({
+          where: {
+            shopId: channel.shopId,
+            externalMessageId: In(cmtBatch),
+          },
+          select: ['externalMessageId'],
+        });
+        for (const r of rows) {
+          if (r.externalMessageId) existingCommentIdSet.add(r.externalMessageId);
+        }
+      }
+
+      for (const item of collectedHistoricalComments) {
+        if (existingCommentIdSet.has(item.commentId)) continue;
+        existingCommentIdSet.add(item.commentId);
+
+        const isEchoComment = Boolean(
+          channel.externalPageId && item.commenterId === channel.externalPageId,
+        );
+        const normalizedEvt: NormalizedOmnichannelEvent = {
+          externalPageId: channel.externalPageId,
+          externalThreadId: `cmt_${item.postId}_${item.commenterId}`,
+          externalCustomerPsid: item.commenterId,
+          externalMessageId: item.commentId,
+          customerName: item.commenterName,
+          customerAvatarUrl: item.commenterAvatar,
+          messageText: item.messageText,
+          interactionType: 'COMMENT',
+          verb: 'add',
+          isEchoFromPage: isEchoComment,
+          createdTimeIso: item.createdTimeIso,
+          eventSubtype: 'MESSAGE_OR_COMMENT',
+          sourcePostId: item.postId,
+          sourceAdId: null,
+          ctwaClickId: null,
+          externalCommentId: item.commentId,
+          parentCommentId: item.parentCommentId,
+          mediaAttachmentUrl: item.mediaAttachmentUrl,
+        };
+
+        const processed = await this.withConversationThreadLock(
+          channel.shopId,
+          channel.id,
+          normalizedEvt.externalThreadId,
+          () => this.processSingleNormalizedOmnichannelEvent(channel, normalizedEvt),
+        );
+        if (processed.conversationId) {
+          commentsSynced += 1;
+        }
+      }
+    }
+
+    return {
+      channelId: channel.id,
+      pageName: channel.pageName,
+      pageShortCode: channel.pageShortCode,
+      lookbackDays,
+      conversationsScanned,
+      inboundMessagesSynced,
+      outboundEchoMessagesSynced,
+      postsScanned,
+      adPostsScanned,
+      commentsSynced,
+      syncedFromLiveApi,
+      sinceIso,
       syncedAt,
     };
   }

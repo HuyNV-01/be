@@ -89,7 +89,7 @@ export class PosOrderEntity extends BaseModel {
   @Column({ name: 'customer_name', type: 'varchar', length: 255 })
   customerName: string;
 
-  @Column({ name: 'customer_phone_masked', type: 'varchar', length: 32, default: '098***678' })
+  @Column({ name: 'customer_phone_masked', type: 'varchar', length: 32, default: '' })
   customerPhoneMasked: string;
 
   @Column({ name: 'customer_phone_encrypted', type: 'text', nullable: true, default: null })

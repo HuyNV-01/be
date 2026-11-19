@@ -26,7 +26,11 @@ import {
   ResolveDiscountApprovalDto,
 } from 'src/dto/catalog-pos/catalog-pos.dto';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
-import { PosOrderEntity, PosOrderLineItem } from 'src/entity/pos-order.entity';
+import {
+  BundleComponentRevenueAllocationItem,
+  PosOrderEntity,
+  PosOrderLineItem,
+} from 'src/entity/pos-order.entity';
 import { ProductVariantEntity } from 'src/entity/product-variant.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -38,7 +42,7 @@ import { CustomerRfmAndLoyaltyService } from 'src/modules/crm/services/customer-
 import { PiiVaultAndAuditService } from 'src/modules/crm/services/pii-vault-and-audit.service';
 import { VnAdministrativeAddressCarrierService } from 'src/modules/crm/services/vn-administrative-address-carrier.service';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 import { AtomicInventoryAndTransferService } from './atomic-inventory-and-transfer.service';
 import { CatalogAndBomService } from './catalog-and-bom.service';
@@ -143,8 +147,15 @@ export class InChatPosAndOrderRouterService {
       }>;
     }>;
   }> {
-    await this.catalogService.ensureSeededCatalogForShop(params.shopId);
-    const warehouses = await this.inventoryService.ensureDefaultWarehousesForShop(params.shopId);
+    const warehouses = await this.inventoryService.listWarehousesForShop(params.shopId);
+    if (warehouses.length === 0) {
+      return {
+        canFulfillSingleWarehouse: false,
+        recommendedSingleWarehouse: null,
+        requiresMultiWarehouseSplit: false,
+        allocationsByWarehouse: [],
+      };
+    }
 
     const sortedWarehouses = [...warehouses].sort((a, b) => {
       if (params.preferredWarehouseId) {
@@ -397,11 +408,23 @@ export class InChatPosAndOrderRouterService {
     let cogsSnapshotAmount = 0;
     const orderedCategoryIds = new Set<string>();
 
+    const firstAllocWhId = routingPlan.allocationsByWarehouse[0]?.warehouseId;
     const primaryWh =
       routingPlan.recommendedSingleWarehouse ||
-      (await this.warehouseRepo.findOne({
-        where: { id: routingPlan.allocationsByWarehouse[0].warehouseId, shopId },
-      }))!;
+      (firstAllocWhId
+        ? await this.warehouseRepo.findOne({
+            where: { id: firstAllocWhId, shopId },
+          })
+        : await this.warehouseRepo.findOne({
+            where: { shopId },
+            order: { priorityOrder: 'ASC', createdAt: 'ASC' },
+          }));
+
+    if (!primaryWh) {
+      throw new BadRequestException(
+        'Cửa hàng chưa khởi tạo Kho hàng vật lý nào. Vui lòng tạo Kho hàng trước khi lên đơn POS.',
+      );
+    }
 
     for (const reqItem of dto.items) {
       const variant = await this.variantRepo.findOne({
@@ -448,10 +471,69 @@ export class InChatPosAndOrderRouterService {
         },
       });
 
+      let bundleComponentAllocations: BundleComponentRevenueAllocationItem[] | undefined;
+      let resolvedLineUnitCost = unitCost;
+
+      if (
+        variant.isBundleBom &&
+        Array.isArray(variant.bundleComponentsJson) &&
+        variant.bundleComponentsJson.length > 0
+      ) {
+        const componentIds = variant.bundleComponentsJson.map((c) => c.componentVariantId);
+        const componentVariants = await this.variantRepo.findByIds(componentIds);
+        const compVariantMap = new Map(componentVariants.map((cv) => [cv.id, cv]));
+
+        const totalReferenceRetail = variant.bundleComponentsJson.reduce((acc, comp) => {
+          const refPrice =
+            Number(comp.retailPriceSnapshot || 0) ||
+            Number(compVariantMap.get(comp.componentVariantId)?.retailPrice || 0);
+          return acc + refPrice * Math.max(1, Number(comp.requiredQty || 1));
+        }, 0);
+
+        let accumulatedAllocatedRevenue = 0;
+        let bundleTotalUnitCogs = 0;
+
+        bundleComponentAllocations = variant.bundleComponentsJson.map((comp, idx, arr) => {
+          const compEntity = compVariantMap.get(comp.componentVariantId);
+          const reqCompQty = Math.max(1, Number(comp.requiredQty || 1));
+          const quantityDeducted = reqCompQty * qty;
+          const compUnitRetail =
+            Number(comp.retailPriceSnapshot || 0) || Number(compEntity?.retailPrice || 0);
+          const compUnitCost = Number(compEntity?.costPrice || 0);
+          const weightRatio =
+            totalReferenceRetail > 0
+              ? Number(((compUnitRetail * reqCompQty) / totalReferenceRetail).toFixed(4))
+              : Number((1 / Math.max(1, arr.length)).toFixed(4));
+
+          const allocatedRevenueAmount =
+            idx === arr.length - 1
+              ? Math.max(0, lineTotal - accumulatedAllocatedRevenue)
+              : Math.round(lineTotal * weightRatio);
+          accumulatedAllocatedRevenue += allocatedRevenueAmount;
+
+          const allocatedCogsAmount = compUnitCost * quantityDeducted;
+          bundleTotalUnitCogs += compUnitCost * reqCompQty;
+
+          return {
+            componentVariantId: comp.componentVariantId,
+            componentSkuCode: comp.componentSkuCode,
+            componentName: comp.componentName,
+            quantityDeducted,
+            retailWeightRatio: weightRatio,
+            allocatedRevenueAmount,
+            allocatedCogsAmount,
+          };
+        });
+
+        if (bundleTotalUnitCogs > 0) {
+          resolvedLineUnitCost = bundleTotalUnitCogs;
+        }
+      }
+
       subtotalAmount += retailPrice * qty;
       totalItemDiscountAmount += unitDiscAmount * qty;
       totalWeightGrams += Number(variant.weightGrams || 300) * qty;
-      cogsSnapshotAmount += unitCost * qty;
+      cogsSnapshotAmount += resolvedLineUnitCost * qty;
 
       orderLines.push({
         variantId: variant.id,
@@ -466,7 +548,7 @@ export class InChatPosAndOrderRouterService {
         discountAmount: unitDiscAmount * qty,
         finalUnitPrice,
         lineTotalAmount: lineTotal,
-        costPrice: unitCost,
+        costPrice: resolvedLineUnitCost,
         weightGrams: Number(variant.weightGrams || 300) * qty,
         isBundleBom: variant.isBundleBom,
         isFreeGift: variant.isFreeGiftItem,
@@ -475,6 +557,7 @@ export class InChatPosAndOrderRouterService {
           routingPlan.allocationsByWarehouse.find((a) => a.warehouseId === allocWhId)
             ?.warehouseName || primaryWh.name,
         assignedSerialNumbers: reqItem.serialNumbers || [],
+        ...(bundleComponentAllocations ? { bundleComponentAllocations } : {}),
       });
     }
 
@@ -594,8 +677,8 @@ export class InChatPosAndOrderRouterService {
         customerName: dto.customerName.trim(),
         customerPhoneMasked:
           customer?.phoneMasked ||
-          (dto.rawPhone ? this.piiVaultService.maskPhoneNumber(dto.rawPhone) : null) ||
-          '098***678',
+          (dto.rawPhone ? this.piiVaultService.maskPhoneNumber(dto.rawPhone) : '') ||
+          '',
         customerPhoneEncrypted: customer?.phoneEncrypted || null,
         channelType: dto.channelType || ChannelTypeEnum.FACEBOOK_PAGE,
         pageShortCode: dto.pageShortCode || 'POS',

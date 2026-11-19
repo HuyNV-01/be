@@ -350,23 +350,11 @@ export class ChatService {
       }
 
       const cleanContent = (dto.content || '').trim();
-      const maskedCleanText = this.nerService.maskPhonesInText(cleanContent);
-      const hasPhoneMaskedInClean = maskedCleanText !== cleanContent;
-      const extractedForMsg = conversation?.shopId
-        ? this.nerService.extractCommerceEntities(cleanContent)
-        : null;
-      const hasExtractedEntities = Boolean(
-        extractedForMsg &&
-          ((extractedForMsg.phones && extractedForMsg.phones.length > 0) ||
-            extractedForMsg.hasAddressDetected ||
-            extractedForMsg.provinceCode ||
-            extractedForMsg.addressLine ||
-            (extractedForMsg.skuCodes && extractedForMsg.skuCodes.length > 0)),
-      );
-      const sanitizedExtractedForMsg =
-        extractedForMsg && hasExtractedEntities
-          ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(extractedForMsg)
-          : null;
+      const maskedCleanText = cleanContent;
+      const hasPhoneMaskedInClean = false;
+      // Lý do nghiệp vụ: Tin nhắn gửi đi từ phía Người bán / Fanpage (OUTBOUND / INTERNAL_NOTE)
+      // không được chạy bóc tách NER thông tin mua hàng của khách để tránh gắn nhầm SĐT/địa chỉ của Shop thành của người mua.
+      const sanitizedExtractedForMsg = null;
 
       let channelInfoForMsg: ChannelIntegrationEntity | null = null;
       if (conversation?.channelIntegrationId) {
@@ -556,7 +544,7 @@ export class ChatService {
         conversation?.channelIntegrationId &&
         conversation.shopId
       ) {
-        await this.dispatchOutboundConversationMessageToPlatform({
+        void this.dispatchOutboundConversationMessageToPlatform({
           conversation,
           savedMessage,
           cleanContent,
@@ -1659,11 +1647,30 @@ export class ChatService {
       });
     }
 
+    const isOutboundOrEcho =
+      fullMessage.direction === MessageDirectionEnum.OUTBOUND ||
+      fullMessage.direction === MessageDirectionEnum.INTERNAL_NOTE ||
+      Boolean((fullMessage.metadata as any)?.isPageEcho) ||
+      fullMessage.senderId === 'page_echo';
+
     let sender = fullMessage.sender as any;
     if (sender) {
       const avatarUrl = sender.avatarMedia?.file?.url || null;
       delete sender.avatarMedia;
       sender.avatar = avatarUrl;
+    } else if (isOutboundOrEcho) {
+      const pageLabel =
+        channelInfo?.pageName || (fullMessage.metadata as any)?.pageName || 'Trang bán hàng';
+      const echoSourceLabel = (fullMessage.metadata as any)?.echoSourceAppLabel;
+      const displayPageName = echoSourceLabel ? `${pageLabel} (${echoSourceLabel})` : pageLabel;
+      sender = {
+        id: fullMessage.senderId || 'page_echo',
+        name: displayPageName,
+        originalName: pageLabel,
+        email: '',
+        nickname: channelInfo?.pageShortCode || null,
+        avatar: channelInfo?.avatarUrl || (fullMessage.metadata as any)?.channelAvatarUrl || null,
+      };
     } else {
       const fallbackExtName =
         (fullMessage.metadata as any)?.externalCustomerName ||
@@ -1699,12 +1706,13 @@ export class ChatService {
       ...(hasPhoneMaskedInMsg ? { hasMaskedPhonesInContent: true } : {}),
     };
 
-    const sanitizedEntities = fullMessage.extractedEntitiesJson
-      ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
-          fullMessage.extractedEntitiesJson,
-          fullMessage.extractedEntitiesJson.phoneTrustSummary,
-        )
-      : null;
+    const sanitizedEntities =
+      !isOutboundOrEcho && fullMessage.extractedEntitiesJson
+        ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
+            fullMessage.extractedEntitiesJson,
+            fullMessage.extractedEntitiesJson.phoneTrustSummary,
+          )
+        : null;
 
     return {
       ...fullMessage,
@@ -1834,6 +1842,12 @@ export class ChatService {
       const avatarUrl = sender?.avatarMedia?.file?.url || null;
       if (sender) delete sender.avatarMedia;
       const senderNickname = sender?.id ? nicknameMap.get(sender.id) : null;
+      const isOutboundOrEchoMsg =
+        msg.direction === MessageDirectionEnum.OUTBOUND ||
+        msg.direction === MessageDirectionEnum.INTERNAL_NOTE ||
+        Boolean((msg.metadata as any)?.isPageEcho) ||
+        msg.senderId === 'page_echo';
+
       const fallbackExtName =
         (msg.metadata as any)?.externalCustomerName ||
         (msg.metadata as any)?.marketplaceOrder?.buyerUsername ||
@@ -1843,6 +1857,13 @@ export class ChatService {
         (msg.metadata as any)?.externalCustomerAvatar ||
         convInfo?.avatar ||
         this.buildCustomerFallbackAvatarUrl(fallbackExtName);
+      const pageSenderName =
+        channelInfo?.pageName || (msg.metadata as any)?.pageName || 'Trang bán hàng';
+      const echoSourceLabel = (msg.metadata as any)?.echoSourceAppLabel;
+      const resolvedPageSenderName = echoSourceLabel
+        ? `${pageSenderName} (${echoSourceLabel})`
+        : pageSenderName;
+
       const cleanSender = sender?.id
         ? {
             ...sender,
@@ -1851,14 +1872,23 @@ export class ChatService {
             nickname: senderNickname || null,
             avatar: avatarUrl,
           }
-        : {
-            id: msg.senderId,
-            name: fallbackExtName,
-            originalName: fallbackExtName,
-            email: '',
-            nickname: null,
-            avatar: fallbackExtAvatar,
-          };
+        : isOutboundOrEchoMsg
+          ? {
+              id: msg.senderId || 'page_echo',
+              name: resolvedPageSenderName,
+              originalName: pageSenderName,
+              email: '',
+              nickname: channelInfo?.pageShortCode || null,
+              avatar: channelInfo?.avatarUrl || (msg.metadata as any)?.channelAvatarUrl || null,
+            }
+          : {
+              id: msg.senderId,
+              name: fallbackExtName,
+              originalName: fallbackExtName,
+              email: '',
+              nickname: null,
+              avatar: fallbackExtAvatar,
+            };
 
       const computedStatus = this.computeStatus(
         msg as MessageEntity,
@@ -1870,11 +1900,18 @@ export class ChatService {
         msg.content as string,
         conversationId,
       );
-      const maskedContentText = this.nerService.maskPhonesInText(rawDecryptedContent);
-      const hasPhoneMasked = maskedContentText !== rawDecryptedContent;
+      const maskedContentText = isOutboundOrEchoMsg
+        ? rawDecryptedContent
+        : this.nerService.maskPhonesInText(rawDecryptedContent);
+      const hasPhoneMasked = !isOutboundOrEchoMsg && maskedContentText !== rawDecryptedContent;
 
-      let rawEntities = msg.extractedEntitiesJson;
-      if (!rawEntities && convInfo?.shopId && (hasPhoneMasked || rawDecryptedContent.length >= 6)) {
+      let rawEntities = isOutboundOrEchoMsg ? null : msg.extractedEntitiesJson;
+      if (
+        !isOutboundOrEchoMsg &&
+        !rawEntities &&
+        convInfo?.shopId &&
+        (hasPhoneMasked || rawDecryptedContent.length >= 6)
+      ) {
         const onTheFlyNer = this.nerService.extractCommerceEntities(rawDecryptedContent);
         if (
           (onTheFlyNer.phones && onTheFlyNer.phones.length > 0) ||
@@ -1886,12 +1923,13 @@ export class ChatService {
         }
       }
 
-      const sanitizedEntities = rawEntities
-        ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
-            rawEntities,
-            rawEntities.phoneTrustSummary || conversationTrustSummary,
-          )
-        : null;
+      const sanitizedEntities =
+        !isOutboundOrEchoMsg && rawEntities
+          ? this.nerService.sanitizeExtractedEntitiesForPublicResponse(
+              rawEntities,
+              rawEntities.phoneTrustSummary || conversationTrustSummary,
+            )
+          : null;
 
       const enrichedMetadata = {
         ...(msg.metadata || {}),

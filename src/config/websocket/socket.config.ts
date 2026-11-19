@@ -42,6 +42,7 @@ export const SOCKET_CONFIG = {
       GROUP_UPDATED: 'group_updated',
       E2EE_KEY_UPDATED: 'e2ee_key_updated',
       CONVERSATION_SETTINGS_UPDATED: 'conversation_settings_updated',
+      CONVERSATION_UPDATED: 'conversation_updated',
       NICKNAME_UPDATED: 'nickname_updated',
       POLL_UPDATED: 'poll_updated',
       LINK_PREVIEW_READY: 'link_preview_ready',

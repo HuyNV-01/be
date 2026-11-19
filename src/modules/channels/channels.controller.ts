@@ -317,6 +317,60 @@ export class ChannelsController {
     };
   }
 
+  @Post('sync-all-historical-3m')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2, F03.3 & F03.4: Đồng bộ toàn bộ lịch sử Tin nhắn Hộp thư (Inbox) & Bình luận Bài viết/Quảng cáo của khách hàng tới tất cả các Trang trong vòng 3 tháng (90 ngày) gần nhất',
+  })
+  async syncAllShopHistoricalThreeMonths(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Query('lookbackDays') lookbackDays?: number,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.syncAllShopHistoricalThreeMonths(
+      shopId,
+      Number(lookbackDays || 90),
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message:
+        'Synced all customer inbox messages and post/ad comments from the last 3 months across all shop channels successfully',
+      data,
+    };
+  }
+
+  @Post(':channelId/sync-historical-3m')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'F01.2, F03.3 & F03.4: Phân trang đệ quy lấy toàn bộ Tin nhắn Hộp thư & Bình luận Bài viết/Quảng cáo của khách hàng tới Trang trong vòng 3 tháng (90 ngày) gần nhất',
+  })
+  async syncChannelHistoricalThreeMonths(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('channelId') channelId: string,
+    @Query('lookbackDays') lookbackDays?: number,
+  ): Promise<DBaseRes> {
+    const data = await this.channelsService.syncChannelHistoricalThreeMonths(
+      shopId,
+      channelId,
+      Number(lookbackDays || 90),
+      req.user?.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message:
+        'Synced all customer inbox messages and post/ad comments from the last 3 months for channel successfully',
+      data,
+    };
+  }
+
   @Post(':channelId/sync-webhook')
   @RequireShopPermissions(PermissionCodeEnum.CHANNEL_INTEGRATION_CONNECT)
   @HttpCode(HttpStatus.OK)

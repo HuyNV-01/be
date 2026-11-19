@@ -172,7 +172,7 @@ export class CatalogPosController {
     summary: 'F05.6: Danh sách các Kho vật lý của Cửa hàng (Tự động khởi tạo Kho HN & Kho TP.HCM)',
   })
   async listWarehouses(@Param('shopId') shopId: string): Promise<DBaseRes> {
-    const data = await this.inventoryService.ensureDefaultWarehousesForShop(shopId);
+    const data = await this.inventoryService.listWarehousesForShop(shopId);
     return {
       status: HttpStatus.OK,
       code: HttpStatus.OK,

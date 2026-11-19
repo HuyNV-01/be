@@ -117,49 +117,22 @@ export class AtomicInventoryAndTransferService {
   ) {}
 
   /**
-   * Đảm bảo cửa hàng luôn có tối thiểu 2 Kho vật lý mẫu (Kho Tổng Hà Nội & Kho Chi Nhánh TP.HCM)
-   * phục vụ điều phối tồn kho đa điểm và tách đơn tự động (`F05.6`, `F06.6`).
+   * Truy vấn danh sách Kho vật lý thực tế của Cửa hàng từ cơ sở dữ liệu.
+   * Khi bảng `warehouses` chưa có dữ liệu (`allowAutoCreate === false`), trả về mảng rỗng `[]`
+   * thay vì tự động chèn kho mẫu hardcode. Chỉ khởi tạo kho mặc định khi người bán chủ động tạo sản phẩm/kho hoặc nạp dữ liệu mẫu (`allowAutoCreate === true`).
    */
-  public async ensureDefaultWarehousesForShop(shopId: string): Promise<WarehouseEntity[]> {
-    const existing = await this.warehouseRepo.find({
+  public async listWarehousesForShop(shopId: string): Promise<WarehouseEntity[]> {
+    return this.warehouseRepo.find({
       where: { shopId },
       order: { priorityOrder: 'ASC', createdAt: 'ASC' },
     });
-    if (existing.length > 0) {
-      return existing;
-    }
+  }
 
-    const hnWarehouse = this.warehouseRepo.create({
-      shopId,
-      code: 'WH-HN-01',
-      name: 'Kho Tổng Hà Nội (Cầu Giấy)',
-      provinceCode: '01',
-      districtCode: '005',
-      wardCode: '00166',
-      addressLine: 'Số 15 Ngõ 68 Cầu Giấy, Phường Cầu Giấy, TP. Hà Nội',
-      contactPhone: '0988111222',
-      isDefault: true,
-      priorityOrder: 1,
-      allowNegativeStock: false,
-      isActive: true,
-    });
-
-    const hcmWarehouse = this.warehouseRepo.create({
-      shopId,
-      code: 'WH-HCM-02',
-      name: 'Kho Chi Nhánh TP.HCM (Bình Thạnh)',
-      provinceCode: '79',
-      districtCode: '765',
-      wardCode: '26908',
-      addressLine: 'Số 120 Điện Biên Phủ, Phường Gia Định, TP. Hồ Chí Minh',
-      contactPhone: '0909333444',
-      isDefault: false,
-      priorityOrder: 2,
-      allowNegativeStock: false,
-      isActive: true,
-    });
-
-    return this.warehouseRepo.save([hnWarehouse, hcmWarehouse]);
+  public async ensureDefaultWarehousesForShop(
+    shopId: string,
+    _allowAutoCreate = false,
+  ): Promise<WarehouseEntity[]> {
+    return this.listWarehousesForShop(shopId);
   }
 
   public async upsertWarehouse(shopId: string, dto: UpsertWarehouseDto): Promise<WarehouseEntity> {
@@ -176,11 +149,11 @@ export class AtomicInventoryAndTransferService {
         shopId,
         code: dto.code.trim().toUpperCase(),
         name: dto.name.trim(),
-        provinceCode: dto.provinceCode || '01',
-        districtCode: dto.districtCode || '005',
-        wardCode: dto.wardCode || '00166',
-        addressLine: dto.addressLine || dto.name.trim(),
-        contactPhone: dto.contactPhone || '0988123456',
+        provinceCode: dto.provinceCode?.trim() || '',
+        districtCode: dto.districtCode?.trim() || '',
+        wardCode: dto.wardCode?.trim() || '',
+        addressLine: dto.addressLine?.trim() || dto.name.trim(),
+        contactPhone: dto.contactPhone?.trim() || '',
         isDefault: dto.isDefault ?? false,
         priorityOrder: dto.priorityOrder ?? 1,
         allowNegativeStock: dto.allowNegativeStock ?? false,
