@@ -309,3 +309,5 @@ export enum NotificationResourceTypeEnum {
 }
 
 export * from './permission.enum';
+
+export * from './oms.enum';
