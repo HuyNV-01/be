@@ -8,6 +8,7 @@ import {
   IsInt,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -15,9 +16,13 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
-import type {
-  QuickReplyAttachmentItem,
-  QuickReplyProductCardItem,
+import { type QuickReplyVariableSourceType } from 'src/entity/quick-reply-custom-variable.entity';
+import {
+  type QuickReplyAttachmentItem,
+  type QuickReplyProductCardItem,
+  type QuickReplyScopeType,
+  type QuickReplySequenceStep,
+  type QuickReplyUsageContext,
 } from 'src/entity/quick-reply-template.entity';
 
 export class OmnichannelInboxFilterDto {
@@ -208,7 +213,7 @@ export class CreateQuickReplyTemplateDto {
   @MaxLength(64)
   shortcut: string;
 
-  @ApiProperty({ example: 'Mẫu chào khách mới & hỏi nhu cầu' })
+  @ApiProperty({ example: 'Mẫu chào khách mới & gửi video sản phẩm' })
   @IsString()
   @IsNotEmpty()
   @MaxLength(150)
@@ -220,9 +225,24 @@ export class CreateQuickReplyTemplateDto {
   @MaxLength(64)
   category?: string;
 
+  @ApiPropertyOptional({ enum: ['SHOP', 'CHANNEL', 'PERSONAL'], default: 'SHOP' })
+  @IsOptional()
+  @IsEnum(['SHOP', 'CHANNEL', 'PERSONAL'])
+  scope?: QuickReplyScopeType;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  allowedChannelIdsJson?: string[] | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  usageContextJson?: QuickReplyUsageContext | null;
+
   @ApiProperty({
     example:
-      'Dạ {{shop_name}} xin chào {{salutation}} {{customer_name}} ạ! Em là {{agent_name}}, em có thể tư vấn mẫu nào cho mình hôm nay ạ?',
+      'Dạ {{shop_name}} xin chào {{salutation}} {{customer_name}} ạ! Hotline hỗ trợ: {{hotline}}.',
   })
   @IsString()
   @IsNotEmpty()
@@ -232,12 +252,38 @@ export class CreateQuickReplyTemplateDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsArray()
+  messageSequenceJson?: QuickReplySequenceStep[] | null;
+
+  @ApiPropertyOptional({ description: 'Danh sách hình ảnh & video đính kèm' })
+  @IsOptional()
+  @IsArray()
   attachmentsJson?: QuickReplyAttachmentItem[];
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsArray()
   productCardsJson?: QuickReplyProductCardItem[];
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  autoAssignTagIdsJson?: string[] | null;
+
+  @ApiPropertyOptional({ description: 'Giá trị mặc định riêng cho các biến tùy chỉnh trong mẫu' })
+  @IsOptional()
+  @IsObject()
+  customVariableDefaultsJson?: Record<string, string> | null;
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  isPinned?: boolean;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }
 
 export class UpdateQuickReplyTemplateDto {
@@ -259,11 +305,31 @@ export class UpdateQuickReplyTemplateDto {
   @MaxLength(64)
   category?: string;
 
+  @ApiPropertyOptional({ enum: ['SHOP', 'CHANNEL', 'PERSONAL'] })
+  @IsOptional()
+  @IsEnum(['SHOP', 'CHANNEL', 'PERSONAL'])
+  scope?: QuickReplyScopeType;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  allowedChannelIdsJson?: string[] | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  usageContextJson?: QuickReplyUsageContext | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   @MaxLength(5000)
   contentTemplate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  messageSequenceJson?: QuickReplySequenceStep[] | null;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -275,10 +341,174 @@ export class UpdateQuickReplyTemplateDto {
   @IsArray()
   productCardsJson?: QuickReplyProductCardItem[];
 
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  autoAssignTagIdsJson?: string[] | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  customVariableDefaultsJson?: Record<string, string> | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isPinned?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+}
+
+export class CreateQuickReplyCustomVariableDto {
+  @ApiProperty({ example: 'hotline' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  variableKey: string;
+
+  @ApiProperty({ example: 'Số hotline cửa hàng' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  label: string;
+
+  @ApiPropertyOptional({ example: 'Hiển thị ở cuối mẫu câu tư vấn và bảo hành' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  description?: string | null;
+
+  @ApiPropertyOptional({
+    enum: ['STATIC_TEXT', 'DYNAMIC_EXPRESSION', 'PROMPT_ON_USE'],
+    default: 'STATIC_TEXT',
+  })
+  @IsOptional()
+  @IsEnum(['STATIC_TEXT', 'DYNAMIC_EXPRESSION', 'PROMPT_ON_USE'])
+  sourceType?: QuickReplyVariableSourceType;
+
+  @ApiPropertyOptional({ example: '1900 6868' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  defaultValue?: string | null;
+
+  @ApiPropertyOptional({ example: '1900 6868' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  sampleValue?: string | null;
+
+  @ApiPropertyOptional({ example: 'customer.tier' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  dynamicPath?: string | null;
+
+  @ApiPropertyOptional({ default: 100 })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
+}
+
+export class UpdateQuickReplyCustomVariableDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  variableKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  label?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  description?: string | null;
+
+  @ApiPropertyOptional({ enum: ['STATIC_TEXT', 'DYNAMIC_EXPRESSION', 'PROMPT_ON_USE'] })
+  @IsOptional()
+  @IsEnum(['STATIC_TEXT', 'DYNAMIC_EXPRESSION', 'PROMPT_ON_USE'])
+  sourceType?: QuickReplyVariableSourceType;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  defaultValue?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  sampleValue?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  dynamicPath?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
+export class InterpolateQuickReplyDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  conversationId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  customerName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  salutation?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  agentName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  pageName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  trackingLink?: string;
+
+  @ApiPropertyOptional({ description: 'Giá trị ghi đè cho biến tùy chỉnh hoặc PROMPT_ON_USE' })
+  @IsOptional()
+  @IsObject()
+  customOverrides?: Record<string, string>;
 }
 
 export class InitiateMaskedVoipCallDto {

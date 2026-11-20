@@ -6,12 +6,14 @@ import { CustomTagEntity } from 'src/entity/custom-tag.entity';
 import { Repository } from 'typeorm';
 
 import { ConversationTaggingService } from './conversation-tagging.service';
+import { TagEventOrchestratorService } from './tag-event-orchestrator.service';
 
 export interface AutoTagEventPayload {
   shopId: string;
   conversationId: string;
   messageContent?: string;
   actorUserId?: string;
+  payload?: Record<string, unknown>;
 }
 
 @Injectable()
@@ -22,6 +24,7 @@ export class AutoTagRuleEngine {
     @InjectRepository(CustomTagEntity)
     private readonly customTagRepo: Repository<CustomTagEntity>,
     private readonly conversationTaggingService: ConversationTaggingService,
+    private readonly tagEventOrchestrator: TagEventOrchestratorService,
   ) {}
 
   private async evaluateAndApplyTrigger(
@@ -33,11 +36,25 @@ export class AutoTagRuleEngine {
       | 'VIETQR_PAID'
       | 'CARRIER_DELIVERY_FAILED'
       | 'KEYWORD_MATCH',
+    systemEventTopic: string,
     payload: AutoTagEventPayload,
   ): Promise<void> {
     if (!payload.shopId || !payload.conversationId) return;
 
     try {
+      // 1. Chạy động cơ Sự kiện Tùy chỉnh Hai chiều mới (`TagEventDefinitionEntity`)
+      await this.tagEventOrchestrator.dispatchEvent({
+        shopId: payload.shopId,
+        systemEventTopic,
+        conversationId: payload.conversationId,
+        messageContent: payload.messageContent,
+        actorUserId: payload.actorUserId || 'SYSTEM_AUTO_TAG',
+        payload: payload.payload,
+        source: `SYSTEM_TOPIC:${systemEventTopic}`,
+        recursionDepth: 0,
+      });
+
+      // 2. Giữ nguyên tương thích ngược với cấu hình `autoRuleConfigJson` trên từng Tag
       const activeTags = await this.customTagRepo.find({
         where: { shopId: payload.shopId, isActive: true },
       });
@@ -81,36 +98,40 @@ export class AutoTagRuleEngine {
 
   @OnEvent('chat.message.inbound')
   async handleInboundMessageKeywords(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('KEYWORD_MATCH', payload);
+    await this.evaluateAndApplyTrigger('KEYWORD_MATCH', 'chat.message.inbound', payload);
   }
 
   @OnEvent('ner.phone.extracted')
   async handlePhoneExtracted(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('NER_PHONE_EXTRACTED', payload);
+    await this.evaluateAndApplyTrigger('NER_PHONE_EXTRACTED', 'ner.phone.extracted', payload);
   }
 
   @OnEvent('ner.address.extracted')
   async handleAddressExtracted(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('NER_ADDRESS_EXTRACTED', payload);
+    await this.evaluateAndApplyTrigger('NER_ADDRESS_EXTRACTED', 'ner.address.extracted', payload);
   }
 
   @OnEvent('pos.draft.created')
   async handlePosDraftCreated(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('POS_DRAFT_CREATED', payload);
+    await this.evaluateAndApplyTrigger('POS_DRAFT_CREATED', 'pos.draft.created', payload);
   }
 
   @OnEvent('pos.order.created')
   async handlePosOrderCreated(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('POS_ORDER_CONFIRMED', payload);
+    await this.evaluateAndApplyTrigger('POS_ORDER_CONFIRMED', 'pos.order.created', payload);
   }
 
   @OnEvent('payment.vietqr.confirmed')
   async handleVietQrConfirmed(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('VIETQR_PAID', payload);
+    await this.evaluateAndApplyTrigger('VIETQR_PAID', 'payment.vietqr.confirmed', payload);
   }
 
   @OnEvent('carrier.delivery.failed')
   async handleCarrierDeliveryFailed(payload: AutoTagEventPayload): Promise<void> {
-    await this.evaluateAndApplyTrigger('CARRIER_DELIVERY_FAILED', payload);
+    await this.evaluateAndApplyTrigger(
+      'CARRIER_DELIVERY_FAILED',
+      'carrier.delivery.failed',
+      payload,
+    );
   }
 }

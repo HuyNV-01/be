@@ -4,11 +4,22 @@ import { BaseModel } from './base-model';
 
 export type QuickReplyScopeType = 'SHOP' | 'CHANNEL' | 'PERSONAL';
 
+export type QuickReplyMediaType = 'IMAGE' | 'VIDEO' | 'FILE';
+
+export type QuickReplyInteractionType = 'INBOX' | 'COMMENT' | 'LIVESTREAM' | 'MARKETPLACE';
+
+export type QuickReplyToneStyle = 'FRIENDLY' | 'PROFESSIONAL' | 'URGENT' | 'VIP_CARE' | 'CUSTOM';
+
 export interface QuickReplyAttachmentItem {
   fileId?: string;
   url: string;
   fileName: string;
   mimeType?: string;
+  mediaType?: QuickReplyMediaType;
+  thumbnailUrl?: string | null;
+  durationSeconds?: number | null;
+  sizeBytes?: number | null;
+  caption?: string | null;
 }
 
 export interface QuickReplyProductCardItem {
@@ -24,6 +35,16 @@ export interface QuickReplySequenceStep {
   contentTemplate: string;
   delayMs?: number;
   attachments?: QuickReplyAttachmentItem[];
+}
+
+export interface QuickReplyUsageContext {
+  interactionTypes?: QuickReplyInteractionType[];
+  channelTypes?: string[];
+  toneStyle?: QuickReplyToneStyle;
+  contextTags?: string[];
+  applicableTagIds?: string[];
+  customerTiers?: Array<'NEW' | 'SILVER' | 'GOLD' | 'VIP' | 'BLACKLIST'>;
+  note?: string | null;
 }
 
 @Entity('quick_reply_templates')
@@ -51,6 +72,9 @@ export class QuickReplyTemplateEntity extends BaseModel {
   @Column({ name: 'allowed_channel_ids_json', type: 'json', nullable: true, default: null })
   allowedChannelIdsJson: string[] | null;
 
+  @Column({ name: 'usage_context_json', type: 'json', nullable: true, default: null })
+  usageContextJson: QuickReplyUsageContext | null;
+
   @Column({ name: 'content_template', type: 'text' })
   contentTemplate: string;
 
@@ -65,6 +89,9 @@ export class QuickReplyTemplateEntity extends BaseModel {
 
   @Column({ name: 'auto_assign_tag_ids_json', type: 'json', nullable: true, default: null })
   autoAssignTagIdsJson: string[] | null;
+
+  @Column({ name: 'custom_variable_defaults_json', type: 'json', nullable: true, default: null })
+  customVariableDefaultsJson: Record<string, string> | null;
 
   @Column({ name: 'is_pinned', type: 'boolean', default: false })
   isPinned: boolean;

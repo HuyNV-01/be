@@ -20,7 +20,9 @@ export type TagWorkflowActionType =
   | 'ADD_LOYALTY_POINTS'
   | 'ADD_INTERNAL_NOTE'
   | 'AUTO_ADD_OR_REMOVE_TAGS'
-  | 'CALL_WEBHOOK';
+  | 'CALL_WEBHOOK'
+  | 'TRIGGER_CUSTOM_EVENT'
+  | 'EMIT_SOCKET_ALERT';
 
 export interface TagWorkflowActionItem {
   id: string;
@@ -39,6 +41,9 @@ export interface TagWorkflowActionItem {
   removeTagIds?: string[];
   webhookUrl?: string;
   webhookSecret?: string;
+  customEventKey?: string;
+  customEventPayload?: Record<string, unknown>;
+  alertMessage?: string;
 }
 
 export interface TagWorkflowExecutionCondition {
@@ -56,7 +61,9 @@ export interface AutoTagRuleConfig {
     | 'POS_ORDER_CONFIRMED'
     | 'VIETQR_PAID'
     | 'CARRIER_DELIVERY_FAILED'
-    | 'KEYWORD_MATCH';
+    | 'KEYWORD_MATCH'
+    | 'CUSTOM_EVENT';
+  customEventKey?: string;
   keywords?: string[];
   removeTagIdsOnApply?: string[];
 }
@@ -105,6 +112,9 @@ export class CustomTagEntity extends BaseModel {
 
   @Column({ name: 'auto_rule_config_json', type: 'json', nullable: true, default: null })
   autoRuleConfigJson: AutoTagRuleConfig | null;
+
+  @Column({ name: 'linked_event_keys_json', type: 'json', nullable: true, default: null })
+  linkedEventKeysJson: string[] | null;
 
   @Column({ name: 'on_apply_actions_json', type: 'json', nullable: true, default: null })
   onApplyActionsJson: TagWorkflowActionItem[] | null;

@@ -9,6 +9,7 @@ import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.en
 import { MessageTagAssignmentEntity } from 'src/entity/message-tag-assignment.entity';
 import { MessageEntity } from 'src/entity/message.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
+import { TagEventDefinitionEntity } from 'src/entity/tag-event-definition.entity';
 import { ChatModule } from 'src/modules/chat/chat.module';
 import { IamModule } from 'src/modules/iam/iam.module';
 
@@ -17,6 +18,7 @@ import { ConversationTaggingService } from './services/conversation-tagging.serv
 import { CustomTagService } from './services/custom-tag.service';
 import { MessageBookmarkTagService } from './services/message-bookmark-tag.service';
 import { TagActionWorkflowExecutor } from './services/tag-action-workflow.executor';
+import { TagEventOrchestratorService } from './services/tag-event-orchestrator.service';
 import { TagsController } from './tags.controller';
 
 @Module({
@@ -29,6 +31,7 @@ import { TagsController } from './tags.controller';
       CustomerProfileEntity,
       CustomerWalletLedgerEntity,
       ShopMemberEntity,
+      TagEventDefinitionEntity,
     ]),
     WebSocketModule,
     IamModule,
@@ -41,6 +44,7 @@ import { TagsController } from './tags.controller';
     ConversationTaggingService,
     MessageBookmarkTagService,
     AutoTagRuleEngine,
+    TagEventOrchestratorService,
   ],
   exports: [
     CustomTagService,

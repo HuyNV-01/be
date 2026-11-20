@@ -28,7 +28,7 @@ import { Repository } from 'typeorm';
 export interface TagWorkflowExecutionSummary {
   tagId: string;
   tagName: string;
-  trigger: 'ON_APPLY' | 'ON_REMOVE';
+  trigger: 'ON_APPLY' | 'ON_REMOVE' | 'CUSTOM_EVENT';
   executedActions: Array<{
     actionId: string;
     actionType: string;
@@ -85,64 +85,19 @@ export class TagActionWorkflowExecutor {
     return true;
   }
 
-  public async executeTagWorkflows(params: {
+  public async executeActionList(params: {
     shopId: string;
     conversation: ConversationEntity;
-    tag: CustomTagEntity;
-    trigger: 'ON_APPLY' | 'ON_REMOVE';
+    actions: TagWorkflowActionItem[];
+    sourceLabel: string;
+    sourceSlug: string;
+    trigger: 'ON_APPLY' | 'ON_REMOVE' | 'CUSTOM_EVENT';
     actorUserId: string;
-    recursionDepth?: number;
-  }): Promise<TagWorkflowExecutionSummary> {
-    const depth = params.recursionDepth ?? 0;
-    const summary: TagWorkflowExecutionSummary = {
-      tagId: params.tag.id,
-      tagName: params.tag.name,
-      trigger: params.trigger,
-      executedActions: [],
-    };
-
-    // Chống vòng lặp vô hạn khi Tag A tự gắn Tag B rồi Tag B lại gắn Tag A
-    if (depth >= 2) {
-      return summary;
-    }
-
-    const actions: TagWorkflowActionItem[] =
-      params.trigger === 'ON_APPLY'
-        ? Array.isArray(params.tag.onApplyActionsJson)
-          ? params.tag.onApplyActionsJson
-          : []
-        : Array.isArray(params.tag.onRemoveActionsJson)
-          ? params.tag.onRemoveActionsJson
-          : [];
-
-    const enabledActions = actions.filter((a) => a && a.isEnabled !== false);
-    if (enabledActions.length === 0) {
-      return summary;
-    }
-
-    if (!this.matchesCondition(params.conversation, params.tag.executionConditionJson)) {
-      return summary;
-    }
-
-    // Kiểm tra cooldown chống gửi lặp nếu nhân viên bấm nhầm gắn/gỡ liên tục
-    const cooldownMinutes = Number(
-      params.tag.executionConditionJson?.cooldownMinutesPerConversation || 0,
-    );
-    if (cooldownMinutes > 0) {
-      const cooldownKey = `tag_wf_cd:${params.tag.id}:${params.conversation.id}:${params.trigger}`;
-      const acquired = await this.redis.set(cooldownKey, '1', 'EX', cooldownMinutes * 60, 'NX');
-      if (!acquired) {
-        summary.executedActions.push({
-          actionId: 'cooldown_guard',
-          actionType: 'COOLDOWN',
-          status: 'SKIPPED',
-          detail: `Đang trong thời gian chống lặp ${cooldownMinutes} phút`,
-        });
-        return summary;
-      }
-    }
-
-    let executedCount = 0;
+    recursionDepth: number;
+    visitedEventKeys?: string[];
+  }): Promise<TagWorkflowExecutionSummary['executedActions']> {
+    const results: TagWorkflowExecutionSummary['executedActions'] = [];
+    const enabledActions = (params.actions || []).filter((a) => a && a.isEnabled !== false);
 
     for (const action of enabledActions) {
       try {
@@ -173,16 +128,15 @@ export class TagActionWorkflowExecutor {
                   conversationId: params.conversation.id,
                   shopId: params.shopId,
                   assignedAgentId: targetUserId,
-                  source: `TAG_WORKFLOW:${params.tag.slug}`,
+                  source: params.sourceSlug,
                 },
               );
-              summary.executedActions.push({
+              results.push({
                 actionId: action.id,
                 actionType: action.actionType,
                 status: 'EXECUTED',
                 detail: `Đã chuyển phụ trách sang nhân sự ${targetUserId}`,
               });
-              executedCount += 1;
             }
             break;
           }
@@ -195,7 +149,7 @@ export class TagActionWorkflowExecutor {
               {
                 supportStatus: ConversationSupportStatusEnum.SNOOZED,
                 snoozedUntilAt: wakeAt,
-                snoozeNote: action.snoozeNote || `Hẹn tự động từ Tag "${params.tag.name}"`,
+                snoozeNote: action.snoozeNote || `Hẹn tự động từ "${params.sourceLabel}"`,
                 snoozedByUserId: params.actorUserId,
               },
             );
@@ -206,16 +160,15 @@ export class TagActionWorkflowExecutor {
               {
                 conversationId: params.conversation.id,
                 snoozedUntilAt: wakeAt.toISOString(),
-                source: `TAG_WORKFLOW:${params.tag.slug}`,
+                source: params.sourceSlug,
               },
             );
-            summary.executedActions.push({
+            results.push({
               actionId: action.id,
               actionType: action.actionType,
               status: 'EXECUTED',
               detail: `Đã hẹn chăm sóc lại sau ${mins} phút`,
             });
-            executedCount += 1;
             break;
           }
 
@@ -228,16 +181,15 @@ export class TagActionWorkflowExecutor {
                 customer.tier = action.customerTier as CustomerTierEnum;
                 if (action.customerTier === 'BLACKLIST') {
                   customer.isBlacklisted = true;
-                  customer.blacklistReason = `Gắn tự động từ Tag "${params.tag.name}"`;
+                  customer.blacklistReason = `Gắn tự động từ "${params.sourceLabel}"`;
                 }
                 await this.customerRepo.save(customer);
-                summary.executedActions.push({
+                results.push({
                   actionId: action.id,
                   actionType: action.actionType,
                   status: 'EXECUTED',
                   detail: `Đã cập nhật hạng khách hàng sang ${action.customerTier}`,
                 });
-                executedCount += 1;
               }
             }
             break;
@@ -263,17 +215,16 @@ export class TagActionWorkflowExecutor {
                     transactionType: CustomerWalletTransactionTypeEnum.MANUAL_ADJUST,
                     deltaAmount: delta,
                     balanceAfter: customer.loyaltyPointsBalance,
-                    note: `Tự động điều chỉnh điểm từ Tag "${params.tag.name}"`,
+                    note: `Tự động điều chỉnh điểm từ "${params.sourceLabel}"`,
                     actorUserId: params.actorUserId,
                   }),
                 );
-                summary.executedActions.push({
+                results.push({
                   actionId: action.id,
                   actionType: action.actionType,
                   status: 'EXECUTED',
                   detail: `Đã cập nhật ${delta > 0 ? `+${delta}` : delta} điểm thành viên`,
                 });
-                executedCount += 1;
               }
             }
             break;
@@ -281,22 +232,20 @@ export class TagActionWorkflowExecutor {
 
           case 'SEND_QUICK_REPLY': {
             if (action.quickReplyTemplateId) {
-              // Ủy thác qua EventEmitter2 để tránh circular dependency với ChatService
               this.eventEmitter.emit('tag.workflow.send_quick_reply', {
                 shopId: params.shopId,
                 conversationId: params.conversation.id,
                 quickReplyTemplateId: action.quickReplyTemplateId,
                 actorUserId: params.actorUserId,
                 delaySeconds: Number(action.delaySeconds || 0),
-                tagName: params.tag.name,
+                tagName: params.sourceLabel,
               });
-              summary.executedActions.push({
+              results.push({
                 actionId: action.id,
                 actionType: action.actionType,
                 status: 'EXECUTED',
                 detail: `Đã kích hoạt gửi mẫu câu ${action.quickReplyTemplateId}`,
               });
-              executedCount += 1;
             }
             break;
           }
@@ -308,16 +257,83 @@ export class TagActionWorkflowExecutor {
                 conversationId: params.conversation.id,
                 noteText: action.internalNoteText.trim(),
                 actorUserId: params.actorUserId,
-                tagName: params.tag.name,
+                tagName: params.sourceLabel,
               });
-              summary.executedActions.push({
+              results.push({
                 actionId: action.id,
                 actionType: action.actionType,
                 status: 'EXECUTED',
                 detail: 'Đã chèn ghi chú nội bộ tự động',
               });
-              executedCount += 1;
             }
+            break;
+          }
+
+          case 'AUTO_ADD_OR_REMOVE_TAGS': {
+            if (
+              params.recursionDepth < 2 &&
+              ((action.addTagIds && action.addTagIds.length > 0) ||
+                (action.removeTagIds && action.removeTagIds.length > 0))
+            ) {
+              this.eventEmitter.emit('tag.workflow.mutate_related_tags', {
+                shopId: params.shopId,
+                conversationId: params.conversation.id,
+                addTagIds: action.addTagIds || [],
+                removeTagIds: action.removeTagIds || [],
+                actorUserId: params.actorUserId,
+                recursionDepth: params.recursionDepth + 1,
+              });
+              results.push({
+                actionId: action.id,
+                actionType: action.actionType,
+                status: 'EXECUTED',
+                detail: 'Đã kích hoạt đồng bộ Tag liên đới',
+              });
+            }
+            break;
+          }
+
+          case 'TRIGGER_CUSTOM_EVENT': {
+            const eventKey = action.customEventKey?.trim();
+            if (eventKey && !(params.visitedEventKeys || []).includes(eventKey)) {
+              this.eventEmitter.emit('custom.tag_event.dispatched', {
+                shopId: params.shopId,
+                eventKey,
+                conversationId: params.conversation.id,
+                actorUserId: params.actorUserId,
+                source: `TAG_ACTION:${params.sourceSlug}`,
+                payload: action.customEventPayload || {},
+                recursionDepth: params.recursionDepth + 1,
+                visitedEventKeys: [...(params.visitedEventKeys || []), eventKey],
+              });
+              results.push({
+                actionId: action.id,
+                actionType: action.actionType,
+                status: 'EXECUTED',
+                detail: `Đã kích hoạt sự kiện tùy chỉnh "${eventKey}"`,
+              });
+            }
+            break;
+          }
+
+          case 'EMIT_SOCKET_ALERT': {
+            this.realtimeEmitter.emitToConversation(
+              SOCKET_CONFIG.namespaces.CHAT,
+              params.conversation.id,
+              SOCKET_CONFIG.events.OMNICHANNEL_INBOX.TAGS_UPDATED,
+              {
+                conversationId: params.conversation.id,
+                shopId: params.shopId,
+                alertMessage: action.alertMessage || `Đã kích hoạt từ "${params.sourceLabel}"`,
+                source: params.sourceSlug,
+              },
+            );
+            results.push({
+              actionId: action.id,
+              actionType: action.actionType,
+              status: 'EXECUTED',
+              detail: action.alertMessage || 'Đã phát cảnh báo realtime tới nhân viên trực',
+            });
             break;
           }
 
@@ -325,13 +341,11 @@ export class TagActionWorkflowExecutor {
             if (action.webhookUrl && /^https?:\/\//i.test(action.webhookUrl)) {
               const bodyStr = JSON.stringify({
                 event: `tag.${params.trigger.toLowerCase()}`,
+                source: params.sourceSlug,
                 shopId: params.shopId,
                 conversationId: params.conversation.id,
                 customerId: params.conversation.customerId,
                 customerName: params.conversation.name,
-                tagId: params.tag.id,
-                tagSlug: params.tag.slug,
-                tagName: params.tag.name,
                 occurredAt: new Date().toISOString(),
               });
               const signature = action.webhookSecret
@@ -351,16 +365,15 @@ export class TagActionWorkflowExecutor {
                   signal: controller.signal,
                 });
                 clearTimeout(timer);
-                summary.executedActions.push({
+                results.push({
                   actionId: action.id,
                   actionType: action.actionType,
                   status: 'EXECUTED',
                   detail: `Đã gửi Webhook tới ${action.webhookUrl}`,
                 });
-                executedCount += 1;
               } catch (whErr) {
                 clearTimeout(timer);
-                summary.executedActions.push({
+                results.push({
                   actionId: action.id,
                   actionType: action.actionType,
                   status: 'FAILED',
@@ -378,7 +391,7 @@ export class TagActionWorkflowExecutor {
         this.logger.warn(
           `TagActionWorkflowExecutor error on ${action.actionType}: ${err instanceof Error ? err.message : String(err)}`,
         );
-        summary.executedActions.push({
+        results.push({
           actionId: action.id,
           actionType: action.actionType,
           status: 'FAILED',
@@ -387,9 +400,104 @@ export class TagActionWorkflowExecutor {
       }
     }
 
-    if (executedCount > 0) {
+    return results;
+  }
+
+  public async executeTagWorkflows(params: {
+    shopId: string;
+    conversation: ConversationEntity;
+    tag: CustomTagEntity;
+    trigger: 'ON_APPLY' | 'ON_REMOVE';
+    actorUserId: string;
+    recursionDepth?: number;
+    visitedEventKeys?: string[];
+  }): Promise<TagWorkflowExecutionSummary> {
+    const depth = params.recursionDepth ?? 0;
+    const summary: TagWorkflowExecutionSummary = {
+      tagId: params.tag.id,
+      tagName: params.tag.name,
+      trigger: params.trigger,
+      executedActions: [],
+    };
+
+    if (depth >= 3) {
+      return summary;
+    }
+
+    if (!this.matchesCondition(params.conversation, params.tag.executionConditionJson)) {
+      return summary;
+    }
+
+    const actions: TagWorkflowActionItem[] =
+      params.trigger === 'ON_APPLY'
+        ? Array.isArray(params.tag.onApplyActionsJson)
+          ? [...params.tag.onApplyActionsJson]
+          : []
+        : Array.isArray(params.tag.onRemoveActionsJson)
+          ? [...params.tag.onRemoveActionsJson]
+          : [];
+
+    // Nếu Tag có liên kết trực tiếp tới các Sự kiện tùy chỉnh (`linkedEventKeysJson`) khi gắn Tag
+    if (
+      params.trigger === 'ON_APPLY' &&
+      Array.isArray(params.tag.linkedEventKeysJson) &&
+      params.tag.linkedEventKeysJson.length > 0
+    ) {
+      for (const evtKey of params.tag.linkedEventKeysJson) {
+        const alreadyInActions = actions.some(
+          (a) => a.actionType === 'TRIGGER_CUSTOM_EVENT' && a.customEventKey === evtKey,
+        );
+        if (!alreadyInActions) {
+          actions.push({
+            id: `linked_evt_${evtKey}`,
+            actionType: 'TRIGGER_CUSTOM_EVENT',
+            isEnabled: true,
+            customEventKey: evtKey,
+          });
+        }
+      }
+    }
+
+    const enabledActions = actions.filter((a) => a && a.isEnabled !== false);
+    if (enabledActions.length === 0) {
+      return summary;
+    }
+
+    const cooldownMinutes = Number(
+      params.tag.executionConditionJson?.cooldownMinutesPerConversation || 0,
+    );
+    if (cooldownMinutes > 0) {
+      const cooldownKey = `tag_wf_cd:${params.tag.id}:${params.conversation.id}:${params.trigger}`;
+      const acquired = await this.redis.set(cooldownKey, '1', 'EX', cooldownMinutes * 60, 'NX');
+      if (!acquired) {
+        summary.executedActions.push({
+          actionId: 'cooldown_guard',
+          actionType: 'COOLDOWN',
+          status: 'SKIPPED',
+          detail: `Đang trong thời gian chống lặp ${cooldownMinutes} phút`,
+        });
+        return summary;
+      }
+    }
+
+    const executed = await this.executeActionList({
+      shopId: params.shopId,
+      conversation: params.conversation,
+      actions: enabledActions,
+      sourceLabel: params.tag.name,
+      sourceSlug: `TAG_WORKFLOW:${params.tag.slug}`,
+      trigger: params.trigger,
+      actorUserId: params.actorUserId,
+      recursionDepth: depth,
+      visitedEventKeys: params.visitedEventKeys,
+    });
+
+    summary.executedActions = executed;
+    const successCount = executed.filter((item) => item.status === 'EXECUTED').length;
+
+    if (successCount > 0) {
       await this.customTagRepo
-        .increment({ id: params.tag.id }, 'automationExecutionCount', executedCount)
+        .increment({ id: params.tag.id }, 'automationExecutionCount', successCount)
         .catch(() => null);
     }
 

@@ -26,6 +26,10 @@
     "strictPropertyInitialization": false,
     "types": ["node", "express", "multer", "jest"]
   },
+  "ts-node": {
+    "transpileOnly": true,
+    "files": false
+  },
   "include": ["src/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]
 }
