@@ -1,10 +1,12 @@
 import { HttpStatus } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
 import { ConnectedSocket, MessageBody, SubscribeMessage, WsException } from '@nestjs/websockets';
 
 import { AppGateway } from 'src/common/decorators/app-gateway.decorator';
 import { MessageStatusEnum } from 'src/common/enum';
+import { MembershipStatusEnum } from 'src/common/enum/permission.enum';
 import { BaseGateway, PresenceGateway } from 'src/common/websocket/base.gateway';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
 import { SocketRateLimiter } from 'src/common/websocket/socket-rate-limiter';
@@ -34,7 +36,9 @@ import {
   WebRtcSignalDto,
 } from 'src/dto/chat/call-and-security.dto';
 import { ClosePollDto, SendMessageDto, VotePollDto } from 'src/dto/chat/chat.dto';
+import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import type { AuthenticatedSocket } from 'src/interface/auth-socket.interface';
+import { Repository } from 'typeorm';
 
 import { ChatService } from './chat.service';
 import { AgentCollisionLockService } from './services/agent-collision-lock.service';
@@ -47,6 +51,8 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     realtimeEmitter: RealtimeEmitterService,
     rateLimiter: SocketRateLimiter,
     jwtService: JwtService,
+    @InjectRepository(ShopMemberEntity)
+    private readonly shopMemberRepo: Repository<ShopMemberEntity>,
     private readonly chatService: ChatService,
     private readonly callSignalingService: CallSignalingService,
     private readonly agentCollisionLockService: AgentCollisionLockService,
@@ -65,6 +71,25 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
     const recipientIds = await this.chatService.getVisiblePresenceRecipientIds(userId);
     this.broadcastStatus(userId, true, recipientIds);
     await this.syncUndeliveredMessages(userId);
+
+    // Tự động cho toàn bộ socket của nhân sự tham gia các phòng `shop:{shopId}` đang hoạt động
+    // để nhận đầy đủ sự kiện realtime OMS Sprint 5 và tiến độ đồng bộ lịch sử 90 ngày
+    try {
+      const memberships = await this.shopMemberRepo.find({
+        where: { userId, membershipStatus: MembershipStatusEnum.ACTIVE },
+        select: ['shopId'],
+      });
+      if (memberships.length > 0 && this.server) {
+        const userSockets = await this.server.in(`user:${userId}`).fetchSockets();
+        for (const m of memberships) {
+          for (const sock of userSockets) {
+            await sock.join(`shop:${m.shopId}`);
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Auto-join shop rooms warning for user ${userId}: ${String(err)}`);
+    }
   }
 
   async handleUserOffline(userId: string): Promise<void> {
@@ -129,6 +154,49 @@ export class ChatGateway extends BaseGateway implements PresenceGateway {
   private broadcastStatus(userId: string, isOnline: boolean, recipients: string[]): void {
     const payload = { userId, isOnline, lastActive: new Date() };
     recipients.forEach((id) => this.emitToUser(id, SOCKET_CONFIG.events.USER_STATUS, payload));
+  }
+
+  @SubscribeMessage('join_shop_room')
+  async handleJoinShopRoom(
+    @MessageBody() payload: { shopId?: string },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    this.enforceRateLimit(client, 'join_shop_room');
+    const userId = client.data?.user?.id;
+    const shopId = payload?.shopId?.trim();
+    if (!userId || !shopId) {
+      return { status: HttpStatus.BAD_REQUEST, data: { joined: false } };
+    }
+
+    const member = await this.shopMemberRepo.findOne({
+      where: {
+        shopId,
+        userId,
+        membershipStatus: MembershipStatusEnum.ACTIVE,
+      },
+      select: ['id', 'shopId'],
+    });
+    if (!member) {
+      return { status: HttpStatus.FORBIDDEN, data: { joined: false } };
+    }
+
+    await client.join(`shop:${shopId}`);
+    return {
+      status: HttpStatus.OK,
+      data: { joined: true, room: `shop:${shopId}` },
+    };
+  }
+
+  @SubscribeMessage('leave_shop_room')
+  async handleLeaveShopRoom(
+    @MessageBody() payload: { shopId?: string },
+    @ConnectedSocket() client: AuthenticatedSocket,
+  ) {
+    const shopId = payload?.shopId?.trim();
+    if (shopId) {
+      await client.leave(`shop:${shopId}`);
+    }
+    return { status: HttpStatus.OK, data: { left: Boolean(shopId) } };
   }
 
   @SubscribeMessage('vote_poll')

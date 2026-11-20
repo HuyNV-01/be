@@ -7,6 +7,11 @@ import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomTagEntity } from 'src/entity/custom-tag.entity';
 import { In, Repository } from 'typeorm';
 
+import {
+  TagActionWorkflowExecutor,
+  TagWorkflowExecutionSummary,
+} from './tag-action-workflow.executor';
+
 @Injectable()
 export class ConversationTaggingService {
   constructor(
@@ -15,6 +20,7 @@ export class ConversationTaggingService {
     @InjectRepository(ConversationEntity)
     private readonly conversationRepo: Repository<ConversationEntity>,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly tagWorkflowExecutor: TagActionWorkflowExecutor,
   ) {}
 
   async toggleConversationTag(params: {
@@ -23,15 +29,18 @@ export class ConversationTaggingService {
     tagId: string;
     actorUserId: string;
     forceState?: 'ADD' | 'REMOVE';
+    recursionDepth?: number;
   }): Promise<{
     conversationId: string;
     activeTagIds: string[];
     addedTagId?: string;
     removedTagIds: string[];
+    workflowSummary?: TagWorkflowExecutionSummary;
   }> {
+    // Vá lỗ hổng bảo mật IDOR: Bắt buộc lọc theo `shopId` để ngăn gắn Tag chéo giữa các shop
     const [conversation, targetTag] = await Promise.all([
       this.conversationRepo.findOne({
-        where: { id: params.conversationId },
+        where: { id: params.conversationId, shopId: params.shopId },
       }),
       this.customTagRepo.findOne({
         where: { id: params.tagId, shopId: params.shopId, isActive: true },
@@ -55,7 +64,6 @@ export class ConversationTaggingService {
       currentIds.delete(targetTag.id);
       removedTagIds.push(targetTag.id);
     } else {
-      // F02.1 & F02.2: Tự động gỡ các Tag anh em trong cùng nhóm loại trừ lẫn nhau (MutuallyExclusiveGroup)
       if (targetTag.isMutuallyExclusiveGroup) {
         const siblingTags = await this.customTagRepo.find({
           where: {
@@ -85,10 +93,10 @@ export class ConversationTaggingService {
     }
 
     const updatedActiveTagIds = Array.from(currentIds);
-    await this.conversationRepo.update(conversation.id, {
-      activeTagIdsJson: updatedActiveTagIds,
-      ...(conversation.shopId ? {} : { shopId: params.shopId }),
-    });
+    await this.conversationRepo.update(
+      { id: conversation.id, shopId: params.shopId },
+      { activeTagIdsJson: updatedActiveTagIds },
+    );
 
     const payload = {
       conversationId: conversation.id,
@@ -115,17 +123,24 @@ export class ConversationTaggingService {
       );
     }
 
+    const workflowSummary = await this.tagWorkflowExecutor.executeTagWorkflows({
+      shopId: params.shopId,
+      conversation,
+      tag: targetTag,
+      trigger: shouldRemove ? 'ON_REMOVE' : 'ON_APPLY',
+      actorUserId: params.actorUserId,
+      recursionDepth: params.recursionDepth ?? 0,
+    });
+
     return {
       conversationId: conversation.id,
       activeTagIds: updatedActiveTagIds,
       addedTagId,
       removedTagIds,
+      workflowSummary,
     };
   }
 
-  /**
-   * F02.6: Gắn hoặc gỡ Tag hàng loạt cho nhiều cuộc hội thoại cùng lúc
-   */
   async bulkAssignConversationTags(params: {
     shopId: string;
     conversationIds: string[];
@@ -136,18 +151,15 @@ export class ConversationTaggingService {
     updatedCount: number;
     results: Array<{ conversationId: string; activeTagIds: string[] }>;
   }> {
+    // Vá lỗ hổng bảo mật IDOR: Bắt buộc lọc theo `shopId`
     const conversations = await this.conversationRepo.find({
-      where: { id: In(params.conversationIds) },
+      where: { id: In(params.conversationIds), shopId: params.shopId },
     });
 
     const addTags =
       params.addTagIds && params.addTagIds.length > 0
         ? await this.customTagRepo.find({
-            where: {
-              id: In(params.addTagIds),
-              shopId: params.shopId,
-              isActive: true,
-            },
+            where: { id: In(params.addTagIds), shopId: params.shopId, isActive: true },
           })
         : [];
 
@@ -189,9 +201,10 @@ export class ConversationTaggingService {
       }
 
       const activeTagIds = Array.from(tagSet);
-      await this.conversationRepo.update(conv.id, {
-        activeTagIdsJson: activeTagIds,
-      });
+      await this.conversationRepo.update(
+        { id: conv.id, shopId: params.shopId },
+        { activeTagIdsJson: activeTagIds },
+      );
 
       this.realtimeEmitter.emitToConversation(
         SOCKET_CONFIG.namespaces.CHAT,
@@ -204,6 +217,17 @@ export class ConversationTaggingService {
           actorUserId: params.actorUserId,
         },
       );
+
+      for (const tagToAdd of addTags) {
+        void this.tagWorkflowExecutor.executeTagWorkflows({
+          shopId: params.shopId,
+          conversation: conv,
+          tag: tagToAdd,
+          trigger: 'ON_APPLY',
+          actorUserId: params.actorUserId,
+          recursionDepth: 1,
+        });
+      }
 
       results.push({ conversationId: conv.id, activeTagIds });
     }

@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
+import Redis from 'ioredis';
 import {
   CustomerWalletLedgerTypeEnum,
   CustomerWalletTransactionTypeEnum,
@@ -15,6 +17,7 @@ import {
   ProductSerialStatusEnum,
 } from 'src/common/enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
+import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { CreateRmaExchangeDto, VerifyReturnedOrderDto } from 'src/dto/oms/oms-fulfillment.dto';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.entity';
@@ -49,6 +52,8 @@ export class ReturnAndRmaExchangeService {
     private readonly customerRepo: Repository<CustomerProfileEntity>,
     @InjectRepository(CustomerWalletLedgerEntity)
     private readonly walletLedgerRepo: Repository<CustomerWalletLedgerEntity>,
+    @InjectRedis()
+    private readonly redis: Redis,
     private readonly inventoryService: AtomicInventoryAndTransferService,
     private readonly stateMachineService: OmsStateMachineService,
     private readonly realtimeEmitter: RealtimeEmitterService,
@@ -121,6 +126,12 @@ export class ReturnAndRmaExchangeService {
         );
       }
 
+      if (checkItem.verifiedQty < 0 || checkItem.verifiedQty > originalLine.quantity) {
+        throw new BadRequestException(
+          `Số lượng kiểm hoàn (${checkItem.verifiedQty}) của SKU ${originalLine.skuCode} vượt quá số lượng đã xuất (${originalLine.quantity}).`,
+        );
+      }
+
       const warehouseId = originalLine.warehouseId || order.warehouseId;
       const stock = await this.stockRepo.findOne({
         where: { shopId: params.shopId, warehouseId, variantId: checkItem.variantId },
@@ -139,6 +150,15 @@ export class ReturnAndRmaExchangeService {
           stock.onHandQty = beforeOnHandQty + checkItem.verifiedQty;
           stock.availableQty = Math.max(0, stock.onHandQty - beforeReservedQty);
           await this.stockRepo.save(stock);
+
+          // Đồng bộ lại Redis stock để In-Chat POS Lua nhận diện ngay tồn vừa nhập hoàn
+          await this.redis
+            .hset(`inv:stock:${params.shopId}:${warehouseId}:${checkItem.variantId}`, {
+              onHandQty: String(stock.onHandQty),
+              reservedQty: String(stock.reservedQty),
+              availableQty: String(stock.availableQty),
+            })
+            .catch(() => null);
 
           await this.inventoryService.appendInventoryLedger({
             shopId: params.shopId,
@@ -261,6 +281,16 @@ export class ReturnAndRmaExchangeService {
       });
       if (customer) {
         customer.returnedOrdersCount = Number(customer.returnedOrdersCount || 0) + 1;
+        const okOrders = Number(customer.successfulDeliveriesCount || 0);
+        const retOrders = Number(customer.returnedOrdersCount || 0);
+        const penalty = customer.isBlacklisted ? 45 : 0;
+        customer.deliveryTrustScore = Math.max(
+          0,
+          Math.min(
+            100,
+            Math.round(((okOrders + 1) / (okOrders + retOrders * 2.5 + 1)) * 100) - penalty,
+          ),
+        );
         await this.customerRepo.save(customer);
       }
     }
@@ -537,14 +567,19 @@ export class ReturnAndRmaExchangeService {
       }),
     );
 
-    this.realtimeEmitter.emitToRoom('chat', `shop:${params.shopId}`, 'oms:rma_exchange_created', {
-      shopId: params.shopId,
-      rmaId: rmaRecord.id,
-      rmaCode: rmaRecord.rmaCode,
-      originalOrderCode: originalOrder.orderCode,
-      exchangeOrderCode: createdExchangeOrder?.orderCode || null,
-      codDeltaAmount,
-    });
+    this.realtimeEmitter.emitToRoom(
+      SOCKET_CONFIG.namespaces.CHAT,
+      `shop:${params.shopId}`,
+      'oms:rma_exchange_created',
+      {
+        shopId: params.shopId,
+        rmaId: rmaRecord.id,
+        rmaCode: rmaRecord.rmaCode,
+        originalOrderCode: originalOrder.orderCode,
+        exchangeOrderCode: createdExchangeOrder?.orderCode || null,
+        codDeltaAmount,
+      },
+    );
 
     return {
       rma: rmaRecord,

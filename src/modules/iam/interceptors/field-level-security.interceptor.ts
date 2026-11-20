@@ -21,9 +21,13 @@ const COST_AND_PROFIT_SENSITIVE_KEYS = new Set([
 
 const RAW_PII_NEVER_SERIALIZE_KEYS = new Set([
   'phoneEncrypted',
+  'customerPhoneEncrypted',
+  'receiverPhoneEncrypted',
   'phoneSearchHash',
   'accessTokenEncrypted',
   'refreshTokenEncrypted',
+  'appSecretEncrypted',
+  'webhookSecretEncrypted',
   'capiAccessTokenEncrypted',
   'webhookVerifySecretEncrypted',
   'customLookupApiKeyEncrypted',

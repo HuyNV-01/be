@@ -21,9 +21,11 @@ import { ChannelsController } from './channels.controller';
 import { ChannelsService } from './channels.service';
 import { ConversationSlaProcessor } from './queues/conversation-sla.processor';
 import { ConversationRoutingEngine } from './routing/conversation-routing.engine';
+import { ChannelHistoricalSyncService } from './services/channel-historical-sync.service';
 import { ChannelTokenDoctorService } from './services/channel-token-doctor.service';
 import { ChannelsPublicAvatarController } from './services/channels-public-avatar.controller';
 import { MarketplaceBridgeService } from './services/marketplace-bridge.service';
+import { OmnichannelAvatarAndMediaService } from './services/omnichannel-avatar-and-media.service';
 import { OmnibusWebhookController } from './webhooks/omnibus-webhook.controller';
 
 @Module({
@@ -55,12 +57,16 @@ import { OmnibusWebhookController } from './webhooks/omnibus-webhook.controller'
     ConversationSlaProcessor,
     ChannelTokenDoctorService,
     MarketplaceBridgeService,
+    OmnichannelAvatarAndMediaService,
+    ChannelHistoricalSyncService,
   ],
   exports: [
     ChannelsService,
     ConversationRoutingEngine,
     ChannelTokenDoctorService,
     MarketplaceBridgeService,
+    OmnichannelAvatarAndMediaService,
+    ChannelHistoricalSyncService,
   ],
 })
 export class ChannelsModule {}

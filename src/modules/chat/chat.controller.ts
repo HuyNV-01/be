@@ -1297,6 +1297,7 @@ export class ChatController {
     @Param('templateId') templateId: string,
     @Body()
     body: {
+      conversationId?: string;
       customerName?: string;
       salutation?: string;
       agentName?: string;

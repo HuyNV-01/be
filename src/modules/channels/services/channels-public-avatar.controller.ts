@@ -3,17 +3,17 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import type { Response } from 'express';
 
-import { ChannelsService } from '../channels.service';
+import { OmnichannelAvatarAndMediaService } from './omnichannel-avatar-and-media.service';
 
-@ApiTags('Sprint 4 — Omnichannel Customer Avatar Proxy')
-@Controller('channels/public-avatar')
+@ApiTags('Omnichannel Customer Avatar & Media Proxy')
+@Controller('channels')
 export class ChannelsPublicAvatarController {
-  constructor(private readonly channelsService: ChannelsService) {}
+  constructor(private readonly avatarAndMediaService: OmnichannelAvatarAndMediaService) {}
 
-  @Get(':shopId/:channelId/:psid')
+  @Get('public-avatar/:shopId/:channelId/:psid')
   @ApiOperation({
     summary:
-      'Proxy ảnh đại diện khách hàng Meta/Instagram/Ads (chống hết hạn chữ ký ext & chặn Referer trên trình duyệt)',
+      'Proxy ảnh đại diện khách hàng đa kênh (Meta Ads/Business Suite, Instagram, Zalo OA, Shopee, TikTok) — luôn trả 200 OK',
   })
   async streamCustomerAvatar(
     @Param('shopId') shopId: string,
@@ -21,10 +21,33 @@ export class ChannelsPublicAvatarController {
     @Param('psid') psid: string,
     @Res() res: Response,
   ): Promise<void> {
-    const media = await this.channelsService.getCustomerAvatarBinaryForProxy({
+    const media = await this.avatarAndMediaService.getCustomerAvatarBinaryForProxy({
       shopId,
       channelId,
       externalCustomerPsid: psid,
+    });
+
+    res.setHeader('Content-Type', media.contentType);
+    res.setHeader('Cache-Control', media.cacheControl);
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.status(HttpStatus.OK).send(media.buffer);
+  }
+
+  @Get('public-media/:shopId/:channelId/:mediaToken')
+  @ApiOperation({
+    summary:
+      'Proxy tệp đính kèm/ảnh/sticker/GIF/audio từ các nền tảng ngoài (chống hết hạn chữ ký Meta CDN & chặn Referer)',
+  })
+  async streamOmnichannelMedia(
+    @Param('shopId') shopId: string,
+    @Param('channelId') channelId: string,
+    @Param('mediaToken') mediaToken: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const media = await this.avatarAndMediaService.getAttachmentBinaryForProxy({
+      shopId,
+      channelId,
+      mediaToken,
     });
 
     if (!media) {
@@ -33,7 +56,7 @@ export class ChannelsPublicAvatarController {
     }
 
     res.setHeader('Content-Type', media.contentType);
-    res.setHeader('Cache-Control', 'public, max-age=21600, stale-while-revalidate=86400');
+    res.setHeader('Cache-Control', media.cacheControl);
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.status(HttpStatus.OK).send(media.buffer);
   }

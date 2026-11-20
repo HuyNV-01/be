@@ -4,11 +4,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   CodReconciliationBatchStatusEnum,
   CodReconciliationDiscrepancyTypeEnum,
+  CustomerTierEnum,
   CustomerWalletLedgerTypeEnum,
   CustomerWalletTransactionTypeEnum,
   PosOrderStatusEnum,
 } from 'src/common/enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
+import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import {
   ConfirmCodReconciliationBatchDto,
   CreateCodReconciliationBatchDto,
@@ -148,7 +150,11 @@ export class CodReconciliationService {
       ) {
         discrepancyType = CodReconciliationDiscrepancyTypeEnum.WEIGHT_OVERCHARGE;
         disputeNote = `Đội cước cân nặng: Kho cân ${packedWeight}g nhưng ${params.dto.carrierCode} tính ${carrierWeight}g (+${carrierWeight - packedWeight}g), lệch cước +${shipVariance.toLocaleString('vi-VN')}đ`;
-      } else if (returnFee > 0 && order.status === PosOrderStatusEnum.DELIVERED) {
+      } else if (
+        returnFee > 0 &&
+        (order.status === PosOrderStatusEnum.DELIVERED ||
+          order.status === PosOrderStatusEnum.DELIVERED_RECONCILED)
+      ) {
         discrepancyType = CodReconciliationDiscrepancyTypeEnum.RETURN_FEE_ERROR;
         disputeNote = `Đơn đã giao thành công nhưng ĐVVC vẫn trừ phí hoàn ${returnFee.toLocaleString('vi-VN')}đ`;
       } else if (shipVariance > feeTolerance) {
@@ -270,7 +276,12 @@ export class CodReconciliationService {
 
     const targetItems = params.dto.itemIds?.length
       ? await this.itemRepo.find({
-          where: { shopId: params.shopId, batchId: batch.id, id: In(params.dto.itemIds) },
+          where: {
+            shopId: params.shopId,
+            batchId: batch.id,
+            id: In(params.dto.itemIds),
+            isReconciled: false,
+          },
         })
       : await this.itemRepo.find({
           where: {
@@ -290,12 +301,19 @@ export class CodReconciliationService {
     let settledNetAmount = 0;
 
     for (const item of targetItems) {
-      if (!item.orderId) continue;
+      if (!item.orderId || item.isReconciled) continue;
 
       const order = await this.orderRepo.findOne({
         where: { id: item.orderId, shopId: params.shopId },
       });
       if (!order) continue;
+
+      // Chống cộng trùng điểm thưởng / LTV nếu đơn đã tất toán trước đó ở phiên khác
+      if (order.status === PosOrderStatusEnum.DELIVERED_RECONCILED) {
+        item.isReconciled = true;
+        await this.itemRepo.save(item);
+        continue;
+      }
 
       order.status = PosOrderStatusEnum.DELIVERED_RECONCILED;
       order.shippingFeeCarrierActual = Number(item.actualShippingFee);
@@ -314,6 +332,25 @@ export class CodReconciliationService {
           customer.lifetimeValueAmount =
             Number(customer.lifetimeValueAmount || 0) + Number(order.totalPayableAmount || 0);
           customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) + earnedPoints;
+
+          const okOrders = Number(customer.successfulDeliveriesCount || 0);
+          const retOrders = Number(customer.returnedOrdersCount || 0);
+          const penalty = customer.isBlacklisted ? 45 : 0;
+          customer.deliveryTrustScore = Math.max(
+            0,
+            Math.min(
+              100,
+              Math.round(((okOrders + 1) / (okOrders + retOrders * 2.5 + 1)) * 100) - penalty,
+            ),
+          );
+
+          if (!customer.isBlacklisted) {
+            const ltv = Number(customer.lifetimeValueAmount || 0);
+            if (ltv >= 20_000_000) customer.tier = CustomerTierEnum.VIP;
+            else if (ltv >= 8_000_000) customer.tier = CustomerTierEnum.GOLD;
+            else if (ltv >= 2_000_000) customer.tier = CustomerTierEnum.SILVER;
+          }
+
           await this.customerRepo.save(customer);
 
           if (earnedPoints > 0) {
@@ -355,13 +392,18 @@ export class CodReconciliationService {
     if (params.dto.note) batch.note = params.dto.note;
     await this.batchRepo.save(batch);
 
-    this.realtimeEmitter.emitToRoom('chat', `shop:${params.shopId}`, 'oms:cod_batch_reconciled', {
-      shopId: params.shopId,
-      batchId: batch.id,
-      batchCode: batch.batchCode,
-      settledOrdersCount,
-      settledNetAmount,
-    });
+    this.realtimeEmitter.emitToRoom(
+      SOCKET_CONFIG.namespaces.CHAT,
+      `shop:${params.shopId}`,
+      'oms:cod_batch_reconciled',
+      {
+        shopId: params.shopId,
+        batchId: batch.id,
+        batchCode: batch.batchCode,
+        settledOrdersCount,
+        settledNetAmount,
+      },
+    );
 
     return {
       batch,

@@ -11,6 +11,7 @@ import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { FileEntity } from 'src/entity/file.entity';
 import { MessageEntity } from 'src/entity/message.entity';
+import { PosOrderEntity } from 'src/entity/pos-order.entity';
 import { QuickReplyTemplateEntity } from 'src/entity/quick-reply-template.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -50,6 +51,7 @@ import { RealtimeChatTranslationService } from './services/realtime-chat-transla
       ShopWorkspaceEntity,
       ChannelIntegrationEntity,
       QuickReplyTemplateEntity,
+      PosOrderEntity,
       UserEntity,
     ]),
     UserModule,

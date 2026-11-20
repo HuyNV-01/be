@@ -56,7 +56,12 @@ export enum CodReconciliationDiscrepancyTypeEnum {
 }
 
 export enum ThermalLabelFormatEnum {
+  A7_74X105 = 'A7_74X105',
   A6_100X150 = 'A6_100X150',
   K80_80X80 = 'K80_80X80',
+  K80_80X100 = 'K80_80X100',
+  K58_58X80 = 'K58_58X80',
+  LABEL_75X100 = 'LABEL_75X100',
   A5_148X210 = 'A5_148X210',
+  A4_210X297 = 'A4_210X297',
 }

@@ -1,4 +1,5 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 
@@ -12,6 +13,7 @@ import {
   PosOrderStatusEnum,
 } from 'src/common/enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
+import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import { CarrierRescueActionDto, CarrierWebhookPayloadDto } from 'src/dto/oms/oms-fulfillment.dto';
 import { OrderCarrierEventEntity } from 'src/entity/order-carrier-event.entity';
 import { PosOrderEntity } from 'src/entity/pos-order.entity';
@@ -42,6 +44,12 @@ const CARRIER_RAW_STATUS_TO_OMS: Record<string, PosOrderStatusEnum> = {
   cancel: PosOrderStatusEnum.CANCELLED,
 };
 
+const TERMINAL_ORDER_STATUSES = new Set<PosOrderStatusEnum>([
+  PosOrderStatusEnum.DELIVERED_RECONCILED,
+  PosOrderStatusEnum.RETURNED_RESTOCKED,
+  PosOrderStatusEnum.CANCELLED,
+]);
+
 @Injectable()
 export class CarrierRescueAndWatchdogService {
   private readonly logger = new Logger(CarrierRescueAndWatchdogService.name);
@@ -53,6 +61,7 @@ export class CarrierRescueAndWatchdogService {
     private readonly carrierEventRepo: Repository<OrderCarrierEventEntity>,
     @InjectRedis()
     private readonly redis: Redis,
+    private readonly eventEmitter: EventEmitter2,
     private readonly stateMachineService: OmsStateMachineService,
     private readonly notificationsService: NotificationsService,
     private readonly realtimeEmitter: RealtimeEmitterService,
@@ -200,6 +209,12 @@ export class CarrierRescueAndWatchdogService {
       throw new NotFoundException('Không tìm thấy đơn hàng');
     }
 
+    if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+      throw new BadRequestException(
+        `Đơn ${order.orderCode} đã ở trạng thái kết thúc (${order.status}), không thể gửi lệnh cứu đơn.`,
+      );
+    }
+
     const beforeSnapshot = this.stateMachineService.buildRevisionSnapshot(order);
     const ticketCode = `TKT-${order.carrierCode}-${Date.now().toString().slice(-6)}`;
     let actionDescription = '';
@@ -275,10 +290,12 @@ export class CarrierRescueAndWatchdogService {
   public async scanCarrierSlaBreaches(): Promise<{
     pickupDelayedCount: number;
     transitStuckCount: number;
+    rescueOverdueCount: number;
   }> {
     const now = Date.now();
     const pickupCutoff = new Date(now - 24 * 3600 * 1000);
     const transitCutoff = new Date(now - 36 * 3600 * 1000);
+    const nowDate = new Date(now);
 
     const pickupDelayedOrders = await this.orderRepo.find({
       where: {
@@ -292,12 +309,17 @@ export class CarrierRescueAndWatchdogService {
     for (const order of pickupDelayedOrders) {
       order.slaBreachType = OmsCarrierSlaBreachTypeEnum.PICKUP_DELAYED;
       await this.orderRepo.save(order);
-      this.realtimeEmitter.emitToRoom('chat', `shop:${order.shopId}`, 'oms:sla_breach_alert', {
-        shopId: order.shopId,
-        orderId: order.id,
-        orderCode: order.orderCode,
-        slaBreachType: OmsCarrierSlaBreachTypeEnum.PICKUP_DELAYED,
-      });
+      this.realtimeEmitter.emitToRoom(
+        SOCKET_CONFIG.namespaces.CHAT,
+        `shop:${order.shopId}`,
+        'oms:sla_breach_alert',
+        {
+          shopId: order.shopId,
+          orderId: order.id,
+          orderCode: order.orderCode,
+          slaBreachType: OmsCarrierSlaBreachTypeEnum.PICKUP_DELAYED,
+        },
+      );
     }
 
     const transitStuckOrders = await this.orderRepo.find({
@@ -312,23 +334,64 @@ export class CarrierRescueAndWatchdogService {
     for (const order of transitStuckOrders) {
       order.slaBreachType = OmsCarrierSlaBreachTypeEnum.TRANSIT_STUCK;
       await this.orderRepo.save(order);
-      this.realtimeEmitter.emitToRoom('chat', `shop:${order.shopId}`, 'oms:sla_breach_alert', {
-        shopId: order.shopId,
-        orderId: order.id,
-        orderCode: order.orderCode,
-        slaBreachType: OmsCarrierSlaBreachTypeEnum.TRANSIT_STUCK,
-      });
+      this.realtimeEmitter.emitToRoom(
+        SOCKET_CONFIG.namespaces.CHAT,
+        `shop:${order.shopId}`,
+        'oms:sla_breach_alert',
+        {
+          shopId: order.shopId,
+          orderId: order.id,
+          orderCode: order.orderCode,
+          slaBreachType: OmsCarrierSlaBreachTypeEnum.TRANSIT_STUCK,
+        },
+      );
+    }
+
+    const rescueOverdueOrders = await this.orderRepo.find({
+      where: {
+        status: PosOrderStatusEnum.DELIVERY_FAILED_RESCUE,
+        rescueDeadlineAt: LessThan(nowDate),
+        slaBreachType: OmsCarrierSlaBreachTypeEnum.NONE,
+      },
+      take: 200,
+    });
+
+    for (const order of rescueOverdueOrders) {
+      order.slaBreachType = OmsCarrierSlaBreachTypeEnum.RESCUE_OVERDUE;
+      await this.orderRepo.save(order);
+      this.realtimeEmitter.emitToRoom(
+        SOCKET_CONFIG.namespaces.CHAT,
+        `shop:${order.shopId}`,
+        'oms:sla_breach_alert',
+        {
+          shopId: order.shopId,
+          orderId: order.id,
+          orderCode: order.orderCode,
+          slaBreachType: OmsCarrierSlaBreachTypeEnum.RESCUE_OVERDUE,
+        },
+      );
     }
 
     return {
       pickupDelayedCount: pickupDelayedOrders.length,
       transitStuckCount: transitStuckOrders.length,
+      rescueOverdueCount: rescueOverdueOrders.length,
     };
   }
 
   private async dispatchFailedDeliveryRescueAlerts(order: PosOrderEntity): Promise<void> {
+    // Kích hoạt AutoTagRuleEngine tự động gắn Tag đỏ "Cần cứu đơn gấp" lên cuộc hội thoại khách hàng
+    if (order.conversationId) {
+      this.eventEmitter.emit('carrier.delivery.failed', {
+        shopId: order.shopId,
+        conversationId: order.conversationId,
+        messageContent: `Đơn ${order.orderCode} giao thất bại lần ${order.deliveryFailCount}: ${order.lastDeliveryFailReason || ''}`,
+        actorUserId: 'SYSTEM_CARRIER_WEBHOOK',
+      });
+    }
+
     this.realtimeEmitter.emitToRoom(
-      'chat',
+      SOCKET_CONFIG.namespaces.CHAT,
       `shop:${order.shopId}`,
       'oms:failed_delivery_rescue_alert',
       {
