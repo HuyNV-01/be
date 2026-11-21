@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import {
@@ -122,6 +123,7 @@ export class OmsStateMachineService {
     private readonly inventoryService: AtomicInventoryAndTransferService,
     private readonly piiAuditService: PiiVaultAndAuditService,
     private readonly realtimeEmitter: RealtimeEmitterService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   public async listOmsOrders(shopId: string, query: OmsOrderListQueryDto) {
@@ -280,6 +282,15 @@ export class OmsStateMachineService {
     }
 
     const saved = await this.orderRepo.save(order);
+
+    // Phát sự kiện đồng bộ idempotent sang PhoneReputationSyncService (CustomerProfile + PhoneReputationLedger)
+    this.eventEmitter.emit('oms.order.status_changed', {
+      shopId: params.shopId,
+      orderId: saved.id,
+      previousStatus,
+      status: saved.status,
+      reasonNote: params.dto.reasonNote || null,
+    });
 
     await this.appendOrderRevision({
       shopId: params.shopId,

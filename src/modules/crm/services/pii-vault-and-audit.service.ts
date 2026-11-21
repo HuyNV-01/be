@@ -75,6 +75,19 @@ export class PiiVaultAndAuditService {
   }
 
   /**
+   * Tính Chỉ mục Mù Toàn Mạng Lưới (`phoneGlobalHash`) dùng Global Consortium Pepper.
+   * Tách biệt hoàn toàn với `phoneSearchHash` (shop-scoped) để đối chiếu 1-1 giữa nhiều cửa hàng
+   * mà không lộ SĐT gốc và loại bỏ hoàn toàn lỗi va chạm 10.000 SĐT của `phoneMasked`.
+   */
+  public computeGlobalPhoneConsortiumHash(rawPhone: string): string {
+    const normalized = this.normalizeLocalVietnamesePhone(rawPhone);
+    const consortiumPepper =
+      process.env.GLOBAL_PHONE_CONSORTIUM_PEPPER ||
+      `${envs.jwtSecret || 'pancake_pii_vault_master'}:global_phone_trust_v1`;
+    return crypto.createHmac('sha256', consortiumPepper).update(normalized).digest('hex');
+  }
+
+  /**
    * Mã hóa SĐT gốc bằng AES-256-GCM trong Kho Khóa PII (`PII Crypto Vault`)
    */
   public encryptRawPhoneForShop(
@@ -85,6 +98,7 @@ export class PiiVaultAndAuditService {
     phoneMasked: string;
     phoneEncrypted: string;
     phoneSearchHash: string;
+    phoneGlobalHash: string;
   } {
     const normalizedPhone = this.normalizeLocalVietnamesePhone(rawPhone);
     const phoneMasked = this.maskPhoneNumber(normalizedPhone) || '';
@@ -93,12 +107,14 @@ export class PiiVaultAndAuditService {
       `pii_vault:${shopId}`,
     ).ciphertext;
     const phoneSearchHash = this.computePhoneBlindSearchHash(shopId, normalizedPhone);
+    const phoneGlobalHash = this.computeGlobalPhoneConsortiumHash(normalizedPhone);
 
     return {
       normalizedPhone,
       phoneMasked,
       phoneEncrypted,
       phoneSearchHash,
+      phoneGlobalHash,
     };
   }
 

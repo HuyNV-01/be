@@ -649,6 +649,52 @@ export class UpdateShopCrmConfigDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsBoolean()
+  consortiumSharingEnabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  enablePublicWebRiskLookup?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  pancakePosShopId?: string | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  pancakePosApiKey?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  ghnShopId?: number | null;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  ghnToken?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  ghtkToken?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  vtpToken?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  jtToken?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsString()
   customLookupApiKey?: string;
 
@@ -933,4 +979,78 @@ export class SecurityAuditQueryDto {
   @IsOptional()
   @IsString()
   actorUserId?: string;
+}
+
+export class StandalonePhoneTrustLookupDto {
+  @ApiProperty({
+    description: 'Số điện thoại cần tra cứu trực tiếp trên toàn bộ nguồn Nội bộ, Cộng đồng & 3PL',
+    example: '0988123456',
+  })
+  @IsString()
+  @IsNotEmpty()
+  rawPhone: string;
+
+  @ApiPropertyOptional({ description: 'Bỏ qua Redis Cache 15 phút để ép gọi lại cổng API ngoài' })
+  @IsOptional()
+  @IsBoolean()
+  bypassCache?: boolean;
+}
+
+export class RetractPhoneAbuseReportDto {
+  @ApiProperty({ description: 'Lý do gỡ bỏ báo cáo xấu (ghi nhật ký kiểm toán)' })
+  @IsString()
+  @IsNotEmpty()
+  reason: string;
+}
+
+export class ImportPhoneTrustHistoryRowDto {
+  @ApiProperty({ description: 'Số điện thoại khách hàng' })
+  @IsString()
+  @IsNotEmpty()
+  rawPhone: string;
+
+  @ApiPropertyOptional({ description: 'Số đơn giao thành công cần cộng dồn' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  deliveredCount?: number;
+
+  @ApiPropertyOptional({ description: 'Số đơn hoàn cần cộng dồn' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  returnedCount?: number;
+
+  @ApiPropertyOptional({ description: 'Mã ĐVVC (GHN | GHTK | VTP | JT | SPX | INTERNAL)' })
+  @IsOptional()
+  @IsString()
+  carrierCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  orderCode?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  trackingNumber?: string;
+
+  @ApiPropertyOptional({ description: 'Lý do báo xấu (nếu có)' })
+  @IsOptional()
+  @IsString()
+  abuseReasonNote?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  abuseReasonCode?: string;
+}
+
+export class ImportPhoneTrustHistoryDto {
+  @ApiProperty({ type: [ImportPhoneTrustHistoryRowDto] })
+  @IsArray()
+  rows: ImportPhoneTrustHistoryRowDto[];
 }

@@ -248,6 +248,15 @@ export class CarrierRescueAndWatchdogService {
     order.lastCarrierEventAt = new Date();
     const saved = await this.orderRepo.save(order);
 
+    if (params.dto.action === OmsCarrierRescueActionEnum.APPROVE_RETURN) {
+      this.eventEmitter.emit('oms.order.status_changed', {
+        shopId: params.shopId,
+        orderId: saved.id,
+        status: saved.status,
+        reasonNote: actionDescription,
+      });
+    }
+
     await this.carrierEventRepo.save(
       this.carrierEventRepo.create({
         shopId: params.shopId,

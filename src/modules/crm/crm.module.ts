@@ -4,10 +4,12 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
 import { AdsConversionEventLogEntity } from 'src/entity/ads-conversion-event-log.entity';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
+import { CommunityPhoneAbuseReportEntity } from 'src/entity/community-phone-abuse-report.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.entity';
 import { MessageEntity } from 'src/entity/message.entity';
+import { PhoneReputationLedgerEntity } from 'src/entity/phone-reputation-ledger.entity';
 import { PosOrderEntity } from 'src/entity/pos-order.entity';
 import { SecurityAuditLogEntity } from 'src/entity/security-audit-log.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
@@ -23,7 +25,9 @@ import { AdsConversionSyncService } from './services/ads-conversion-sync.service
 import { Customer360Service } from './services/customer-360.service';
 import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalty.service';
 import { DeliveryTrustScoreService } from './services/delivery-trust-score.service';
+import { PhoneReputationSyncService } from './services/phone-reputation-sync.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
+import { PublicWebRiskProviderService } from './services/public-web-risk-provider.service';
 import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner.service';
 import { VnAdministrativeAddressCarrierService } from './services/vn-administrative-address-carrier.service';
 
@@ -32,6 +36,8 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     TypeOrmModule.forFeature([
       CustomerProfileEntity,
       CustomerWalletLedgerEntity,
+      PhoneReputationLedgerEntity,
+      CommunityPhoneAbuseReportEntity,
       PosOrderEntity,
       AdsConversionEventLogEntity,
       SecurityAuditLogEntity,
@@ -52,8 +58,10 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
   providers: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    DeliveryTrustScoreService,
     PiiVaultAndAuditService,
+    PublicWebRiskProviderService,
+    PhoneReputationSyncService,
+    DeliveryTrustScoreService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,
@@ -61,8 +69,10 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
   exports: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    DeliveryTrustScoreService,
     PiiVaultAndAuditService,
+    PublicWebRiskProviderService,
+    PhoneReputationSyncService,
+    DeliveryTrustScoreService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,

@@ -26,7 +26,16 @@ export interface CrmTrustAndIndustryConfig {
   useInternalPosHistory: boolean;
   usePancakeCommunityNetwork: boolean;
   useCarrier3plLookup: boolean;
+  consortiumSharingEnabled?: boolean;
+  enablePublicWebRiskLookup?: boolean;
   enabledCarriers: Array<'GHN' | 'GHTK' | 'VTP' | 'JT'>;
+  pancakePosShopId?: string | null;
+  pancakePosApiKeyEncrypted?: string | null;
+  ghnShopId?: number | null;
+  ghnTokenEncrypted?: string | null;
+  ghtkTokenEncrypted?: string | null;
+  vtpTokenEncrypted?: string | null;
+  jtTokenEncrypted?: string | null;
   customLookupWebhookUrl: string | null;
   customLookupApiKeyEncrypted?: string | null;
   highRiskReturnRateThresholdPercent: number;

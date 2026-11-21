@@ -25,6 +25,7 @@ import {
   UpdateShopCrmConfigDto,
   UpsertCustomerProfileDto,
 } from 'src/dto/crm/crm.dto';
+import { CommunityPhoneAbuseReportEntity } from 'src/entity/community-phone-abuse-report.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import {
   CustomerAbuseReportItem,
@@ -39,6 +40,7 @@ import {
   MessageDirectionEnum,
   MessageEntity,
 } from 'src/entity/message.entity';
+import { PosOrderEntity } from 'src/entity/pos-order.entity';
 import { CrmTrustAndIndustryConfig, ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 import { Repository } from 'typeorm';
@@ -49,6 +51,7 @@ import {
   DeliveryTrustEvaluationResult,
   DeliveryTrustScoreService,
 } from './delivery-trust-score.service';
+import { PhoneReputationSyncService } from './phone-reputation-sync.service';
 import { PiiVaultAndAuditService } from './pii-vault-and-audit.service';
 import { VietnameseCommerceNerService } from './vietnamese-commerce-ner.service';
 
@@ -80,8 +83,13 @@ export class Customer360Service {
     private readonly messageRepo: Repository<MessageEntity>,
     @InjectRepository(ShopWorkspaceEntity)
     private readonly shopRepo: Repository<ShopWorkspaceEntity>,
+    @InjectRepository(CommunityPhoneAbuseReportEntity)
+    private readonly abuseReportRepo: Repository<CommunityPhoneAbuseReportEntity>,
+    @InjectRepository(PosOrderEntity)
+    private readonly posOrderRepo: Repository<PosOrderEntity>,
     private readonly nerService: VietnameseCommerceNerService,
     private readonly trustScoreService: DeliveryTrustScoreService,
+    private readonly phoneReputationSyncService: PhoneReputationSyncService,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly rfmService: CustomerRfmAndLoyaltyService,
     private readonly adsConversionSyncService: AdsConversionSyncService,
@@ -105,13 +113,41 @@ export class Customer360Service {
     );
   }
 
-  /**
-   * Lấy cấu hình Nguồn dữ liệu Tra cứu Uy tín SĐT (Nhận / Hoàn / Bị báo cáo) & Cấu hình Ngành hàng của Cửa hàng
-   */
+  private encryptOptionalSecret(
+    shopId: string,
+    incoming?: string,
+    existingEncrypted?: string | null,
+  ): string | null {
+    if (incoming === undefined) return existingEncrypted || null;
+    const trimmed = incoming.trim();
+    if (!trimmed) return null;
+    return this.messageCryptoService.encryptForConversation(trimmed, `pii_vault:${shopId}`)
+      .ciphertext;
+  }
+
+  private buildDecryptedProviderCredentialsInRam(shopId: string, cfg: CrmTrustAndIndustryConfig) {
+    return {
+      pancakePosShopId: cfg.pancakePosShopId || null,
+      pancakePosApiKey: this.decryptCustomLookupApiKeyInRam(shopId, cfg.pancakePosApiKeyEncrypted),
+      ghnShopId: cfg.ghnShopId || null,
+      ghnToken: this.decryptCustomLookupApiKeyInRam(shopId, cfg.ghnTokenEncrypted),
+      ghtkToken: this.decryptCustomLookupApiKeyInRam(shopId, cfg.ghtkTokenEncrypted),
+      vtpToken: this.decryptCustomLookupApiKeyInRam(shopId, cfg.vtpTokenEncrypted),
+      jtToken: this.decryptCustomLookupApiKeyInRam(shopId, cfg.jtTokenEncrypted),
+      customWebhookUrl: cfg.customLookupWebhookUrl || null,
+      customApiKey: this.decryptCustomLookupApiKeyInRam(shopId, cfg.customLookupApiKeyEncrypted),
+    };
+  }
+
   public async getShopCrmTrustAndIndustryConfig(shopId: string): Promise<
     CrmTrustAndIndustryConfig & {
       requireDepositOnHighRisk: boolean;
       hasCustomLookupApiKey: boolean;
+      hasPancakePosApiKey: boolean;
+      hasGhnToken: boolean;
+      hasGhtkToken: boolean;
+      hasVtpToken: boolean;
+      hasJtToken: boolean;
     }
   > {
     const shop = await this.shopRepo.findOne({ where: { id: shopId } });
@@ -123,13 +159,27 @@ export class Customer360Service {
       useInternalPosHistory: raw?.useInternalPosHistory ?? true,
       usePancakeCommunityNetwork: raw?.usePancakeCommunityNetwork ?? true,
       useCarrier3plLookup: raw?.useCarrier3plLookup ?? true,
+      consortiumSharingEnabled: raw?.consortiumSharingEnabled ?? true,
+      enablePublicWebRiskLookup: raw?.enablePublicWebRiskLookup ?? true,
       enabledCarriers:
         Array.isArray(raw?.enabledCarriers) && raw.enabledCarriers.length > 0
           ? raw.enabledCarriers
           : ['GHN', 'GHTK', 'VTP', 'JT'],
+      pancakePosShopId: raw?.pancakePosShopId || null,
+      pancakePosApiKeyEncrypted: raw?.pancakePosApiKeyEncrypted || null,
+      ghnShopId: raw?.ghnShopId || null,
+      ghnTokenEncrypted: raw?.ghnTokenEncrypted || null,
+      ghtkTokenEncrypted: raw?.ghtkTokenEncrypted || null,
+      vtpTokenEncrypted: raw?.vtpTokenEncrypted || null,
+      jtTokenEncrypted: raw?.jtTokenEncrypted || null,
       customLookupWebhookUrl: raw?.customLookupWebhookUrl || null,
       customLookupApiKeyEncrypted: raw?.customLookupApiKeyEncrypted || null,
       hasCustomLookupApiKey: Boolean(raw?.customLookupApiKeyEncrypted),
+      hasPancakePosApiKey: Boolean(raw?.pancakePosApiKeyEncrypted),
+      hasGhnToken: Boolean(raw?.ghnTokenEncrypted),
+      hasGhtkToken: Boolean(raw?.ghtkTokenEncrypted),
+      hasVtpToken: Boolean(raw?.vtpTokenEncrypted),
+      hasJtToken: Boolean(raw?.jtTokenEncrypted),
       highRiskReturnRateThresholdPercent: Number(raw?.highRiskReturnRateThresholdPercent ?? 30),
       highRiskReportedCountThreshold: Number(raw?.highRiskReportedCountThreshold ?? 1),
       autoMaskBuyerPhoneInChat: raw?.autoMaskBuyerPhoneInChat ?? true,
@@ -147,9 +197,6 @@ export class Customer360Service {
     };
   }
 
-  /**
-   * Cập nhật cấu hình nguồn tra cứu tín nhiệm & ngành hàng CRM 360° (tương thích cả tên field BE và alias FE)
-   */
   public async updateShopCrmTrustAndIndustryConfig(params: {
     shopId: string;
     actorUserId: string;
@@ -158,6 +205,11 @@ export class Customer360Service {
     CrmTrustAndIndustryConfig & {
       requireDepositOnHighRisk: boolean;
       hasCustomLookupApiKey: boolean;
+      hasPancakePosApiKey: boolean;
+      hasGhnToken: boolean;
+      hasGhtkToken: boolean;
+      hasVtpToken: boolean;
+      hasJtToken: boolean;
     }
   > {
     const shop = await this.shopRepo.findOne({ where: { id: params.shopId } });
@@ -188,25 +240,6 @@ export class Customer360Service {
         ? enabledSourcesSet.has('CARRIER_3PL')
         : current.useCarrier3plLookup);
 
-    const resolvedAutoMaskPhone =
-      dto.autoMaskBuyerPhoneInChat ??
-      dto.autoMaskPhoneInChatMessages ??
-      current.autoMaskBuyerPhoneInChat;
-
-    const resolvedAutoExtractAddress =
-      dto.autoExtractAddressFromChat ??
-      dto.autoExtractPhoneAndAddressInChat ??
-      current.autoExtractAddressFromChat;
-
-    let encryptedCustomApiKey = current.customLookupApiKeyEncrypted || null;
-    if (dto.customLookupApiKey !== undefined) {
-      const trimmedKey = dto.customLookupApiKey.trim();
-      encryptedCustomApiKey = trimmedKey
-        ? this.messageCryptoService.encryptForConversation(trimmedKey, `pii_vault:${params.shopId}`)
-            .ciphertext
-        : null;
-    }
-
     const nextCategory =
       (dto.businessCategory as ShopBusinessCategoryEnum) || current.businessCategory;
 
@@ -216,23 +249,72 @@ export class Customer360Service {
       useInternalPosHistory: dto.useInternalPosHistory ?? current.useInternalPosHistory,
       usePancakeCommunityNetwork: resolvedUseCommunity,
       useCarrier3plLookup: resolvedUseCarrier3pl,
+      consortiumSharingEnabled:
+        dto.consortiumSharingEnabled ?? current.consortiumSharingEnabled ?? true,
+      enablePublicWebRiskLookup:
+        dto.enablePublicWebRiskLookup ?? current.enablePublicWebRiskLookup ?? true,
       enabledCarriers:
         Array.isArray(dto.enabledCarriers) && dto.enabledCarriers.length > 0
           ? (dto.enabledCarriers.filter((c) => ['GHN', 'GHTK', 'VTP', 'JT'].includes(c)) as Array<
               'GHN' | 'GHTK' | 'VTP' | 'JT'
             >)
           : current.enabledCarriers,
+      pancakePosShopId:
+        dto.pancakePosShopId !== undefined
+          ? dto.pancakePosShopId?.trim() || null
+          : current.pancakePosShopId || null,
+      pancakePosApiKeyEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.pancakePosApiKey,
+        current.pancakePosApiKeyEncrypted,
+      ),
+      ghnShopId:
+        dto.ghnShopId !== undefined
+          ? dto.ghnShopId
+            ? Number(dto.ghnShopId)
+            : null
+          : current.ghnShopId || null,
+      ghnTokenEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.ghnToken,
+        current.ghnTokenEncrypted,
+      ),
+      ghtkTokenEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.ghtkToken,
+        current.ghtkTokenEncrypted,
+      ),
+      vtpTokenEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.vtpToken,
+        current.vtpTokenEncrypted,
+      ),
+      jtTokenEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.jtToken,
+        current.jtTokenEncrypted,
+      ),
       customLookupWebhookUrl:
         dto.customLookupWebhookUrl !== undefined
           ? dto.customLookupWebhookUrl?.trim() || null
           : current.customLookupWebhookUrl,
-      customLookupApiKeyEncrypted: encryptedCustomApiKey,
+      customLookupApiKeyEncrypted: this.encryptOptionalSecret(
+        params.shopId,
+        dto.customLookupApiKey,
+        current.customLookupApiKeyEncrypted,
+      ),
       highRiskReturnRateThresholdPercent:
         dto.highRiskReturnRateThresholdPercent ?? current.highRiskReturnRateThresholdPercent,
       highRiskReportedCountThreshold:
         dto.highRiskReportedCountThreshold ?? current.highRiskReportedCountThreshold,
-      autoMaskBuyerPhoneInChat: resolvedAutoMaskPhone,
-      autoExtractAddressFromChat: resolvedAutoExtractAddress,
+      autoMaskBuyerPhoneInChat:
+        dto.autoMaskBuyerPhoneInChat ??
+        dto.autoMaskPhoneInChatMessages ??
+        current.autoMaskBuyerPhoneInChat,
+      autoExtractAddressFromChat:
+        dto.autoExtractAddressFromChat ??
+        dto.autoExtractPhoneAndAddressInChat ??
+        current.autoExtractAddressFromChat,
       businessCategory: nextCategory,
       showApparelMeasurementsInProfile:
         dto.showApparelMeasurementsInProfile ?? current.showApparelMeasurementsInProfile,
@@ -257,13 +339,14 @@ export class Customer360Service {
       ...nextConfig,
       requireDepositOnHighRisk: shop.requireDepositOnHighRisk ?? true,
       hasCustomLookupApiKey: Boolean(nextConfig.customLookupApiKeyEncrypted),
+      hasPancakePosApiKey: Boolean(nextConfig.pancakePosApiKeyEncrypted),
+      hasGhnToken: Boolean(nextConfig.ghnTokenEncrypted),
+      hasGhtkToken: Boolean(nextConfig.ghtkTokenEncrypted),
+      hasVtpToken: Boolean(nextConfig.vtpTokenEncrypted),
+      hasJtToken: Boolean(nextConfig.jtTokenEncrypted),
     };
   }
 
-  /**
-   * Làm giàu đối tượng `CustomerProfileEntity` với kết quả đánh giá Điểm uy tín nhận hàng (`trustEvaluation`)
-   * và đảm bảo ẩn vĩnh viễn `phoneEncrypted` / `phoneSearchHash`.
-   */
   public enrichCustomerWithTrustEvaluation(
     customer: CustomerProfileEntity,
     shopRequireDepositOnHighRisk = true,
@@ -276,6 +359,8 @@ export class Customer360Service {
       networkReturnedCount: customer.networkReturnedCount,
       reportedCount: customer.reportedCount,
       reportedReasons: customer.reportedReasonsJson,
+      sourceBreakdowns: (customer.trustSourceBreakdownsJson as any) || null,
+      providerDiagnostics: customer.trustProviderDiagnosticsJson || null,
       isBlacklisted: customer.isBlacklisted,
       shopRequireDepositOnHighRisk,
       highRiskReturnRateThresholdPercent: crmConfig?.highRiskReturnRateThresholdPercent,
@@ -285,7 +370,6 @@ export class Customer360Service {
       checkedAt: customer.lastTrustLookupAt || customer.updatedAt,
     });
 
-    // Bảo toàn nguyên vẹn prototype của BaseEntity (hasId, save, remove, softRemove...) khi gắn thêm trustEvaluation
     const clone = Object.assign(Object.create(Object.getPrototypeOf(customer)), customer, {
       trustEvaluation,
     }) as CustomerProfileEntity & {
@@ -293,6 +377,7 @@ export class Customer360Service {
     };
     delete (clone as unknown as Record<string, unknown>).phoneEncrypted;
     delete (clone as unknown as Record<string, unknown>).phoneSearchHash;
+    delete (clone as unknown as Record<string, unknown>).phoneGlobalHash;
     return clone;
   }
 
@@ -402,19 +487,19 @@ export class Customer360Service {
       });
     }
 
-    // 3. Tra cứu tự động chỉ số Nhận / Hoàn / Bị báo cáo từ nguồn dữ liệu (Pancake Community + 3PL GHN/GHTK + Custom API)
-    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
-      shopId,
-      crmConfig.customLookupApiKeyEncrypted,
-    );
+    const providerCredentials = this.buildDecryptedProviderCredentialsInRam(shopId, crmConfig);
     const externalTrustLookup =
       firstExtractedPhone && crmConfig.enableAutoTrustLookupOnPhone !== false
         ? await this.trustScoreService.lookupPhoneReputationFromSources({
+            shopId,
             rawPhone: firstExtractedPhone,
+            phoneMasked: encryptedPhonePack?.phoneMasked || null,
             phoneSearchHash: encryptedPhonePack?.phoneSearchHash || null,
+            phoneGlobalHash: encryptedPhonePack?.phoneGlobalHash || null,
             excludeShopId: shopId,
+            customerId: customer?.id || null,
             config: crmConfig,
-            decryptedCustomApiKey: decryptedCustomKey,
+            enablePublicWebRiskLookup: crmConfig.enablePublicWebRiskLookup !== false,
           })
         : null;
 
@@ -432,6 +517,7 @@ export class Customer360Service {
         phoneMasked: encryptedPhonePack?.phoneMasked || null,
         phoneEncrypted: encryptedPhonePack?.phoneEncrypted || null,
         phoneSearchHash: encryptedPhonePack?.phoneSearchHash || null,
+        phoneGlobalHash: encryptedPhonePack?.phoneGlobalHash || null,
         defaultProvinceCode: extractedNer.provinceCode || null,
         defaultProvinceName: extractedNer.provinceName || null,
         defaultDistrictCode: extractedNer.districtCode || null,
@@ -453,6 +539,8 @@ export class Customer360Service {
         networkReturnedCount: externalTrustLookup?.networkReturnedCount || 0,
         reportedCount: externalTrustLookup?.reportedCount || 0,
         reportedReasonsJson: externalTrustLookup?.reportedReasons || [],
+        trustSourceBreakdownsJson: externalTrustLookup?.sourceBreakdowns || null,
+        trustProviderDiagnosticsJson: externalTrustLookup?.providerDiagnostics || null,
         trustLookupSource:
           externalTrustLookup?.lookupSource || PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
         lastTrustLookupAt: externalTrustLookup ? now : null,
@@ -493,6 +581,7 @@ export class Customer360Service {
         customer.phoneMasked = encryptedPhonePack.phoneMasked;
         customer.phoneEncrypted = encryptedPhonePack.phoneEncrypted;
         customer.phoneSearchHash = encryptedPhonePack.phoneSearchHash;
+        customer.phoneGlobalHash = encryptedPhonePack.phoneGlobalHash;
       }
       if (externalTrustLookup) {
         customer.networkDeliveredCount = Math.max(
@@ -507,6 +596,16 @@ export class Customer360Service {
           customer.reportedCount = externalTrustLookup.reportedCount;
           customer.reportedReasonsJson = externalTrustLookup.reportedReasons;
         }
+        customer.successfulDeliveriesCount = Math.max(
+          Number(customer.successfulDeliveriesCount || 0),
+          externalTrustLookup.shopDeliveredCount,
+        );
+        customer.returnedOrdersCount = Math.max(
+          Number(customer.returnedOrdersCount || 0),
+          externalTrustLookup.shopReturnedCount,
+        );
+        customer.trustSourceBreakdownsJson = externalTrustLookup.sourceBreakdowns;
+        customer.trustProviderDiagnosticsJson = externalTrustLookup.providerDiagnostics;
         customer.trustLookupSource = externalTrustLookup.lookupSource;
         customer.lastTrustLookupAt = now;
       }
@@ -677,9 +776,6 @@ export class Customer360Service {
     };
   }
 
-  /**
-   * Tra cứu / Làm mới chỉ số Nhận, Hoàn, Bị báo cáo từ đa nguồn (POS nội bộ + Cộng đồng Pancake v2/POS + VTP/GHN/GHTK/J&T/Shopee + Custom Webhook)
-   */
   public async refreshCustomerTrustLookup(params: {
     shopId: string;
     customerId: string;
@@ -699,7 +795,6 @@ export class Customer360Service {
 
     const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
 
-    // Giải mã SĐT an toàn trong RAM; nếu thất bại hoặc chưa có SĐT gốc vẫn tiếp tục tra cứu qua phoneSearchHash / phoneMasked
     let decryptedPhone = params.dto?.rawPhone?.trim() || '';
     if (!decryptedPhone && customer.phoneEncrypted) {
       const candidate = this.piiVaultService.decryptPhoneInRam(
@@ -711,34 +806,35 @@ export class Customer360Service {
       }
     }
 
-    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
-      params.shopId,
-      crmConfig.customLookupApiKeyEncrypted,
-    );
-
+    const credentials = this.buildDecryptedProviderCredentialsInRam(params.shopId, crmConfig);
     const lookupRes = await this.trustScoreService.lookupPhoneReputationFromSources({
+      shopId: params.shopId,
       rawPhone: decryptedPhone || null,
       phoneMasked: customer.phoneMasked || null,
       phoneSearchHash: customer.phoneSearchHash || null,
+      phoneGlobalHash: customer.phoneGlobalHash || null,
       excludeShopId: params.shopId,
       customerId: customer.id,
       config: crmConfig,
-      decryptedCustomApiKey: decryptedCustomKey,
+      enablePublicWebRiskLookup: crmConfig.enablePublicWebRiskLookup !== false,
       overrideSources: params.dto?.sources || null,
       overrideWebhookUrl: params.dto?.customWebhookUrl || null,
+      bypassCache: true,
     });
 
-    customer.networkDeliveredCount = Math.max(
-      Number(customer.networkDeliveredCount || 0),
-      lookupRes.networkDeliveredCount,
-    );
-    customer.networkReturnedCount = Math.max(
-      Number(customer.networkReturnedCount || 0),
-      lookupRes.networkReturnedCount,
-    );
-    if (lookupRes.reportedCount > Number(customer.reportedCount || 0)) {
-      customer.reportedCount = lookupRes.reportedCount;
+    if (lookupRes.phoneGlobalHash) {
+      customer.phoneGlobalHash = lookupRes.phoneGlobalHash;
     }
+    customer.successfulDeliveriesCount = Math.max(
+      Number(customer.successfulDeliveriesCount || 0),
+      lookupRes.shopDeliveredCount,
+    );
+    customer.returnedOrdersCount = Math.max(
+      Number(customer.returnedOrdersCount || 0),
+      lookupRes.shopReturnedCount,
+    );
+    customer.networkDeliveredCount = lookupRes.networkDeliveredCount;
+    customer.networkReturnedCount = lookupRes.networkReturnedCount;
 
     const existingReports = Array.isArray(customer.reportedReasonsJson)
       ? [...customer.reportedReasonsJson]
@@ -748,7 +844,9 @@ export class Customer360Service {
       ...lookupRes.reportedReasons,
     ]);
     customer.reportedReasonsJson = mergedReports;
-    customer.reportedCount = Math.max(Number(customer.reportedCount || 0), mergedReports.length);
+    customer.reportedCount = Math.max(lookupRes.reportedCount, mergedReports.length);
+    customer.trustSourceBreakdownsJson = lookupRes.sourceBreakdowns;
+    customer.trustProviderDiagnosticsJson = lookupRes.providerDiagnostics;
     customer.trustLookupSource = lookupRes.lookupSource;
     customer.lastTrustLookupAt = new Date();
 
@@ -760,6 +858,7 @@ export class Customer360Service {
       reportedCount: customer.reportedCount,
       reportedReasons: customer.reportedReasonsJson,
       sourceBreakdowns: lookupRes.sourceBreakdowns,
+      providerDiagnostics: lookupRes.providerDiagnostics,
       isBlacklisted: customer.isBlacklisted,
       shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
       highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
@@ -798,23 +897,108 @@ export class Customer360Service {
     return enriched;
   }
 
-  /**
-   * Báo xấu SĐT khách bom hàng / Ghi nhận lượt bị báo cáo (`reportCustomerPhoneAbuse`)
-   */
+  public async lookupStandalonePhoneTrust(params: {
+    shopId: string;
+    rawPhone: string;
+    bypassCache?: boolean;
+  }): Promise<{
+    phoneMasked: string;
+    existingCustomerId: string | null;
+    existingCustomerName: string | null;
+    trustEvaluation: DeliveryTrustEvaluationResult;
+    warningMessage: string | null;
+  }> {
+    const normalized = this.piiVaultService.normalizeLocalVietnamesePhone(params.rawPhone);
+    if (normalized.length < 9) {
+      throw new BadRequestException('Số điện thoại không hợp lệ (cần tối thiểu 9–10 chữ số).');
+    }
+
+    const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
+    const phoneGlobalHash = this.piiVaultService.computeGlobalPhoneConsortiumHash(normalized);
+    const phoneSearchHash = this.piiVaultService.computePhoneBlindSearchHash(
+      params.shopId,
+      normalized,
+    );
+    const phoneMasked = this.piiVaultService.maskPhoneNumber(normalized) || normalized;
+
+    const existingCustomer = await this.customerRepo.findOne({
+      where: [
+        { shopId: params.shopId, phoneGlobalHash },
+        { shopId: params.shopId, phoneSearchHash },
+      ],
+    });
+
+    const credentials = this.buildDecryptedProviderCredentialsInRam(params.shopId, crmConfig);
+    const lookupRes = await this.trustScoreService.lookupPhoneReputationFromSources({
+      shopId: params.shopId,
+      rawPhone: normalized,
+      phoneMasked,
+      phoneSearchHash,
+      phoneGlobalHash,
+      excludeShopId: params.shopId,
+      customerId: existingCustomer?.id || null,
+      config: crmConfig,
+      enablePublicWebRiskLookup: crmConfig.enablePublicWebRiskLookup !== false,
+      bypassCache: params.bypassCache,
+    });
+
+    const shopDelivered = Math.max(
+      Number(existingCustomer?.successfulDeliveriesCount || 0),
+      lookupRes.shopDeliveredCount,
+    );
+    const shopReturned = Math.max(
+      Number(existingCustomer?.returnedOrdersCount || 0),
+      lookupRes.shopReturnedCount,
+    );
+
+    const trustEvaluation = this.trustScoreService.evaluateCustomerTrustScore({
+      successfulDeliveriesCount: shopDelivered,
+      returnedOrdersCount: shopReturned,
+      networkDeliveredCount: lookupRes.networkDeliveredCount,
+      networkReturnedCount: lookupRes.networkReturnedCount,
+      reportedCount: Math.max(
+        Number(existingCustomer?.reportedCount || 0),
+        lookupRes.reportedCount,
+      ),
+      reportedReasons: [
+        ...(existingCustomer?.reportedReasonsJson || []),
+        ...lookupRes.reportedReasons,
+      ],
+      sourceBreakdowns: lookupRes.sourceBreakdowns,
+      providerDiagnostics: lookupRes.providerDiagnostics,
+      isBlacklisted: Boolean(existingCustomer?.isBlacklisted),
+      shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
+      highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
+      highRiskReportedCountThreshold: crmConfig.highRiskReportedCountThreshold,
+      lookupSource: lookupRes.lookupSource,
+      enabledCarriers: crmConfig.enabledCarriers,
+      checkedAt: new Date(),
+    });
+
+    return {
+      phoneMasked,
+      existingCustomerId: existingCustomer?.id || null,
+      existingCustomerName: existingCustomer?.fullName || null,
+      trustEvaluation,
+      warningMessage: lookupRes.warningMessage,
+    };
+  }
+
   public async reportCustomerPhoneAbuse(params: {
     shopId: string;
     customerId: string;
     actorUserId: string;
     dto: ReportCustomerPhoneAbuseDto;
   }): Promise<CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }> {
-    const customer = await this.customerRepo.findOne({
-      where: { id: params.customerId, shopId: params.shopId },
-    });
+    const [customer, shop, crmConfig] = await Promise.all([
+      this.customerRepo.findOne({ where: { id: params.customerId, shopId: params.shopId } }),
+      this.shopRepo.findOne({ where: { id: params.shopId } }),
+      this.getShopCrmTrustAndIndustryConfig(params.shopId),
+    ]);
     if (!customer) {
       throw new NotFoundException('CUSTOMER_PROFILE_NOT_FOUND');
     }
 
-    const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
     const beforeState = {
       reportedCount: customer.reportedCount,
       returnedOrdersCount: customer.returnedOrdersCount,
@@ -829,15 +1013,93 @@ export class Customer360Service {
       'Khách đặt đơn nhưng từ chối nhận hàng (Bom hàng)'
     ).trim();
 
+    let phoneGlobalHash = customer.phoneGlobalHash;
+    if (!phoneGlobalHash && customer.phoneEncrypted) {
+      const decrypted = this.piiVaultService.decryptPhoneInRam(
+        params.shopId,
+        customer.phoneEncrypted,
+      );
+      if (decrypted && !decrypted.includes('[')) {
+        phoneGlobalHash = this.piiVaultService.computeGlobalPhoneConsortiumHash(decrypted);
+        customer.phoneGlobalHash = phoneGlobalHash;
+      }
+    }
+
+    let verificationLevel: 'CARRIER_VERIFIED' | 'ORDER_LINKED' | 'SHOP_DECLARED' = 'SHOP_DECLARED';
+    let resolvedTracking = params.dto.trackingNumber?.trim() || null;
+    if (params.dto.orderCode?.trim()) {
+      const matchedOrder = await this.posOrderRepo.findOne({
+        where: { shopId: params.shopId, orderCode: params.dto.orderCode.trim() },
+      });
+      if (matchedOrder) {
+        resolvedTracking = resolvedTracking || matchedOrder.trackingNumber || null;
+        verificationLevel = resolvedTracking ? 'CARRIER_VERIFIED' : 'ORDER_LINKED';
+      }
+    }
+
+    let reportId = `rep_${crypto.randomBytes(4).toString('hex')}`;
+    if (phoneGlobalHash) {
+      const dedupeKey = (
+        params.dto.orderCode?.trim() ||
+        resolvedTracking ||
+        `${params.dto.reasonCode || 'BOM_HANG'}_${new Date().toISOString().slice(0, 10)}`
+      ).slice(0, 96);
+
+      const existingDup = await this.abuseReportRepo.findOne({
+        where: {
+          phoneGlobalHash,
+          reporterShopId: params.shopId,
+          dedupeKey,
+        },
+      });
+
+      if (existingDup && existingDup.status === 'ACTIVE') {
+        throw new BadRequestException(
+          'Cửa hàng đã gửi báo cáo xấu cho SĐT và mã đơn/ngày này rồi (chống báo cáo trùng).',
+        );
+      }
+
+      const savedCommReport = await this.abuseReportRepo.save(
+        this.abuseReportRepo.create({
+          phoneGlobalHash,
+          phoneMaskedHint: customer.phoneMasked,
+          reporterShopId: params.shopId,
+          reporterShopAlias: shop?.name || `Shop #${params.shopId.slice(0, 6)}`,
+          reporterUserId: params.actorUserId,
+          customerId: customer.id,
+          dedupeKey,
+          reasonCode: params.dto.reasonCode || 'BOM_HANG',
+          reasonNote: resolvedReasonText,
+          sourceCode: params.dto.source || 'SHOP_INTERNAL',
+          carrierCode: params.dto.carrierCode?.trim().toUpperCase() || null,
+          orderCode: params.dto.orderCode?.trim() || null,
+          trackingNumber: resolvedTracking,
+          verificationLevel,
+          severity: verificationLevel === 'CARRIER_VERIFIED' ? 'CRITICAL' : 'HIGH',
+          status: 'ACTIVE',
+        }),
+      );
+      reportId = savedCommReport.id;
+
+      await this.phoneReputationSyncService.recalculateAbuseReportCountersForPhoneHash(
+        phoneGlobalHash,
+        customer.phoneMasked,
+      );
+    }
+
     const newReport: CustomerAbuseReportItem = {
-      reportId: `rep_${crypto.randomBytes(4).toString('hex')}`,
+      reportId,
       reason: resolvedReasonText,
       reasonCode: params.dto.reasonCode || 'BOM_HANG',
       reasonNote: resolvedReasonText,
-      carrierCode: params.dto.carrierCode || null,
-      orderCode: params.dto.orderCode || null,
+      carrierCode: params.dto.carrierCode?.trim().toUpperCase() || null,
+      orderCode: params.dto.orderCode?.trim() || null,
+      trackingNumber: resolvedTracking,
       source: params.dto.source || 'SHOP_INTERNAL',
-      reportedByName: 'Cửa hàng & Cộng đồng Pancake POS',
+      isCarrierVerified: verificationLevel === 'CARRIER_VERIFIED',
+      verificationLevel,
+      canRetract: true,
+      reportedByName: shop?.name || 'Cửa hàng hiện tại',
       reportedAt: new Date().toISOString(),
     };
 
@@ -868,6 +1130,8 @@ export class Customer360Service {
       networkReturnedCount: customer.networkReturnedCount,
       reportedCount: customer.reportedCount,
       reportedReasons: customer.reportedReasonsJson,
+      sourceBreakdowns: (customer.trustSourceBreakdownsJson as any) || null,
+      providerDiagnostics: customer.trustProviderDiagnosticsJson || null,
       isBlacklisted: customer.isBlacklisted,
       shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
       highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
@@ -887,6 +1151,8 @@ export class Customer360Service {
       targetResourceId: customer.id,
       beforeSnapshotJson: beforeState,
       afterSnapshotJson: {
+        reportId,
+        verificationLevel,
         reportedCount: saved.reportedCount,
         returnedOrdersCount: saved.returnedOrdersCount,
         isBlacklisted: saved.isBlacklisted,
@@ -914,6 +1180,91 @@ export class Customer360Service {
     }
 
     return enriched;
+  }
+
+  public async retractCustomerPhoneAbuseReport(params: {
+    shopId: string;
+    customerId: string;
+    reportId: string;
+    actorUserId: string;
+    reason: string;
+  }): Promise<CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }> {
+    const customer = await this.customerRepo.findOne({
+      where: { id: params.customerId, shopId: params.shopId },
+    });
+    if (!customer) {
+      throw new NotFoundException('CUSTOMER_PROFILE_NOT_FOUND');
+    }
+
+    const commReport = await this.abuseReportRepo.findOne({
+      where: { id: params.reportId, reporterShopId: params.shopId },
+    });
+    if (commReport) {
+      commReport.status = 'RETRACTED';
+      commReport.retractedByUserId = params.actorUserId;
+      commReport.retractedReason = params.reason.trim();
+      commReport.retractedAt = new Date();
+      await this.abuseReportRepo.save(commReport);
+
+      await this.phoneReputationSyncService.recalculateAbuseReportCountersForPhoneHash(
+        commReport.phoneGlobalHash,
+        customer.phoneMasked,
+      );
+    }
+
+    const filteredReasons = (customer.reportedReasonsJson || []).filter(
+      (r) => r.reportId !== params.reportId,
+    );
+    customer.reportedReasonsJson = filteredReasons;
+    customer.reportedCount = filteredReasons.length;
+    if (customer.reportedCount === 0 && customer.isBlacklisted) {
+      customer.isBlacklisted = false;
+      customer.blacklistReason = null;
+      if (customer.tier === CustomerTierEnum.BLACKLIST) {
+        customer.tier = CustomerTierEnum.NEW;
+      }
+    }
+
+    const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
+    const evalRes = this.trustScoreService.evaluateCustomerTrustScore({
+      successfulDeliveriesCount: customer.successfulDeliveriesCount,
+      returnedOrdersCount: customer.returnedOrdersCount,
+      networkDeliveredCount: customer.networkDeliveredCount,
+      networkReturnedCount: customer.networkReturnedCount,
+      reportedCount: customer.reportedCount,
+      reportedReasons: customer.reportedReasonsJson,
+      sourceBreakdowns: (customer.trustSourceBreakdownsJson as any) || null,
+      providerDiagnostics: customer.trustProviderDiagnosticsJson || null,
+      isBlacklisted: customer.isBlacklisted,
+      shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
+      highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
+      highRiskReportedCountThreshold: crmConfig.highRiskReportedCountThreshold,
+      lookupSource: customer.trustLookupSource,
+      enabledCarriers: crmConfig.enabledCarriers,
+    });
+    customer.deliveryTrustScore = evalRes.score;
+
+    const saved = await this.customerRepo.save(customer);
+
+    await this.piiVaultService.recordSecurityAuditLog({
+      shopId: params.shopId,
+      actorUserId: params.actorUserId,
+      actionCode: SecurityAuditActionCodeEnum.PHONE_ABUSE_REPORT,
+      targetResourceType: 'CUSTOMER_PROFILE',
+      targetResourceId: customer.id,
+      afterSnapshotJson: {
+        action: 'RETRACT_REPORT',
+        reportId: params.reportId,
+        reason: params.reason.trim(),
+        remainingReports: saved.reportedCount,
+      },
+    });
+
+    return this.enrichCustomerWithTrustEvaluation(
+      saved,
+      crmConfig.requireDepositOnHighRisk,
+      crmConfig,
+    );
   }
 
   /**
@@ -1232,16 +1583,19 @@ export class Customer360Service {
       });
     }
 
-    const decryptedCustomKey = this.decryptCustomLookupApiKeyInRam(
-      shopId,
-      crmConfig.customLookupApiKeyEncrypted,
-    );
+    const providerCredentials = this.buildDecryptedProviderCredentialsInRam(shopId, crmConfig);
     const externalTrustLookup =
       dto.rawPhone && dto.rawPhone.trim() && crmConfig.enableAutoTrustLookupOnPhone !== false
         ? await this.trustScoreService.lookupPhoneReputationFromSources({
+            shopId,
             rawPhone: dto.rawPhone.trim(),
+            phoneMasked: encryptedPack?.phoneMasked || null,
+            phoneSearchHash: encryptedPack?.phoneSearchHash || null,
+            phoneGlobalHash: encryptedPack?.phoneGlobalHash || null,
+            excludeShopId: shopId,
+            customerId: customer?.id || null,
             config: crmConfig,
-            decryptedCustomApiKey: decryptedCustomKey,
+            enablePublicWebRiskLookup: crmConfig.enablePublicWebRiskLookup !== false,
           })
         : null;
 
@@ -1277,6 +1631,7 @@ export class Customer360Service {
         phoneMasked: encryptedPack?.phoneMasked || null,
         phoneEncrypted: encryptedPack?.phoneEncrypted || null,
         phoneSearchHash: encryptedPack?.phoneSearchHash || null,
+        phoneGlobalHash: encryptedPack?.phoneGlobalHash || null,
         email: dto.email?.trim() || null,
         defaultProvinceCode: dto.defaultProvinceCode || matchedProv?.code || null,
         defaultProvinceName: matchedProv?.name || null,
@@ -1293,6 +1648,8 @@ export class Customer360Service {
         networkReturnedCount: externalTrustLookup?.networkReturnedCount || 0,
         reportedCount: externalTrustLookup?.reportedCount || 0,
         reportedReasonsJson: externalTrustLookup?.reportedReasons || [],
+        trustSourceBreakdownsJson: externalTrustLookup?.sourceBreakdowns || null,
+        trustProviderDiagnosticsJson: externalTrustLookup?.providerDiagnostics || null,
         trustLookupSource:
           externalTrustLookup?.lookupSource || PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
         lastTrustLookupAt: externalTrustLookup ? new Date() : null,
