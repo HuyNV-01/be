@@ -4,13 +4,13 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
 import { AdsConversionEventLogEntity } from 'src/entity/ads-conversion-event-log.entity';
 import { ChannelIntegrationEntity } from 'src/entity/channel-integration.entity';
-import { CommunityPhoneAbuseReportEntity } from 'src/entity/community-phone-abuse-report.entity';
 import { ConversationEntity } from 'src/entity/conversation.entity';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { CustomerWalletLedgerEntity } from 'src/entity/customer-wallet-ledger.entity';
 import { MessageEntity } from 'src/entity/message.entity';
-import { PhoneReputationLedgerEntity } from 'src/entity/phone-reputation-ledger.entity';
-import { PosOrderEntity } from 'src/entity/pos-order.entity';
+import { PhoneTrustAbuseReportEntity } from 'src/entity/phone-trust-abuse-report.entity';
+import { PhoneTrustDeliveryEventEntity } from 'src/entity/phone-trust-delivery-event.entity';
+import { PhoneTrustGlobalAggregateEntity } from 'src/entity/phone-trust-global-aggregate.entity';
 import { SecurityAuditLogEntity } from 'src/entity/security-audit-log.entity';
 import { ShopMemberEntity } from 'src/entity/shop-member.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
@@ -20,17 +20,17 @@ import { WarehouseEntity } from 'src/entity/warehouse.entity';
 import { ChatModule } from '../chat/chat.module';
 import { IamModule } from '../iam/iam.module';
 import { NotificationsModule } from '../notifications/notifications.module';
-import { PhoneTrustReputationController } from './controllers/phone-trust-reputation.controller';
+import { CarrierTrustWebhookController } from './controllers/carrier-trust-webhook.controller.tscarrier-trust-webhook.controller';
+import { PhoneTrustController } from './controllers/phone-trust.controller';
 import { CrmController } from './crm.controller';
 import { AdsConversionSyncService } from './services/ads-conversion-sync.service';
-import { AutoReputationHarvesterService } from './services/auto-reputation-harvester.service';
 import { Customer360Service } from './services/customer-360.service';
 import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalty.service';
 import { DeliveryTrustScoreService } from './services/delivery-trust-score.service';
-import { PhoneReputationSyncService } from './services/phone-reputation-sync.service';
-import { PhoneTrustStandaloneService } from './services/phone-trust-standalone.service';
+import { PhoneTrustBlindIndexService } from './services/phone-trust-blind-index.service';
+import { PhoneTrustLedgerService } from './services/phone-trust-ledger.service';
+import { PhoneTrustProviderAdaptersService } from './services/phone-trust-provider-adapters.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
-import { PublicWebRiskProviderService } from './services/public-web-risk-provider.service';
 import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner.service';
 import { VnAdministrativeAddressCarrierService } from './services/vn-administrative-address-carrier.service';
 
@@ -39,9 +39,6 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     TypeOrmModule.forFeature([
       CustomerProfileEntity,
       CustomerWalletLedgerEntity,
-      PhoneReputationLedgerEntity,
-      CommunityPhoneAbuseReportEntity,
-      PosOrderEntity,
       AdsConversionEventLogEntity,
       SecurityAuditLogEntity,
       ConversationEntity,
@@ -51,22 +48,24 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
       ShopMemberEntity,
       UserEntity,
       WarehouseEntity,
+      PhoneTrustDeliveryEventEntity,
+      PhoneTrustAbuseReportEntity,
+      PhoneTrustGlobalAggregateEntity,
     ]),
     WebSocketModule,
     IamModule,
     NotificationsModule,
     forwardRef(() => ChatModule),
   ],
-  controllers: [CrmController, PhoneTrustReputationController],
+  controllers: [CrmController, PhoneTrustController, CarrierTrustWebhookController],
   providers: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    PiiVaultAndAuditService,
-    PublicWebRiskProviderService,
-    PhoneReputationSyncService,
-    AutoReputationHarvesterService,
+    PhoneTrustBlindIndexService,
+    PhoneTrustProviderAdaptersService,
+    PhoneTrustLedgerService,
     DeliveryTrustScoreService,
-    PhoneTrustStandaloneService,
+    PiiVaultAndAuditService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,
@@ -74,12 +73,11 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
   exports: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    PiiVaultAndAuditService,
-    PublicWebRiskProviderService,
-    PhoneReputationSyncService,
-    AutoReputationHarvesterService,
+    PhoneTrustBlindIndexService,
+    PhoneTrustProviderAdaptersService,
+    PhoneTrustLedgerService,
     DeliveryTrustScoreService,
-    PhoneTrustStandaloneService,
+    PiiVaultAndAuditService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,
