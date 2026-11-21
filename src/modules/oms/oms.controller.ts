@@ -15,6 +15,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import type { Request } from 'express';
+import { ThermalLabelFormatEnum } from 'src/common/enum';
 import { PermissionCodeEnum } from 'src/common/enum/permission.enum';
 import { DBaseRes } from 'src/dto/base-res.dto';
 import {
@@ -33,6 +34,16 @@ import {
   TransitionOrderStatusDto,
   VerifyReturnedOrderDto,
 } from 'src/dto/oms/oms-fulfillment.dto';
+import {
+  BatchPrintThermalLabelsDto,
+  CreateHandoverManifestDto,
+  GenerateWavePicklistDto,
+  ScanOrderIntoHandoverDto,
+  ScheduleOrderCallLaterDto,
+  SealHandoverManifestDto,
+  SettlePartialDeliveryDto,
+  UpdateOrderTagsAndSubStatusDto,
+} from 'src/dto/oms/pos-fulfillment-ops.dto';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
 import {
   RequireShopPermissions,
@@ -45,6 +56,7 @@ import { BarcodePackingAndPrintService } from './services/barcode-packing-and-pr
 import { CarrierRescueAndWatchdogService } from './services/carrier-rescue-and-watchdog.service';
 import { CodReconciliationService } from './services/cod-reconciliation.service';
 import { OmsStateMachineService } from './services/oms-state-machine.service';
+import { PosFulfillmentOpsService } from './services/pos-fulfillment-ops.service';
 import { ReturnAndRmaExchangeService } from './services/return-and-rma-exchange.service';
 
 type AuthedReq = Request & {
@@ -66,6 +78,7 @@ export class OmsFulfillmentController {
     private readonly rescueService: CarrierRescueAndWatchdogService,
     private readonly rmaService: ReturnAndRmaExchangeService,
     private readonly reconciliationService: CodReconciliationService,
+    private readonly posOpsService: PosFulfillmentOpsService,
   ) {}
 
   @Get(':shopId/orders')
@@ -445,6 +458,203 @@ export class OmsFulfillmentController {
   ): Promise<DBaseRes> {
     const data = await this.reconciliationService.exportDisputeCsv(shopId, batchId);
     return { status: HttpStatus.OK, code: HttpStatus.OK, message: 'OK', data };
+  }
+
+  @Post(':shopId/packing-station/batch-print')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_SHIPPING_LABEL_PRINT)
+  @ApiOperation({
+    summary: 'T09: In vận đơn nhiệt hàng loạt đa khổ giấy (A7/A6/K80/K58/A5/A4)',
+  })
+  async batchPrintShippingLabels(
+    @Param('shopId') shopId: string,
+    @Body() dto: BatchPrintThermalLabelsDto,
+    @Req() req: any,
+  ) {
+    const data = await this.packingService.batchGenerateShippingLabels({
+      shopId,
+      orderIds: dto.orderIds,
+      labelFormat: dto.labelFormat || ThermalLabelFormatEnum.A6_100X150,
+      templateOptions: {
+        hideProductNames: dto.hideProductNames,
+        hideItemPrices: dto.hideItemPrices,
+        showCodAmount: dto.showCodAmount,
+        showOrderNote: dto.showOrderNote,
+      },
+      actorUserId: req.user?.userId || req.user?.id,
+      actorName: req.user?.fullName || req.user?.name || 'Kho',
+    });
+    return { success: true, data };
+  }
+
+  @Post(':shopId/wave-picklist')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_BARCODE_PACK_VERIFY)
+  @ApiOperation({
+    summary: 'F07.9A: Xuất Phiếu Nhặt Hàng Tổng Hợp theo lô & vị trí kệ kho',
+  })
+  async generateWavePicklist(
+    @Param('shopId') shopId: string,
+    @Body() dto: GenerateWavePicklistDto,
+  ) {
+    const data = await this.posOpsService.generateConsolidatedWavePicklist({
+      shopId,
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Get(':shopId/handover-manifests')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CARRIER_DISPATCH_PUSH)
+  @ApiOperation({
+    summary: 'F07.9B: Danh sách biên bản bàn giao vận chuyển',
+  })
+  async listHandoverManifests(@Param('shopId') shopId: string) {
+    const data = await this.posOpsService.listHandoverManifests(shopId);
+    return { success: true, data };
+  }
+
+  @Post(':shopId/handover-manifests')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CARRIER_DISPATCH_PUSH)
+  @ApiOperation({
+    summary: 'F07.9B: Tạo biên bản bàn giao vận chuyển mới',
+  })
+  async createHandoverManifest(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateHandoverManifestDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.createHandoverManifest({
+      shopId,
+      actorUserId: req.user?.userId || req.user?.id,
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Get(':shopId/handover-manifests/:manifestId')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CARRIER_DISPATCH_PUSH)
+  @ApiOperation({
+    summary: 'F07.9B: Chi tiết biên bản bàn giao vận chuyển & mẫu in 2 liên',
+  })
+  async getHandoverManifestDetail(
+    @Param('shopId') shopId: string,
+    @Param('manifestId') manifestId: string,
+  ) {
+    const data = await this.posOpsService.getHandoverManifestDetail(shopId, manifestId);
+    return { success: true, data };
+  }
+
+  @Post(':shopId/handover-manifests/:manifestId/scan')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CARRIER_DISPATCH_PUSH)
+  @ApiOperation({
+    summary: 'F07.9B: Quét Barcode kiện hàng đưa vào biên bản bàn giao',
+  })
+  async scanOrderIntoHandoverManifest(
+    @Param('shopId') shopId: string,
+    @Param('manifestId') manifestId: string,
+    @Body() dto: ScanOrderIntoHandoverDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.scanOrderIntoHandoverManifest({
+      shopId,
+      manifestId,
+      actorUserId: req.user?.userId || req.user?.id,
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Post(':shopId/handover-manifests/:manifestId/seal')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CARRIER_DISPATCH_PUSH)
+  @ApiOperation({
+    summary: 'F07.9B: Chốt biên bản bàn giao, chuyển hàng loạt sang HANDED_TO_CARRIER',
+  })
+  async sealHandoverManifest(
+    @Param('shopId') shopId: string,
+    @Param('manifestId') manifestId: string,
+    @Body() dto: SealHandoverManifestDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.sealAndCompleteHandoverManifest({
+      shopId,
+      manifestId,
+      actorUserId: req.user?.userId || req.user?.id,
+      actorName: req.user?.fullName || req.user?.name || 'Kho',
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Get(':shopId/call-later-queue')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_ORDER_LIST_VIEW)
+  @ApiOperation({
+    summary: 'F07.10: Hàng đợi Hẹn gọi lại xác nhận đơn chuẩn Pancake POS',
+  })
+  async listCallLaterQueue(@Param('shopId') shopId: string) {
+    const data = await this.posOpsService.listConfirmationCallLaterQueue(shopId);
+    return { success: true, data };
+  }
+
+  @Post(':shopId/orders/:orderId/call-later')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_ORDER_LIST_VIEW)
+  @ApiOperation({
+    summary: 'F07.10: Đặt lịch hẹn gọi lại xác nhận đơn & gắn thẻ đơn hàng',
+  })
+  async scheduleCallLater(
+    @Param('shopId') shopId: string,
+    @Param('orderId') orderId: string,
+    @Body() dto: ScheduleOrderCallLaterDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.scheduleOrderCallLater({
+      shopId,
+      orderId,
+      actorUserId: req.user?.userId || req.user?.id,
+      actorName: req.user?.fullName || req.user?.name || 'Sale',
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Patch(':shopId/orders/:orderId/order-tags')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_ORDER_LIST_VIEW)
+  @ApiOperation({
+    summary: 'F07.10: Cập nhật thẻ đơn hàng (Order Tags) & trạng thái phụ',
+  })
+  async updateOrderTagsAndSubStatus(
+    @Param('shopId') shopId: string,
+    @Param('orderId') orderId: string,
+    @Body() dto: UpdateOrderTagsAndSubStatusDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.updateOrderTagsAndSubStatus({
+      shopId,
+      orderId,
+      actorUserId: req.user?.userId || req.user?.id,
+      actorName: req.user?.fullName || req.user?.name || 'Sale',
+      dto,
+    });
+    return { success: true, data };
+  }
+
+  @Post(':shopId/orders/:orderId/partial-delivery-settle')
+  @RequireShopPermissions(PermissionCodeEnum.OMS_CONFIRMED_ORDER_MODIFY)
+  @ApiOperation({
+    summary: 'F07.11: Quyết toán giao hàng một phần & cập nhật COD/Tồn kho',
+  })
+  async settlePartialDelivery(
+    @Param('shopId') shopId: string,
+    @Param('orderId') orderId: string,
+    @Body() dto: SettlePartialDeliveryDto,
+    @Req() req: any,
+  ) {
+    const data = await this.posOpsService.settlePartialDelivery({
+      shopId,
+      orderId,
+      actorUserId: req.user?.userId || req.user?.id,
+      actorName: req.user?.fullName || req.user?.name || 'Vận hành',
+      dto,
+    });
+    return { success: true, data };
   }
 }
 

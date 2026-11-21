@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { WebSocketModule } from 'src/common/websocket/socket-state.module';
+import { CarrierHandoverManifestEntity } from 'src/entity/carrier-handover-manifest.entity';
 import { CodReconciliationBatchEntity } from 'src/entity/cod-reconciliation-batch.entity';
 import { CodReconciliationItemEntity } from 'src/entity/cod-reconciliation-item.entity';
 import { CustomerProfileEntity } from 'src/entity/customer-profile.entity';
@@ -14,6 +15,7 @@ import { ProductSerialItemEntity } from 'src/entity/product-serial-item.entity';
 import { ProductVariantEntity } from 'src/entity/product-variant.entity';
 import { ShopWorkspaceEntity } from 'src/entity/shop-workspace.entity';
 import { WarehouseStockItemEntity } from 'src/entity/warehouse-stock-item.entity';
+import { WarehouseEntity } from 'src/entity/warehouse.entity';
 
 import { CatalogPosModule } from '../catalog-pos/catalog-pos.module';
 import { CrmModule } from '../crm/crm.module';
@@ -24,6 +26,7 @@ import { BarcodePackingAndPrintService } from './services/barcode-packing-and-pr
 import { CarrierRescueAndWatchdogService } from './services/carrier-rescue-and-watchdog.service';
 import { CodReconciliationService } from './services/cod-reconciliation.service';
 import { OmsStateMachineService } from './services/oms-state-machine.service';
+import { PosFulfillmentOpsService } from './services/pos-fulfillment-ops.service';
 import { ReturnAndRmaExchangeService } from './services/return-and-rma-exchange.service';
 
 @Module({
@@ -41,6 +44,8 @@ import { ReturnAndRmaExchangeService } from './services/return-and-rma-exchange.
       ProductSerialItemEntity,
       CustomerProfileEntity,
       CustomerWalletLedgerEntity,
+      CarrierHandoverManifestEntity,
+      WarehouseEntity,
     ]),
     WebSocketModule,
     IamModule,
@@ -55,6 +60,7 @@ import { ReturnAndRmaExchangeService } from './services/return-and-rma-exchange.
     CarrierRescueAndWatchdogService,
     ReturnAndRmaExchangeService,
     CodReconciliationService,
+    PosFulfillmentOpsService,
   ],
   exports: [
     OmsStateMachineService,
@@ -62,6 +68,7 @@ import { ReturnAndRmaExchangeService } from './services/return-and-rma-exchange.
     CarrierRescueAndWatchdogService,
     ReturnAndRmaExchangeService,
     CodReconciliationService,
+    PosFulfillmentOpsService,
   ],
 })
 export class OmsModule {}

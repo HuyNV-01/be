@@ -11,6 +11,27 @@ import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
 
+export interface PosOrderPartialDeliveryLineItem {
+  variantId: string;
+  skuCode: string;
+  variantName: string;
+  orderedQty: number;
+  deliveredQty: number;
+  returnedQty: number;
+  unitPrice: number;
+  restockedToWarehouse: boolean;
+}
+
+export interface PosOrderPartialDeliveryInfo {
+  settledAtIso: string;
+  settledByUserId: string;
+  originalCodAmount: number;
+  revisedCodAmount: number;
+  partialReturnShippingFee: number;
+  items: PosOrderPartialDeliveryLineItem[];
+  note?: string | null;
+}
+
 export interface BundleComponentRevenueAllocationItem {
   componentVariantId: string;
   componentSkuCode: string;
@@ -455,4 +476,57 @@ export class PosOrderEntity extends BaseModel {
     default: null,
   })
   createdByUserId: string | null;
+
+  @Column({
+    name: 'order_tags_json',
+    type: 'json',
+    nullable: true,
+    default: null,
+  })
+  orderTagsJson: string[] | null;
+
+  @Column({
+    name: 'sub_status',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  subStatus: string | null;
+
+  @Column({
+    name: 'call_later_at',
+    type: 'timestamp',
+    nullable: true,
+    default: null,
+  })
+  callLaterAt: Date | null;
+
+  @Column({ name: 'call_attempt_count', type: 'int', default: 0 })
+  callAttemptCount: number;
+
+  @Column({
+    name: 'last_call_note',
+    type: 'text',
+    nullable: true,
+    default: null,
+  })
+  lastCallNote: string | null;
+
+  @Column({
+    name: 'handover_manifest_id',
+    type: 'varchar',
+    length: 36,
+    nullable: true,
+    default: null,
+  })
+  handoverManifestId: string | null;
+
+  @Column({
+    name: 'partial_delivery_info_json',
+    type: 'json',
+    nullable: true,
+    default: null,
+  })
+  partialDeliveryInfoJson: PosOrderPartialDeliveryInfo | null;
 }
