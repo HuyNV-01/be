@@ -27,13 +27,17 @@ import {
   EstimateMultiCarrierShippingFeeDto,
   ExportCustomersAuditDto,
   ExtractVietnameseNerDto,
+  ImportPhoneTrustHistoryDto,
   LookupPhoneTrustFromSourcesDto,
   MergeCustomerProfilesDto,
   OverrideDeliveryTrustScoreDto,
   RecordOrderDeliveredLoyaltyDto,
   ReportCustomerPhoneAbuseDto,
   ResolveAdministrativeCrosswalkDto,
+  RetractPhoneAbuseReportDto,
   SecurityAuditQueryDto,
+  StandalonePhoneTrustLookupDto,
+  SubmitStandalonePhoneAbuseReportDto,
   SyncAdministrativeUnitsDto,
   ToggleCustomerBlacklistDto,
   TriggerAdsConversionEventDto,
@@ -855,6 +859,145 @@ export class CrmController {
       status: HttpStatus.OK,
       code: HttpStatus.OK,
       message: 'Verified security audit HMAC hash chain successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/trust/lookup-phone')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary:
+      'Tra cứu độc lập chỉ số nhận/hoàn/báo xấu thực tế của bất kỳ SĐT nào (Nội bộ + Liên shop + Platform Partner Gateway + POS/3PL)',
+  })
+  async lookupStandalonePhoneTrust(
+    @Param('shopId') shopId: string,
+    @Body() dto: StandalonePhoneTrustLookupDto,
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.lookupStandalonePhoneTrust({
+      shopId,
+      rawPhone: dto.rawPhone,
+      bypassCache: Boolean(dto.bypassCache),
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Looked up real phone trust metrics successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/trust/report-phone')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_BLACKLIST_TOGGLE)
+  @ApiOperation({
+    summary:
+      'Gửi báo xấu độc lập theo SĐT (chống trùng lặp & xác minh mã vận đơn trực tiếp với GHN/GHTK nếu có)',
+  })
+  async submitStandalonePhoneAbuseReport(
+    @Param('shopId') shopId: string,
+    @Body() dto: SubmitStandalonePhoneAbuseReportDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.submitStandalonePhoneAbuseReport({
+      shopId,
+      actorUserId: req.user?.id || 'system',
+      rawPhone: dto.rawPhone,
+      reasonCode: dto.reasonCode,
+      reasonNote: dto.reasonNote,
+      carrierCode: dto.carrierCode,
+      orderCode: dto.orderCode,
+      trackingNumber: dto.trackingNumber,
+      evidenceUrl: dto.evidenceUrl,
+      markBlacklisted: dto.markBlacklisted,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Submitted standalone phone abuse report successfully',
+      data,
+    };
+  }
+
+  @Patch(':shopId/customers/:customerId/report-abuse/:reportId/retract')
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_BLACKLIST_TOGGLE)
+  @ApiOperation({
+    summary: 'Rút lại báo xấu đã gửi bởi shop và tự động tính lại điểm uy tín liên shop',
+  })
+  async retractCustomerPhoneAbuseReport(
+    @Param('shopId') shopId: string,
+    @Param('customerId') customerId: string,
+    @Param('reportId') reportId: string,
+    @Body() dto: RetractPhoneAbuseReportDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.retractCustomerPhoneAbuseReport({
+      shopId,
+      customerId,
+      reportId,
+      actorUserId: req.user?.id || 'system',
+      reason: dto.reason,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Retracted customer phone abuse report successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/trust/backfill')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_PROFILE_EDIT)
+  @ApiOperation({
+    summary:
+      'Đồng bộ lịch sử đơn nhận/hoàn từ bảng customer_profiles sang sổ cái mạng lưới liên shop',
+  })
+  async backfillShopTrustLedger(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.customer360Service.backfillShopTrustLedger(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Backfilled shop trust ledger successfully',
+      data,
+    };
+  }
+
+  @Post(':shopId/trust/import-history')
+  @HttpCode(HttpStatus.OK)
+  @RequireShopPermissions(PermissionCodeEnum.CRM_CUSTOMER_PROFILE_EDIT)
+  @ApiOperation({
+    summary: 'Nhập hàng loạt lịch sử giao nhận / báo xấu thực tế (từ file CSV / ERP) vào sổ cái',
+  })
+  async importPhoneTrustHistory(
+    @Param('shopId') shopId: string,
+    @Body() dto: ImportPhoneTrustHistoryDto,
+    @Req() req: Request & { user?: { id: string } },
+  ): Promise<DBaseRes> {
+    const data = await this.customer360Service.importPhoneTrustHistory({
+      shopId,
+      actorUserId: req.user?.id || 'system',
+      rows: dto.rows,
+    });
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Imported phone trust history successfully',
+      data,
+    };
+  }
+
+  @Get(':shopId/trust/gateway-status')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @ApiOperation({
+    summary: 'Kiểm tra trạng thái cấu hình hạ tầng PLATFORM_TRUST_COMMUNITY_GATEWAY_URL',
+  })
+  async getPlatformTrustGatewayStatus(): Promise<DBaseRes> {
+    const data = await this.customer360Service.getPlatformTrustGatewayStatus();
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched platform trust gateway status successfully',
       data,
     };
   }

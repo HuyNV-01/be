@@ -1,9 +1,8 @@
-import { ProductIndustryTypeEnum, ShopBusinessCategoryEnum } from 'src/common/enum';
+import { ShopBusinessCategoryEnum } from 'src/common/enum';
 import { ChannelTypeEnum, RoutingStrategyEnum } from 'src/common/enum/permission.enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
-import { ProductFreeGiftRuleItem } from './product.entity';
 
 export interface CommissionSplitConfig {
   leadCollectorWeight: number;
@@ -26,11 +25,26 @@ export interface CrmTrustAndIndustryConfig {
   useInternalPosHistory: boolean;
   usePancakeCommunityNetwork: boolean;
   useCarrier3plLookup: boolean;
+  consortiumSharingEnabled?: boolean;
+  enablePublicWebRiskLookup?: boolean;
   enabledCarriers: Array<'GHN' | 'GHTK' | 'VTP' | 'JT'>;
+  // Shop-scoped credentials remain AES-256-GCM encrypted at rest and are decrypted only in RAM.
+  pancakePosShopId?: string | null;
+  pancakePosApiKeyEncrypted?: string | null;
+  nhanhAppId?: string | null;
+  nhanhBusinessId?: string | null;
+  nhanhAccessTokenEncrypted?: string | null;
+  ghnShopId?: number | null;
+  ghnTokenEncrypted?: string | null;
+  ghtkTokenEncrypted?: string | null;
+  vtpTokenEncrypted?: string | null;
+  jtTokenEncrypted?: string | null;
+  supershipTokenEncrypted?: string | null;
   customLookupWebhookUrl: string | null;
   customLookupApiKeyEncrypted?: string | null;
   highRiskReturnRateThresholdPercent: number;
   highRiskReportedCountThreshold: number;
+  autoRequireDepositBelowTrustScore?: number;
   autoMaskBuyerPhoneInChat: boolean;
   autoExtractAddressFromChat: boolean;
   businessCategory: ShopBusinessCategoryEnum;
@@ -44,107 +58,11 @@ export interface CrmTrustAndIndustryConfig {
 }
 
 /**
- * Cấu hình Trường Nhập Liệu Tư Vấn Động (`SellerAdvisorFieldSchema`) do Người bán tự định nghĩa cho từng Ngành hàng / Danh mục.
- * Loại bỏ hoàn toàn việc hardcode các nhánh `if (advisorMode === 'FASHION_APPAREL')` trên giao diện POS.
- */
-export interface SellerAdvisorFieldOption {
-  value: string;
-  label: string;
-}
-
-export interface SellerAdvisorFieldSchema {
-  fieldKey: string;
-  label: string;
-  unit?: string;
-  fieldType: 'NUMBER' | 'SELECT' | 'TEXT';
-  placeholder?: string;
-  defaultValue?: number | string;
-  min?: number;
-  max?: number;
-  options?: SellerAdvisorFieldOption[];
-  /**
-   * Liên kết tự động với dữ liệu NER bóc tách từ tin nhắn hoặc Hồ sơ CRM 360 (`heightCm` | `weightKg`)
-   */
-  nerAutoFillField?: 'heightCm' | 'weightKg' | null;
-}
-
-/**
- * Quy tắc Đối chiếu Tư vấn Thông số / Kích cỡ Động (`SellerAdvisorRuleRow`) do Người bán tự cấu hình
- */
-export interface SellerAdvisorRuleRow {
-  ruleId: string;
-  recommendedResultCode: string;
-  fitNote: string;
-  /**
-   * Điều kiện khoảng số học: ví dụ `{ heightCm: { min: 155, max: 165 }, weightKg: { min: 48, max: 55 } }`
-   * hoặc `{ footLengthCm: { min: 24, max: 24.5 } }`
-   */
-  numericRanges?: Record<string, { min: number; max: number }>;
-  /**
-   * Điều kiện khớp chính xác hoặc từ khóa: ví dụ `{ skinType: 'OILY' }`
-   */
-  exactMatches?: Record<string, string>;
-  /**
-   * Từ khóa SKU hoặc giá trị thuộc tính liên kết để tự động lọc ra các biến thể còn tồn kho trong In-Chat POS
-   */
-  linkedSkuKeyword?: string;
-}
-
-/**
- * Cấu hình Ngành hàng / Danh mục Sản phẩm Động do Người bán tự thiết lập (`SellerCategoryBlueprintItem`)
- */
-export interface SellerCategoryBlueprintItem {
-  categoryId: string;
-  code: string;
-  name: string;
-  badgeLabel: string;
-  iconEmoji?: string;
-  industryType: ProductIndustryTypeEnum;
-  defaultUnitName: string;
-  attributeAxis1Name: string;
-  attributeAxis1SampleValues: string[];
-  attributeAxis2Name: string;
-  attributeAxis2SampleValues: string[];
-  requiresSerialImei: boolean;
-  defaultWarrantyMonths: number;
-  requiresBatchExpiry: boolean;
-  defaultShelfLifeMonths: number;
-  defaultStorageCondition?: string | null;
-  defaultMaxDiscountPercent: number;
-  enableAdvisorInPos: boolean;
-  advisorTitle: string;
-  advisorFields: SellerAdvisorFieldSchema[];
-  advisorRules: SellerAdvisorRuleRow[];
-  isActive: boolean;
-  sortOrder: number;
-}
-
-/**
- * Cấu hình Tài khoản Ngân hàng Thụ hưởng VietQR EMVCo của Cửa hàng (`SellerVietQrBankConfig`)
- */
-export interface SellerVietQrBankConfig {
-  bankBin: string;
-  bankShortName: string;
-  accountNumber: string;
-  accountName: string;
-  transferPrefix: string;
-  autoConfirmWebhookEnabled: boolean;
-}
-
-/**
- * Cấu hình Tổng thể Danh mục Ngành hàng Động, Khuyến mãi Quà tặng kèm & Thanh toán VietQR của Cửa hàng (`ShopCatalogAndPosConfig`)
- */
-export interface ShopCatalogAndPosConfig {
-  categories: SellerCategoryBlueprintItem[];
-  freeGiftRules: ProductFreeGiftRuleItem[];
-  vietQrBankConfig: SellerVietQrBankConfig;
-  autoSeedDemoCatalogWhenEmpty: boolean;
-  hasInitializedDefaultCatalog?: boolean;
-  updatedAt: string;
-}
-
-/**
- * Hồ sơ cấu hình Ứng dụng SaaS (SaasAppProfileItem)
+ * Hồ sơ cấu hình Ứng dụng SaaS (SaasAppProfileItem):
+ * Cho phép 1 cửa hàng cấu hình nhiều Ứng dụng SaaS cho cùng 1 nền tảng (VD: Nhiều Meta App ID / BM khác nhau
+ * để cách ly Rate-Limit và dự phòng rủi ro, hoặc nhiều Zalo OA App / TikTok Partner App).
+ * Khi kết nối Fanpage/Kênh mới, người dùng chỉ cần chọn Hồ sơ SaaS (hoặc dùng hồ sơ mặc định) và dán Access Token,
+ * hệ thống sẽ tự động lấy thông tin trang và tự động tiêm (Auto-Inject) Webhook.
  */
 export interface SaasAppProfileItem {
   id: string;
@@ -181,6 +99,7 @@ export class ShopWorkspaceEntity extends BaseModel {
   @Column({ name: 'name', type: 'varchar', length: 255 })
   name: string;
 
+  // Mở rộng sang kiểu text để lưu đường dẫn URL Logo dài (Presigned S3 / CDN URL) không bị tràn ký tự
   @Column({ name: 'logo_url', type: 'text', nullable: true, default: null })
   logoUrl: string | null;
 
@@ -232,12 +151,4 @@ export class ShopWorkspaceEntity extends BaseModel {
     default: null,
   })
   crmTrustAndIndustryConfigJson: CrmTrustAndIndustryConfig | null;
-
-  @Column({
-    name: 'catalog_and_pos_config_json',
-    type: 'json',
-    nullable: true,
-    default: null,
-  })
-  catalogAndPosConfigJson: ShopCatalogAndPosConfig | null;
 }

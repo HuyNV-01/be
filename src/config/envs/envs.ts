@@ -91,6 +91,28 @@ const envVarsSchema = joi
     PUBLIC_TUNNEL_ALLOW_WILDCARD_ORIGIN: joi.boolean().optional().default(true),
     CORS_ALLOWED_ORIGINS: joi.string().optional().allow(''),
     CORS_ALLOWED_DOMAIN_SUFFIXES: joi.string().optional().allow(''),
+
+    PLATFORM_TRUST_GLOBAL_BLIND_PEPPER: joi.string().optional().allow(''),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_URL: joi
+      .string()
+      .uri({ scheme: ['http', 'https'] })
+      .optional()
+      .allow(''),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_API_KEY: joi.string().optional().allow(''),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_SIGNING_SECRET: joi.string().optional().allow(''),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_PROVIDER_NAME: joi
+      .string()
+      .optional()
+      .default('Platform 3PL Partner Gateway'),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_SEND_RAW_PHONE: joi.boolean().optional().default(false),
+    PLATFORM_TRUST_COMMUNITY_GATEWAY_TIMEOUT_MS: joi.number().min(500).max(10000).default(2800),
+    PLATFORM_TRUST_CACHE_TTL_SECONDS: joi.number().min(30).max(3600).default(300),
+    PLATFORM_TRUST_CIRCUIT_BREAKER_FAILURE_THRESHOLD: joi.number().min(2).max(50).default(5),
+    PLATFORM_TRUST_CIRCUIT_BREAKER_COOLDOWN_SECONDS: joi.number().min(10).max(600).default(60),
+    CARRIER_WEBHOOK_GHN_SECRET: joi.string().optional().allow(''),
+    CARRIER_WEBHOOK_GHTK_HASH_SECRET: joi.string().optional().allow(''),
+    CARRIER_WEBHOOK_VTP_TOKEN: joi.string().optional().allow(''),
+    CARRIER_WEBHOOK_SUPERSHIP_SECRET: joi.string().optional().allow(''),
   })
   .unknown(true)
   .required();
@@ -251,4 +273,32 @@ export const envs = {
   },
 
   tunnel: tunnelGatewayConfig,
+
+  phoneTrust: {
+    globalBlindPepper:
+      envVars.PLATFORM_TRUST_GLOBAL_BLIND_PEPPER?.trim() ||
+      `${envVars.JWT_SECRET}:global_phone_trust_consortium_v1`,
+    communityGatewayUrl: envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_URL?.trim() || null,
+    communityGatewayApiKey: envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_API_KEY?.trim() || null,
+    communityGatewaySigningSecret:
+      envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_SIGNING_SECRET?.trim() || null,
+    communityGatewayProviderName:
+      envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_PROVIDER_NAME?.trim() ||
+      'Platform 3PL Partner Gateway',
+    communityGatewaySendRawPhone: Boolean(envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_SEND_RAW_PHONE),
+    communityGatewayTimeoutMs: Number(envVars.PLATFORM_TRUST_COMMUNITY_GATEWAY_TIMEOUT_MS ?? 2800),
+    cacheTtlSeconds: Number(envVars.PLATFORM_TRUST_CACHE_TTL_SECONDS ?? 300),
+    circuitBreakerFailureThreshold: Number(
+      envVars.PLATFORM_TRUST_CIRCUIT_BREAKER_FAILURE_THRESHOLD ?? 5,
+    ),
+    circuitBreakerCooldownSeconds: Number(
+      envVars.PLATFORM_TRUST_CIRCUIT_BREAKER_COOLDOWN_SECONDS ?? 60,
+    ),
+    carrierWebhooks: {
+      ghnSecret: envVars.CARRIER_WEBHOOK_GHN_SECRET?.trim() || null,
+      ghtkHashSecret: envVars.CARRIER_WEBHOOK_GHTK_HASH_SECRET?.trim() || null,
+      vtpToken: envVars.CARRIER_WEBHOOK_VTP_TOKEN?.trim() || null,
+      supershipSecret: envVars.CARRIER_WEBHOOK_SUPERSHIP_SECRET?.trim() || null,
+    },
+  },
 };

@@ -1,13 +1,36 @@
 import {
   ChannelTypeEnum,
   DiscountApprovalStatusEnum,
+  OmsCarrierSlaBreachTypeEnum,
   PosOrderPaymentMethodEnum,
   PosOrderPaymentStatusEnum,
   PosOrderStatusEnum,
+  PosOrderTypeEnum,
 } from 'src/common/enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';
+
+export interface PosOrderPartialDeliveryLineItem {
+  variantId: string;
+  skuCode: string;
+  variantName: string;
+  orderedQty: number;
+  deliveredQty: number;
+  returnedQty: number;
+  unitPrice: number;
+  restockedToWarehouse: boolean;
+}
+
+export interface PosOrderPartialDeliveryInfo {
+  settledAtIso: string;
+  settledByUserId: string;
+  originalCodAmount: number;
+  revisedCodAmount: number;
+  partialReturnShippingFee: number;
+  items: PosOrderPartialDeliveryLineItem[];
+  note?: string | null;
+}
 
 export interface BundleComponentRevenueAllocationItem {
   componentVariantId: string;
@@ -43,6 +66,11 @@ export interface PosOrderLineItem {
   warehouseName: string;
   assignedSerialNumbers?: string[];
   bundleComponentAllocations?: BundleComponentRevenueAllocationItem[];
+  /**
+   * Sprint 5: Số lượng đã quét barcode xác nhận tại bàn đóng gói
+   */
+  packedScannedQty?: number;
+  requiresSerialImei?: boolean;
 }
 
 export interface VietQrEmvcoPayloadInfo {
@@ -59,17 +87,33 @@ export interface VietQrEmvcoPayloadInfo {
   bankTransactionId?: string | null;
 }
 
+export interface PackingBoxDimensionsInfo {
+  lengthCm: number;
+  widthCm: number;
+  heightCm: number;
+}
+
 @Entity('pos_orders')
 @Index('uq_pos_order_shop_code', ['shopId', 'orderCode'], { unique: true })
 @Index('idx_pos_order_shop_status', ['shopId', 'status', 'createdAt'])
 @Index('idx_pos_order_shop_customer', ['shopId', 'customerId', 'status'])
 @Index('idx_pos_order_shop_conv', ['shopId', 'conversationId'])
+@Index('idx_pos_order_shop_tracking', ['shopId', 'trackingNumber'])
+@Index('idx_pos_order_shop_sla', ['shopId', 'slaBreachType', 'status'])
 export class PosOrderEntity extends BaseModel {
   @Column({ name: 'shop_id', type: 'varchar', length: 36 })
   shopId: string;
 
   @Column({ name: 'order_code', type: 'varchar', length: 48 })
   orderCode: string;
+
+  @Column({
+    name: 'order_type',
+    type: 'enum',
+    enum: PosOrderTypeEnum,
+    default: PosOrderTypeEnum.STANDARD,
+  })
+  orderType: PosOrderTypeEnum;
 
   @Column({ name: 'parent_order_id', type: 'varchar', length: 36, nullable: true, default: null })
   parentOrderId: string | null;
@@ -120,7 +164,6 @@ export class PosOrderEntity extends BaseModel {
   })
   status: PosOrderStatusEnum;
 
-  // Địa chỉ nhận hàng hỗ trợ đồng thời 3 Cấp Mới (34 tỉnh) & 4 Cấp Cũ (63 tỉnh)
   @Column({ name: 'address_tier_mode', type: 'varchar', length: 16, default: '3_TIER' })
   addressTierMode: '3_TIER' | '4_TIER';
 
@@ -205,14 +248,22 @@ export class PosOrderEntity extends BaseModel {
   @Column({ name: 'full_four_tier_address', type: 'text', nullable: true, default: null })
   fullFourTierAddress: string | null;
 
-  // Danh sách sản phẩm trong đơn
   @Column({ name: 'items_json', type: 'json' })
   itemsJson: PosOrderLineItem[];
 
   @Column({ name: 'total_weight_grams', type: 'int', default: 500 })
   totalWeightGrams: number;
 
-  // Hãng vận chuyển & Cước phí
+  // Sprint 5: Trọng lượng cân thực tế tại bàn đóng gói & trọng lượng hãng vận chuyển tính cước
+  @Column({ name: 'actual_packed_weight_grams', type: 'int', nullable: true, default: null })
+  actualPackedWeightGrams: number | null;
+
+  @Column({ name: 'carrier_charged_weight_grams', type: 'int', nullable: true, default: null })
+  carrierChargedWeightGrams: number | null;
+
+  @Column({ name: 'packing_box_dimensions_json', type: 'json', nullable: true, default: null })
+  packingBoxDimensionsJson: PackingBoxDimensionsInfo | null;
+
   @Column({ name: 'carrier_code', type: 'varchar', length: 24, default: 'GHN' })
   carrierCode: 'GHN' | 'GHTK' | 'VTP' | 'JT' | 'COUNTER_PICKUP';
 
@@ -225,10 +276,31 @@ export class PosOrderEntity extends BaseModel {
   @Column({ name: 'shipping_fee_amount', type: 'decimal', precision: 15, scale: 2, default: 0 })
   shippingFeeAmount: number;
 
+  @Column({
+    name: 'shipping_fee_carrier_estimated',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    default: 0,
+  })
+  shippingFeeCarrierEstimated: number;
+
+  @Column({
+    name: 'shipping_fee_carrier_actual',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+    default: null,
+  })
+  shippingFeeCarrierActual: number | null;
+
   @Column({ name: 'is_free_shipping_for_customer', type: 'boolean', default: false })
   isFreeShippingForCustomer: boolean;
 
-  // Tài chính đơn hàng
+  @Column({ name: 'is_two_way_exchange', type: 'boolean', default: false })
+  isTwoWayExchange: boolean;
+
   @Column({ name: 'subtotal_amount', type: 'decimal', precision: 15, scale: 2, default: 0 })
   subtotalAmount: number;
 
@@ -262,9 +334,6 @@ export class PosOrderEntity extends BaseModel {
   @Column({ name: 'cod_collect_amount', type: 'decimal', precision: 15, scale: 2, default: 0 })
   codCollectAmount: number;
 
-  /**
-   * Tổng giá vốn và lợi nhuận ròng dự kiến (bảo vệ bởi FieldLevelSecurityInterceptor)
-   */
   @Column({ name: 'cogs_snapshot_amount', type: 'decimal', precision: 15, scale: 2, default: 0 })
   cogsSnapshotAmount: number;
 
@@ -325,6 +394,77 @@ export class PosOrderEntity extends BaseModel {
   })
   reservationCartId: string | null;
 
+  // Sprint 5: Đóng gói Barcode, In phiếu nhiệt & Camera bằng chứng (F07.3)
+  @Column({ name: 'printed_count', type: 'int', default: 0 })
+  printedCount: number;
+
+  @Column({ name: 'last_printed_at', type: 'timestamp', nullable: true, default: null })
+  lastPrintedAt: Date | null;
+
+  @Column({ name: 'packed_by_user_id', type: 'varchar', length: 36, nullable: true, default: null })
+  packedByUserId: string | null;
+
+  @Column({ name: 'packed_at', type: 'timestamp', nullable: true, default: null })
+  packedAt: Date | null;
+
+  @Column({ name: 'packing_video_url', type: 'text', nullable: true, default: null })
+  packingVideoUrl: string | null;
+
+  @Column({ name: 'handed_to_carrier_at', type: 'timestamp', nullable: true, default: null })
+  handedToCarrierAt: Date | null;
+
+  @Column({ name: 'delivered_at', type: 'timestamp', nullable: true, default: null })
+  deliveredAt: Date | null;
+
+  // Sprint 5: Trung tâm Cứu đơn Giao thất bại & SLA Watchdog (F07.4 & F07.8)
+  @Column({ name: 'delivery_fail_count', type: 'int', default: 0 })
+  deliveryFailCount: number;
+
+  @Column({ name: 'last_delivery_fail_reason', type: 'text', nullable: true, default: null })
+  lastDeliveryFailReason: string | null;
+
+  @Column({ name: 'shipper_name', type: 'varchar', length: 120, nullable: true, default: null })
+  shipperName: string | null;
+
+  @Column({ name: 'shipper_phone', type: 'varchar', length: 32, nullable: true, default: null })
+  shipperPhone: string | null;
+
+  @Column({ name: 'rescue_deadline_at', type: 'timestamp', nullable: true, default: null })
+  rescueDeadlineAt: Date | null;
+
+  @Column({ name: 'last_carrier_event_at', type: 'timestamp', nullable: true, default: null })
+  lastCarrierEventAt: Date | null;
+
+  @Column({
+    name: 'sla_breach_type',
+    type: 'enum',
+    enum: OmsCarrierSlaBreachTypeEnum,
+    default: OmsCarrierSlaBreachTypeEnum.NONE,
+  })
+  slaBreachType: OmsCarrierSlaBreachTypeEnum;
+
+  @Column({
+    name: 'carrier_ticket_code',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  carrierTicketCode: string | null;
+
+  // Sprint 5: Đối soát COD & Chốt sổ (F07.6)
+  @Column({
+    name: 'reconciled_batch_id',
+    type: 'varchar',
+    length: 36,
+    nullable: true,
+    default: null,
+  })
+  reconciledBatchId: string | null;
+
+  @Column({ name: 'reconciled_at', type: 'timestamp', nullable: true, default: null })
+  reconciledAt: Date | null;
+
   @Column({ name: 'note', type: 'text', nullable: true, default: null })
   note: string | null;
 
@@ -336,4 +476,57 @@ export class PosOrderEntity extends BaseModel {
     default: null,
   })
   createdByUserId: string | null;
+
+  @Column({
+    name: 'order_tags_json',
+    type: 'json',
+    nullable: true,
+    default: null,
+  })
+  orderTagsJson: string[] | null;
+
+  @Column({
+    name: 'sub_status',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    default: null,
+  })
+  subStatus: string | null;
+
+  @Column({
+    name: 'call_later_at',
+    type: 'timestamp',
+    nullable: true,
+    default: null,
+  })
+  callLaterAt: Date | null;
+
+  @Column({ name: 'call_attempt_count', type: 'int', default: 0 })
+  callAttemptCount: number;
+
+  @Column({
+    name: 'last_call_note',
+    type: 'text',
+    nullable: true,
+    default: null,
+  })
+  lastCallNote: string | null;
+
+  @Column({
+    name: 'handover_manifest_id',
+    type: 'varchar',
+    length: 36,
+    nullable: true,
+    default: null,
+  })
+  handoverManifestId: string | null;
+
+  @Column({
+    name: 'partial_delivery_info_json',
+    type: 'json',
+    nullable: true,
+    default: null,
+  })
+  partialDeliveryInfoJson: PosOrderPartialDeliveryInfo | null;
 }

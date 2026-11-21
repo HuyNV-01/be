@@ -249,6 +249,12 @@ export class CustomTagService {
       if (existing.deletedAt) {
         await this.customTagRepo.restore(existing.id);
       }
+      existing.description = dto.description?.trim() || null;
+      existing.autoRuleConfigJson = dto.autoRuleConfigJson || null;
+      existing.linkedEventKeysJson = dto.linkedEventKeysJson || null;
+      existing.onApplyActionsJson = dto.onApplyActionsJson || null;
+      existing.onRemoveActionsJson = dto.onRemoveActionsJson || null;
+      existing.executionConditionJson = dto.executionConditionJson || null;
       existing.deletedAt = null;
       existing.deletedBy = null;
       existing.isActive = true;
@@ -283,6 +289,11 @@ export class CustomTagService {
       sortOrder: dto.sortOrder ?? 10,
       autoRuleConfigJson: dto.autoRuleConfigJson || null,
       isActive: true,
+      description: dto.description?.trim() || null,
+      linkedEventKeysJson: dto.linkedEventKeysJson || null,
+      onApplyActionsJson: dto.onApplyActionsJson || null,
+      onRemoveActionsJson: dto.onRemoveActionsJson || null,
+      executionConditionJson: dto.executionConditionJson || null,
     });
 
     return this.customTagRepo.save(entity);
@@ -323,6 +334,13 @@ export class CustomTagService {
       tag.autoRuleConfigJson = dto.autoRuleConfigJson;
     }
     if (dto.isActive !== undefined) tag.isActive = dto.isActive;
+    if (dto.description !== undefined) tag.description = dto.description?.trim() || null;
+    if (dto.linkedEventKeysJson !== undefined) tag.linkedEventKeysJson = dto.linkedEventKeysJson;
+    if (dto.onApplyActionsJson !== undefined) tag.onApplyActionsJson = dto.onApplyActionsJson;
+    if (dto.onRemoveActionsJson !== undefined) tag.onRemoveActionsJson = dto.onRemoveActionsJson;
+    if (dto.executionConditionJson !== undefined) {
+      tag.executionConditionJson = dto.executionConditionJson;
+    }
 
     return this.customTagRepo.save(tag);
   }

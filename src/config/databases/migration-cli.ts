@@ -1,10 +1,6 @@
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { writeFileSync } from 'fs';
 import { resolve } from 'path';
-
-import { DatabaseEvolutionService } from './database-evolution.service';
-import dataSource from './db-datasource';
-import { SmartMigrationEngine } from './smart-migration.engine';
 
 type MigrationAction =
   | 'evolve'
@@ -35,12 +31,50 @@ const dataSourcePath = resolve(__dirname, 'db-datasource.ts');
 const typeormCliPath = resolve(process.cwd(), 'node_modules/typeorm/cli.js');
 const migrationsDir = 'src/config/databases/migrations';
 
-const typeormRunner = `npx ts-node -r tsconfig-paths/register "${typeormCliPath}"`;
-const baseCli = `${typeormRunner} -d "${dataSourcePath}"`;
+/**
+ * Thực thi TypeORM CLI trực tiếp qua Node (`process.execPath`) với `ts-node/register/transpile-only`
+ * để tránh spawn lồng `npx -> ts-node -> cmd.exe` gây tràn V8 Zone Allocation trên Windows.
+ */
+function runTypeormCli(typeormArgs: string[], includeDataSource: boolean = true): void {
+  const tsNodeRegister = require.resolve('ts-node/register/transpile-only');
+  const tsconfigPathsRegister = require.resolve('tsconfig-paths/register');
 
-function runCommand(cmd: string): void {
-  console.log(`\n🚀 [Database CLI] Executing: ${cmd}\n`);
-  execSync(cmd, { stdio: 'inherit' });
+  const nodeArgs: string[] = [
+    '--max-old-space-size=4096',
+    '-r',
+    tsNodeRegister,
+    '-r',
+    tsconfigPathsRegister,
+    typeormCliPath,
+  ];
+
+  if (includeDataSource) {
+    nodeArgs.push('-d', dataSourcePath);
+  }
+
+  nodeArgs.push(...typeormArgs);
+
+  console.log(`\n🚀 [Database CLI] Executing: node ${typeormArgs.join(' ')}\n`);
+
+  const result = spawnSync(process.execPath, nodeArgs, {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      TS_NODE_TRANSPILE_ONLY: '1',
+      TS_NODE_FILES: 'false',
+      TS_NODE_LOG_ERROR: 'true',
+    },
+  });
+
+  if (result.error) {
+    console.error('❌ [Database CLI] Spawn failed:', result.error);
+    process.exit(1);
+  }
+
+  if (typeof result.status === 'number' && result.status !== 0) {
+    process.exit(result.status);
+  }
 }
 
 function createDataMigrationTemplate(name: string): void {
@@ -51,25 +85,25 @@ function createDataMigrationTemplate(name: string): void {
   const fullPath = resolve(process.cwd(), migrationsDir, fileName);
 
   const template = `import { MigrationInterface, QueryRunner } from 'typeorm';
-  import { SchemaMigrationHelper } from '../schema-migration.helper';
+import { SchemaMigrationHelper } from '../schema-migration.helper';
 
-  export class ${className} implements MigrationInterface {
-    name = '${className}';
+export class ${className} implements MigrationInterface {
+  name = '${className}';
 
-    public async up(queryRunner: QueryRunner): Promise<void> {
-      // await SchemaMigrationHelper.safeAddColumn(
-      //   queryRunner,
-      //   'users',
-      //   { name: 'new_column', type: 'varchar', length: '100', isNullable: false },
-      //   (row) => row.name || 'default_value',
-      // );
-    }
-
-    public async down(queryRunner: QueryRunner): Promise<void> {
-      // await SchemaMigrationHelper.safeDropColumn(queryRunner, 'users', 'new_column');
-    }
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    // await SchemaMigrationHelper.safeAddColumn(
+    //   queryRunner,
+    //   'users',
+    //   { name: 'new_column', type: 'varchar', length: '100', isNullable: false },
+    //   (row) => row.name || 'default_value',
+    // );
   }
-  `;
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    // await SchemaMigrationHelper.safeDropColumn(queryRunner, 'users', 'new_column');
+  }
+}
+`;
 
   writeFileSync(fullPath, template, 'utf8');
   console.log(`\n✅ Created smart data migration template at: ${fullPath}\n`);
@@ -77,21 +111,16 @@ function createDataMigrationTemplate(name: string): void {
 
 async function runDataSyncCli(): Promise<void> {
   console.log('\n🚀 [Database CLI] Initializing DataSource for Data Sync...');
+  const [{ default: dataSource }, { DatabaseEvolutionService }] = await Promise.all([
+    import('./db-datasource'),
+    import('./database-evolution.service'),
+  ]);
+
   await dataSource.initialize();
   try {
     const evolutionService = new DatabaseEvolutionService(dataSource);
     await evolutionService.onApplicationBootstrap();
     console.log('✅ [Database CLI] Data Sync completed successfully.\n');
-  } finally {
-    await dataSource.destroy();
-  }
-}
-
-async function runPruneCli(): Promise<void> {
-  await dataSource.initialize();
-  try {
-    const engine = new SmartMigrationEngine(dataSource, { maxKeepMigrations });
-    await engine.pruneOldMigrations();
   } finally {
     if (dataSource.isInitialized) {
       await dataSource.destroy();
@@ -99,71 +128,96 @@ async function runPruneCli(): Promise<void> {
   }
 }
 
-switch (action) {
-  case 'evolve': {
+async function runPruneCli(initializeDataSource: boolean = true): Promise<void> {
+  const [{ default: dataSource }, { SmartMigrationEngine }] = await Promise.all([
+    import('./db-datasource'),
+    import('./smart-migration.engine'),
+  ]);
+
+  if (initializeDataSource && !dataSource.isInitialized) {
+    await dataSource.initialize();
+  }
+
+  try {
     const engine = new SmartMigrationEngine(dataSource, { maxKeepMigrations });
-    engine.evolve(migrationName).catch((err) => {
-      console.error('❌ Smart DB Evolve failed:', err);
-      process.exit(1);
-    });
-    break;
-  }
-  case 'prune': {
-    runPruneCli().catch((err) => {
-      console.error('❌ Migration Prune failed:', err);
-      process.exit(1);
-    });
-    break;
-  }
-  case 'generate': {
-    const targetPath = `${migrationsDir}/${migrationName}`;
-    runCommand(`${baseCli} migration:generate "${targetPath}"`);
-    const engine = new SmartMigrationEngine(dataSource, { maxKeepMigrations });
-    engine.pruneOldMigrations().catch((err) => {
-      console.warn('⚠️ Prune warning:', err);
-    });
-    break;
-  }
-  case 'create': {
-    const targetPath = `${migrationsDir}/${migrationName}`;
-    runCommand(`${typeormRunner} migration:create "${targetPath}"`);
-    break;
-  }
-  case 'create:data': {
-    createDataMigrationTemplate(migrationName);
-    break;
-  }
-  case 'run': {
-    runCommand(`${baseCli} migration:run`);
-    const engine = new SmartMigrationEngine(dataSource, { maxKeepMigrations });
-    engine.pruneOldMigrations().catch((err) => {
-      console.warn('⚠️ Prune warning:', err);
-    });
-    break;
-  }
-  case 'revert': {
-    runCommand(`${baseCli} migration:revert`);
-    break;
-  }
-  case 'show': {
-    runCommand(`${baseCli} migration:show`);
-    break;
-  }
-  case 'log': {
-    runCommand(`${baseCli} schema:log`);
-    break;
-  }
-  case 'sync-data': {
-    runDataSyncCli().catch((err) => {
-      console.error('❌ Data Sync failed:', err);
-      process.exit(1);
-    });
-    break;
-  }
-  default: {
-    console.error(
-      '❌ Invalid command. Use: evolve | prune | generate | create | create:data | run | revert | show | log | sync-data',
-    );
-    process.exit(1);
+    await engine.pruneOldMigrations();
+  } finally {
+    if (initializeDataSource && dataSource.isInitialized) {
+      await dataSource.destroy();
+    }
   }
 }
+
+async function runEvolveCli(): Promise<void> {
+  const [{ default: dataSource }, { SmartMigrationEngine }] = await Promise.all([
+    import('./db-datasource'),
+    import('./smart-migration.engine'),
+  ]);
+
+  const engine = new SmartMigrationEngine(dataSource, { maxKeepMigrations });
+  await engine.evolve(migrationName);
+}
+
+async function main(): Promise<void> {
+  switch (action) {
+    case 'evolve': {
+      await runEvolveCli();
+      break;
+    }
+    case 'prune': {
+      await runPruneCli(true);
+      break;
+    }
+    case 'generate': {
+      const targetPath = `${migrationsDir}/${migrationName}`;
+      runTypeormCli(['migration:generate', targetPath], true);
+      await runPruneCli(false).catch((err) => {
+        console.warn('⚠️ Prune warning:', err);
+      });
+      break;
+    }
+    case 'create': {
+      const targetPath = `${migrationsDir}/${migrationName}`;
+      runTypeormCli(['migration:create', targetPath], false);
+      break;
+    }
+    case 'create:data': {
+      createDataMigrationTemplate(migrationName);
+      break;
+    }
+    case 'run': {
+      runTypeormCli(['migration:run'], true);
+      await runPruneCli(false).catch((err) => {
+        console.warn('⚠️ Prune warning:', err);
+      });
+      break;
+    }
+    case 'revert': {
+      runTypeormCli(['migration:revert'], true);
+      break;
+    }
+    case 'show': {
+      runTypeormCli(['migration:show'], true);
+      break;
+    }
+    case 'log': {
+      runTypeormCli(['schema:log'], true);
+      break;
+    }
+    case 'sync-data': {
+      await runDataSyncCli();
+      break;
+    }
+    default: {
+      console.error(
+        '❌ Invalid command. Use: evolve | prune | generate | create | create:data | run | revert | show | log | sync-data',
+      );
+      process.exit(1);
+    }
+  }
+}
+
+main().catch((err) => {
+  console.error('❌ [Database CLI] Unexpected error:', err);
+  process.exit(1);
+});

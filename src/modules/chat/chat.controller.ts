@@ -61,9 +61,11 @@ import {
 import { CreateDirectChatDto } from 'src/dto/chat/create-direct-chat.dto';
 import {
   CreateInternalNoteDto,
+  CreateQuickReplyCustomVariableDto,
   CreateQuickReplyTemplateDto,
   FinalizeMaskedVoipCallDto,
   InitiateMaskedVoipCallDto,
+  InterpolateQuickReplyDto,
   OmnichannelInboxFilterDto,
   SendPrivateReplyFromCommentDto,
   SnoozeConversationDto,
@@ -71,6 +73,7 @@ import {
   ToggleCommentVisibilityDto,
   TransferConversationDto,
   TranslateChatMessageDto,
+  UpdateQuickReplyCustomVariableDto,
   UpdateQuickReplyTemplateDto,
 } from 'src/dto/chat/omnichannel-inbox.dto';
 import {
@@ -1207,14 +1210,15 @@ export class ChatController {
   }
 
   @ApiOperation({
-    summary: 'F03.3 & F03.4: Lấy danh sách thư viện mẫu câu trả lời nhanh (/shortcut) của cửa hàng',
+    summary:
+      'F03.3 & F03.4: Lấy danh mục 14 biến mặc định + toàn bộ biến động tùy chỉnh của cửa hàng',
   })
-  @Get('quick-replies/:shopId')
+  @Get('quick-replies/:shopId/variables')
   @UseGuards(ShopPermissionGuard)
   @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
   @HttpCode(HttpStatus.OK)
-  async listQuickReplyTemplates(@Param('shopId') shopId: string, @Query('search') search?: string) {
-    const data = await this.quickReplyService.listTemplates(shopId, search);
+  async listQuickReplyVariables(@Param('shopId') shopId: string) {
+    const data = await this.quickReplyService.listVariablesCatalog(shopId);
     return {
       status: HttpStatus.OK,
       message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
@@ -1224,17 +1228,126 @@ export class ChatController {
   }
 
   @ApiOperation({
-    summary: 'F03.3 & F03.4: Tạo mẫu câu trả lời nhanh (/shortcut) kèm biến động & thẻ sản phẩm',
+    summary: 'F03.3 & F03.4: Thêm mới trường / biến động tùy chỉnh ngoài 14 biến mặc định',
+  })
+  @Post('quick-replies/:shopId/variables')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.CREATED)
+  async createQuickReplyVariable(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateQuickReplyCustomVariableDto,
+  ) {
+    const data = await this.quickReplyService.createCustomVariable(shopId, dto);
+    return {
+      status: HttpStatus.CREATED,
+      message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Chỉnh sửa trường / biến động tùy chỉnh của cửa hàng',
+  })
+  @Patch('quick-replies/:shopId/variables/:variableId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  async updateQuickReplyVariable(
+    @Param('shopId') shopId: string,
+    @Param('variableId') variableId: string,
+    @Body() dto: UpdateQuickReplyCustomVariableDto,
+  ) {
+    const data = await this.quickReplyService.updateCustomVariable(shopId, variableId, dto);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.UPDATE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary: 'F03.3 & F03.4: Xóa trường / biến động tùy chỉnh',
+  })
+  @Delete('quick-replies/:shopId/variables/:variableId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  async deleteQuickReplyVariable(
+    @Param('shopId') shopId: string,
+    @Param('variableId') variableId: string,
+  ) {
+    const data = await this.quickReplyService.deleteCustomVariable(shopId, variableId);
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.DELETE_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Lấy danh sách thư viện mẫu câu trả lời nhanh (/shortcut) theo ngữ cảnh',
+  })
+  @Get('quick-replies/:shopId')
+  @UseGuards(ShopPermissionGuard)
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async listQuickReplyTemplates(
+    @Req() req: { user?: { id?: string } },
+    @Param('shopId') shopId: string,
+    @Query('search') search?: string,
+    @Query('category') category?: string,
+    @Query('channelId') channelId?: string,
+    @Query('channelType') channelType?: string,
+    @Query('interactionType') interactionType?: 'INBOX' | 'COMMENT' | 'LIVESTREAM' | 'MARKETPLACE',
+    @Query('toneStyle') toneStyle?: 'FRIENDLY' | 'PROFESSIONAL' | 'URGENT' | 'VIP_CARE' | 'CUSTOM',
+    @Query('activeTagIds') activeTagIdsRaw?: string,
+  ) {
+    const activeTagIds = activeTagIdsRaw
+      ? activeTagIdsRaw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+
+    const data = await this.quickReplyService.listTemplates(shopId, search, {
+      category,
+      channelId,
+      channelType,
+      interactionType,
+      toneStyle,
+      activeTagIds,
+      actorUserId: req.user?.id,
+    });
+    return {
+      status: HttpStatus.OK,
+      message: HTTP_RESPONSE.COMMON.GET_SUCCESS.message,
+      code: HTTP_RESPONSE.COMMON.GET_SUCCESS.code,
+      data,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'F03.3 & F03.4: Tạo mẫu câu trả lời nhanh (/shortcut) kèm ảnh/video, ngữ cảnh & biến động',
   })
   @Post('quick-replies/:shopId')
   @UseGuards(ShopPermissionGuard)
   @RequireShopPermissions(PermissionCodeEnum.INBOX_QUICK_REPLY_MANAGE)
   @HttpCode(HttpStatus.CREATED)
   async createQuickReplyTemplate(
+    @Req() req: { user?: { id?: string } },
     @Param('shopId') shopId: string,
     @Body() dto: CreateQuickReplyTemplateDto,
   ) {
-    const data = await this.quickReplyService.createTemplate(shopId, dto);
+    const data = await this.quickReplyService.createTemplate(shopId, {
+      ...dto,
+      ownerUserId: req.user?.id,
+    });
     return {
       status: HttpStatus.CREATED,
       message: HTTP_RESPONSE.COMMON.CREATE_SUCCESS.message,
@@ -1285,8 +1398,7 @@ export class ChatController {
   }
 
   @ApiOperation({
-    summary:
-      'F03.3 & F03.4: Nội suy biến động ({{customer_name}}, {{salutation}}, {{agent_name}}, {{shop_name}})',
+    summary: 'F03.3 & F03.4: Nội suy 14 biến mặc định + biến tùy chỉnh & trả về media ảnh/video',
   })
   @Post('quick-replies/:shopId/:templateId/interpolate')
   @UseGuards(ShopPermissionGuard)
@@ -1295,14 +1407,7 @@ export class ChatController {
   async interpolateQuickReplyTemplate(
     @Param('shopId') shopId: string,
     @Param('templateId') templateId: string,
-    @Body()
-    body: {
-      customerName?: string;
-      salutation?: string;
-      agentName?: string;
-      pageName?: string;
-      trackingLink?: string;
-    },
+    @Body() body: InterpolateQuickReplyDto,
   ) {
     const data = await this.quickReplyService.interpolateTemplate({
       shopId,

@@ -12,6 +12,47 @@ export enum TagCategoryEnum {
 
 export type TagApplicableScope = 'CONVERSATION' | 'MESSAGE' | 'CUSTOMER' | 'ORDER';
 
+export type TagWorkflowActionType =
+  | 'SEND_QUICK_REPLY'
+  | 'ASSIGN_AGENT_OR_TEAM'
+  | 'SET_SNOOZE'
+  | 'UPDATE_CUSTOMER_TIER'
+  | 'ADD_LOYALTY_POINTS'
+  | 'ADD_INTERNAL_NOTE'
+  | 'AUTO_ADD_OR_REMOVE_TAGS'
+  | 'CALL_WEBHOOK'
+  | 'TRIGGER_CUSTOM_EVENT'
+  | 'EMIT_SOCKET_ALERT';
+
+export interface TagWorkflowActionItem {
+  id: string;
+  actionType: TagWorkflowActionType;
+  isEnabled: boolean;
+  delaySeconds?: number;
+  quickReplyTemplateId?: string;
+  targetAgentUserId?: string;
+  targetTeamCode?: string;
+  snoozeMinutes?: number;
+  snoozeNote?: string;
+  customerTier?: 'NEW' | 'SILVER' | 'GOLD' | 'VIP' | 'BLACKLIST';
+  loyaltyPointsDelta?: number;
+  internalNoteText?: string;
+  addTagIds?: string[];
+  removeTagIds?: string[];
+  webhookUrl?: string;
+  webhookSecret?: string;
+  customEventKey?: string;
+  customEventPayload?: Record<string, unknown>;
+  alertMessage?: string;
+}
+
+export interface TagWorkflowExecutionCondition {
+  channelTypes?: string[];
+  interactionTypes?: Array<'INBOX' | 'COMMENT' | 'LIVESTREAM' | 'MARKETPLACE'>;
+  onlyWhenCustomerHasPhone?: boolean;
+  cooldownMinutesPerConversation?: number;
+}
+
 export interface AutoTagRuleConfig {
   triggerEvent:
     | 'NER_PHONE_EXTRACTED'
@@ -20,7 +61,9 @@ export interface AutoTagRuleConfig {
     | 'POS_ORDER_CONFIRMED'
     | 'VIETQR_PAID'
     | 'CARRIER_DELIVERY_FAILED'
-    | 'KEYWORD_MATCH';
+    | 'KEYWORD_MATCH'
+    | 'CUSTOM_EVENT';
+  customEventKey?: string;
   keywords?: string[];
   removeTagIdsOnApply?: string[];
 }
@@ -37,6 +80,9 @@ export class CustomTagEntity extends BaseModel {
 
   @Column({ name: 'slug', type: 'varchar', length: 100 })
   slug: string;
+
+  @Column({ name: 'description', type: 'varchar', length: 255, nullable: true, default: null })
+  description: string | null;
 
   @Column({ name: 'color_hex', type: 'varchar', length: 16, default: '#3B82F6' })
   colorHex: string;
@@ -66,6 +112,21 @@ export class CustomTagEntity extends BaseModel {
 
   @Column({ name: 'auto_rule_config_json', type: 'json', nullable: true, default: null })
   autoRuleConfigJson: AutoTagRuleConfig | null;
+
+  @Column({ name: 'linked_event_keys_json', type: 'json', nullable: true, default: null })
+  linkedEventKeysJson: string[] | null;
+
+  @Column({ name: 'on_apply_actions_json', type: 'json', nullable: true, default: null })
+  onApplyActionsJson: TagWorkflowActionItem[] | null;
+
+  @Column({ name: 'on_remove_actions_json', type: 'json', nullable: true, default: null })
+  onRemoveActionsJson: TagWorkflowActionItem[] | null;
+
+  @Column({ name: 'execution_condition_json', type: 'json', nullable: true, default: null })
+  executionConditionJson: TagWorkflowExecutionCondition | null;
+
+  @Column({ name: 'automation_execution_count', type: 'int', default: 0 })
+  automationExecutionCount: number;
 
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive: boolean;

@@ -21,9 +21,12 @@ import {
   AssignMessageBookmarkTagDto,
   BulkAssignConversationTagsDto,
   CreateCustomTagDto,
+  CreateTagEventDefinitionDto,
+  FireTagEventDto,
   QueryCustomTagsDto,
   ToggleConversationTagDto,
   UpdateCustomTagDto,
+  UpdateTagEventDefinitionDto,
 } from 'src/dto/tags/tags.dto';
 import { JwtAuthGuard } from 'src/modules/auth/guards/jwt-auth.guard';
 import {
@@ -35,6 +38,7 @@ import { FieldLevelSecurityInterceptor } from 'src/modules/iam/interceptors/fiel
 import { ConversationTaggingService } from './services/conversation-tagging.service';
 import { CustomTagService } from './services/custom-tag.service';
 import { MessageBookmarkTagService } from './services/message-bookmark-tag.service';
+import { TagEventOrchestratorService } from './services/tag-event-orchestrator.service';
 
 @ApiTags('Sprint 2 — Multi-Tier oklch Tagging, Mutually Exclusive Groups & Message Bookmarks')
 @ApiBearerAuth('access-token')
@@ -46,6 +50,7 @@ export class TagsController {
     private readonly customTagService: CustomTagService,
     private readonly conversationTaggingService: ConversationTaggingService,
     private readonly messageBookmarkTagService: MessageBookmarkTagService,
+    private readonly tagEventOrchestrator: TagEventOrchestratorService,
   ) {}
 
   @Get()
@@ -82,6 +87,106 @@ export class TagsController {
       status: HttpStatus.CREATED,
       code: HttpStatus.CREATED,
       message: 'Created custom tag successfully',
+      data,
+    };
+  }
+
+  @Get('events')
+  @RequireShopPermissions(PermissionCodeEnum.INBOX_CONVERSATION_VIEW)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Lấy danh sách sự kiện hệ thống & sự kiện tùy chỉnh kết nối 2 chiều với Tag',
+  })
+  async listTagEvents(@Param('shopId') shopId: string): Promise<DBaseRes> {
+    const data = await this.tagEventOrchestrator.listEvents(shopId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fetched tag event definitions successfully',
+      data,
+    };
+  }
+
+  @Post('events')
+  @RequireShopPermissions(PermissionCodeEnum.TAG_SCHEMA_CREATE_EDIT)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Tạo mới sự kiện tùy chỉnh kết nối hai chiều Event <-> Tag',
+  })
+  async createTagEvent(
+    @Param('shopId') shopId: string,
+    @Body() dto: CreateTagEventDefinitionDto,
+  ): Promise<DBaseRes> {
+    const data = await this.tagEventOrchestrator.createEvent(shopId, dto);
+    return {
+      status: HttpStatus.CREATED,
+      code: HttpStatus.CREATED,
+      message: 'Created tag event definition successfully',
+      data,
+    };
+  }
+
+  @Patch('events/:eventId')
+  @RequireShopPermissions(PermissionCodeEnum.TAG_SCHEMA_CREATE_EDIT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cập nhật điều kiện, Tag liên kết hoặc hành động thực thi của sự kiện',
+  })
+  async updateTagEvent(
+    @Param('shopId') shopId: string,
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateTagEventDefinitionDto,
+  ): Promise<DBaseRes> {
+    const data = await this.tagEventOrchestrator.updateEvent(shopId, eventId, dto);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Updated tag event definition successfully',
+      data,
+    };
+  }
+
+  @Delete('events/:eventId')
+  @RequireShopPermissions(PermissionCodeEnum.TAG_SCHEMA_DELETE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Xóa mềm sự kiện tùy chỉnh của cửa hàng',
+  })
+  async deleteTagEvent(
+    @Param('shopId') shopId: string,
+    @Param('eventId') eventId: string,
+  ): Promise<DBaseRes> {
+    const data = await this.tagEventOrchestrator.deleteEvent(shopId, eventId);
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Deleted tag event definition successfully',
+      data,
+    };
+  }
+
+  @Post('events/:eventId/fire')
+  @RequireShopPermissions(PermissionCodeEnum.TAG_CONVERSATION_ASSIGN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Kích hoạt thủ công hoặc kiểm thử (Test Fire) một sự kiện trên cuộc hội thoại',
+  })
+  async fireTagEvent(
+    @Request() req: { user: { id: string } },
+    @Param('shopId') shopId: string,
+    @Param('eventId') eventId: string,
+    @Body() dto: FireTagEventDto,
+  ): Promise<DBaseRes> {
+    const data = await this.tagEventOrchestrator.fireEventManually(
+      shopId,
+      eventId,
+      dto,
+      req.user.id,
+    );
+    return {
+      status: HttpStatus.OK,
+      code: HttpStatus.OK,
+      message: 'Fired tag event successfully',
       data,
     };
   }

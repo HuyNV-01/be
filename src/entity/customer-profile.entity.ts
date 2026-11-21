@@ -57,6 +57,9 @@ export interface CustomerAbuseReportItem {
   sourceLabel?: string;
   severity?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   isCarrierVerified?: boolean;
+  verificationLevel?: 'CARRIER_VERIFIED' | 'ORDER_LINKED' | 'SHOP_DECLARED';
+  canRetract?: boolean;
+  evidenceUrl?: string | null;
   reportedByName: string;
   reportedAt: string;
 }
@@ -67,9 +70,50 @@ export interface CustomerCustomAttributeItem {
   value: string;
 }
 
+export interface PersistedTrustSourceBreakdownItem {
+  sourceCode: string;
+  sourceName: string;
+  shortLabel: string;
+  deliveredCount: number;
+  returnedCount: number;
+  reportedCount: number;
+  successRatePercent: number;
+  confidenceWeight: number;
+  status:
+    | 'LIVE_VERIFIED'
+    | 'COMMUNITY_SYNCED'
+    | 'LOCAL_LEDGER'
+    | 'NO_RECORD'
+    | 'NOT_CONFIGURED'
+    | 'PROVIDER_ERROR';
+  lastUpdatedAt: string | null;
+  diagnosticMessage?: string | null;
+  latencyMs?: number | null;
+}
+
+export interface PersistedTrustProviderDiagnosticItem {
+  providerCode: string;
+  providerName: string;
+  status:
+    | 'LIVE_VERIFIED'
+    | 'COMMUNITY_SYNCED'
+    | 'LOCAL_LEDGER'
+    | 'NO_RECORD'
+    | 'NOT_CONFIGURED'
+    | 'PROVIDER_ERROR';
+  deliveredCount: number;
+  returnedCount: number;
+  reportedCount: number;
+  latencyMs: number;
+  fromCache: boolean;
+  message: string;
+  checkedAt: string;
+}
+
 @Entity('customer_profiles')
 @Index('idx_crm_shop_code', ['shopId', 'code'], { unique: true })
 @Index('idx_crm_shop_phone_hash', ['shopId', 'phoneSearchHash'])
+@Index('idx_crm_phone_global_hash', ['phoneGlobalHash'])
 @Index('idx_crm_shop_tier_rfm', ['shopId', 'tier', 'rfmSegmentCode'])
 @Index('idx_crm_shop_trust_score', ['shopId', 'deliveryTrustScore', 'isBlacklisted'])
 export class CustomerProfileEntity extends BaseModel {
@@ -91,9 +135,15 @@ export class CustomerProfileEntity extends BaseModel {
   @Column({ name: 'phone_encrypted', type: 'text', nullable: true, default: null })
   phoneEncrypted: string | null;
 
-  // Chỉ mục mù (Blind Index HMAC-SHA256) giúp tra cứu SĐT trùng đa kênh trong < 2ms mà không cần giải mã toàn bảng
   @Column({ name: 'phone_search_hash', type: 'varchar', length: 64, nullable: true, default: null })
   phoneSearchHash: string | null;
+
+  /**
+   * Chỉ mục mù toàn mạng lưới (HMAC-SHA256 dùng global consortium pepper) cho phép đối chiếu
+   * chính xác 1-1 giữa các cửa hàng mà không lộ SĐT gốc và không va chạm như `phone_masked`.
+   */
+  @Column({ name: 'phone_global_hash', type: 'varchar', length: 64, nullable: true, default: null })
+  phoneGlobalHash: string | null;
 
   @Column({ name: 'email', type: 'varchar', length: 255, nullable: true, default: null })
   email: string | null;
@@ -152,7 +202,6 @@ export class CustomerProfileEntity extends BaseModel {
   })
   defaultWardName: string | null;
 
-  // Đơn vị hành chính cấp 4 (Thôn / Ấp / Bản / Khu phố / Tổ dân phố / Khóm / KĐT) phục vụ chuẩn 4 cấp GHTK/VTP & 63 tỉnh thành
   @Column({
     name: 'default_hamlet_code',
     type: 'varchar',
@@ -208,20 +257,23 @@ export class CustomerProfileEntity extends BaseModel {
   @Column({ name: 'returned_orders_count', type: 'int', default: 0 })
   returnedOrdersCount: number;
 
-  // Chỉ số nhận thành công tổng hợp từ mạng lưới liên shop (Pancake Community) & Đối tác vận chuyển 3PL (GHN/GHTK/VTP/J&T)
   @Column({ name: 'network_delivered_count', type: 'int', default: 0 })
   networkDeliveredCount: number;
 
-  // Chỉ số hoàn hàng tổng hợp từ mạng lưới liên shop & Đối tác vận chuyển 3PL
   @Column({ name: 'network_returned_count', type: 'int', default: 0 })
   networkReturnedCount: number;
 
-  // Số lần khách hàng / SĐT này bị các nhà bán hàng báo cáo xấu (Bom hàng / Không nghe máy / Tráo hàng)
   @Column({ name: 'reported_count', type: 'int', default: 0 })
   reportedCount: number;
 
   @Column({ name: 'reported_reasons_json', type: 'json', nullable: true, default: null })
   reportedReasonsJson: CustomerAbuseReportItem[] | null;
+
+  @Column({ name: 'trust_source_breakdowns_json', type: 'json', nullable: true, default: null })
+  trustSourceBreakdownsJson: PersistedTrustSourceBreakdownItem[] | null;
+
+  @Column({ name: 'trust_provider_diagnostics_json', type: 'json', nullable: true, default: null })
+  trustProviderDiagnosticsJson: PersistedTrustProviderDiagnosticItem[] | null;
 
   @Column({
     name: 'trust_lookup_source',
@@ -265,7 +317,6 @@ export class CustomerProfileEntity extends BaseModel {
   })
   walletCreditBalance: number;
 
-  // Ngành hàng áp dụng cho hồ sơ khách hàng (Thời trang, Mỹ phẩm, Điện tử, F&B, Mẹ & Bé, Đa ngành)
   @Column({
     name: 'industry_category',
     type: 'varchar',
@@ -284,7 +335,6 @@ export class CustomerProfileEntity extends BaseModel {
   @Column({ name: 'preferred_size', type: 'varchar', length: 32, nullable: true, default: null })
   preferredSize: string | null;
 
-  // Thuộc tính tùy chỉnh đa ngành hàng (VD: Loại da, Tình trạng dị ứng, Dòng máy đang dùng, IMEI bảo hành, Khẩu vị...)
   @Column({ name: 'custom_attributes_json', type: 'json', nullable: true, default: null })
   customAttributesJson: CustomerCustomAttributeItem[] | null;
 
