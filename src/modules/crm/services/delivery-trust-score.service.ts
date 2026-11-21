@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
+import * as crypto from 'crypto';
+import Redis from 'ioredis';
 import {
   ChannelTypeEnum,
   DeliveryTrustBandEnum,
@@ -88,8 +91,8 @@ const SOURCE_META_MAP: Record<
     confidenceWeight: 1.0,
   },
   PANCAKE_COMMUNITY: {
-    sourceName: 'Mạng lưới Cộng đồng & Pancake POS',
-    shortLabel: 'Cộng đồng / Pancake',
+    sourceName: 'Mạng lưới Cộng đồng Liên Shop & Cổng Công Khai',
+    shortLabel: 'Cộng đồng',
     confidenceWeight: 0.92,
   },
   CARRIER_3PL_VTP: {
@@ -118,11 +121,14 @@ const SOURCE_META_MAP: Record<
     confidenceWeight: 0.95,
   },
   CUSTOM_WEBHOOK_PROVIDER: {
-    sourceName: 'Cổng Tín Nhiệm Mở Rộng (SuperAI / Webhook)',
-    shortLabel: 'API mở rộng',
-    confidenceWeight: 0.88,
+    sourceName: 'Cổng Đối Tác Nền Tảng',
+    shortLabel: 'Đối tác mở rộng',
+    confidenceWeight: 0.9,
   },
 };
+
+const PLATFORM_HUB_TIMEOUT_MS = 3500;
+const PLATFORM_HUB_CACHE_TTL_SECONDS = 900;
 
 @Injectable()
 export class DeliveryTrustScoreService {
@@ -137,6 +143,7 @@ export class DeliveryTrustScoreService {
     private readonly ledgerRepo: Repository<PhoneReputationLedgerEntity>,
     @InjectRepository(CommunityPhoneAbuseReportEntity)
     private readonly abuseReportRepo: Repository<CommunityPhoneAbuseReportEntity>,
+    @InjectRedis() private readonly redis: Redis,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly publicWebRiskProvider: PublicWebRiskProviderService,
   ) {}
@@ -148,13 +155,11 @@ export class DeliveryTrustScoreService {
       case PhoneTrustLookupSourceEnum.INTERNAL_SHOP_POS:
         return 'POS nội bộ cửa hàng';
       case PhoneTrustLookupSourceEnum.PANCAKE_COMMUNITY_NETWORK:
-        return 'Cộng đồng liên shop & Pancake POS';
+        return 'Mạng lưới Cộng đồng liên shop';
       case PhoneTrustLookupSourceEnum.CARRIER_3PL_GHN_GHTK:
         return `ĐVVC 3PL (${carrierStr})`;
-      case PhoneTrustLookupSourceEnum.CUSTOM_EXTERNAL_WEBHOOK:
-        return 'API tín nhiệm mở rộng';
       default:
-        return `Cộng đồng + ${carrierStr}`;
+        return `Tự động Đa nguồn (Cộng đồng + ${carrierStr})`;
     }
   }
 
@@ -176,7 +181,7 @@ export class DeliveryTrustScoreService {
       case 'PANCAKE_COMMUNITY':
       case 'PANCAKE_V2':
       case 'PANCAKE_POS':
-        return 'Cộng đồng / Pancake POS';
+        return 'Cộng đồng liên shop';
       case 'CARRIER_3PL_GHN':
         return 'Giao Hàng Nhanh (GHN)';
       case 'CARRIER_3PL_GHTK':
@@ -187,8 +192,6 @@ export class DeliveryTrustScoreService {
         return 'J&T Express';
       case 'MARKETPLACE_SHOPEE':
         return 'Shopee / SPX';
-      case 'CUSTOM_WEBHOOK_PROVIDER':
-        return 'API đối tác tín nhiệm';
       default:
         return source || 'Hệ thống cảnh báo';
     }
@@ -247,8 +250,6 @@ export class DeliveryTrustScoreService {
         return 'CARRIER_3PL_JT';
       case 'MARKETPLACE_SHOPEE':
         return 'MARKETPLACE_SHOPEE';
-      case 'CUSTOM_WEBHOOK_PROVIDER':
-        return 'CUSTOM_WEBHOOK_PROVIDER';
       default:
         return 'PANCAKE_COMMUNITY';
     }
@@ -257,9 +258,7 @@ export class DeliveryTrustScoreService {
   public sortAndNormalizeAbuseReportsNewestFirst(
     rawReports?: Array<Partial<CustomerAbuseReportItem> & Record<string, any>> | null,
   ): CustomerAbuseReportItem[] {
-    if (!Array.isArray(rawReports) || rawReports.length === 0) {
-      return [];
-    }
+    if (!Array.isArray(rawReports) || rawReports.length === 0) return [];
 
     const deduplicatedMap = new Map<string, CustomerAbuseReportItem>();
 
@@ -286,7 +285,7 @@ export class DeliveryTrustScoreService {
       const reportId = String(
         item.reportId ||
           item.id ||
-          `rep_${sourceCode}_${orderCode || idx}_${normalizedIso.slice(0, 19)}`,
+          `rep_${sourceCode}_${trackingNumber || orderCode || idx}_${normalizedIso.slice(0, 19)}`,
       ).trim();
 
       const reasonCode = item.reasonCode ? String(item.reasonCode) : 'BOM_HANG';
@@ -338,8 +337,12 @@ export class DeliveryTrustScoreService {
         reportedAt: normalizedIso,
       };
 
-      if (!deduplicatedMap.has(reportId)) {
-        deduplicatedMap.set(reportId, normalizedItem);
+      const dedupeKey = trackingNumber
+        ? `track:${carrierCode || sourceCode}:${trackingNumber}`
+        : reportId;
+
+      if (!deduplicatedMap.has(dedupeKey)) {
+        deduplicatedMap.set(dedupeKey, normalizedItem);
       }
     }
 
@@ -350,11 +353,9 @@ export class DeliveryTrustScoreService {
     });
   }
 
-  private initSourceBreakdownMap(
-    hasCustomWebhook: boolean,
-  ): Map<DeliverySourceCodeType, DeliverySourceBreakdownItem> {
+  private initZeroConfigBreakdownMap(): Map<DeliverySourceCodeType, DeliverySourceBreakdownItem> {
     const map = new Map<DeliverySourceCodeType, DeliverySourceBreakdownItem>();
-    const allCodes: DeliverySourceCodeType[] = [
+    const activeCodes: DeliverySourceCodeType[] = [
       'INTERNAL_SHOP_POS',
       'PANCAKE_COMMUNITY',
       'CARRIER_3PL_VTP',
@@ -362,10 +363,9 @@ export class DeliveryTrustScoreService {
       'CARRIER_3PL_GHTK',
       'CARRIER_3PL_JT',
       'MARKETPLACE_SHOPEE',
-      'CUSTOM_WEBHOOK_PROVIDER',
     ];
 
-    for (const code of allCodes) {
+    for (const code of activeCodes) {
       const meta = SOURCE_META_MAP[code];
       map.set(code, {
         sourceCode: code,
@@ -376,8 +376,7 @@ export class DeliveryTrustScoreService {
         reportedCount: 0,
         successRatePercent: 100,
         confidenceWeight: meta.confidenceWeight,
-        status:
-          code === 'CUSTOM_WEBHOOK_PROVIDER' && !hasCustomWebhook ? 'NOT_CONFIGURED' : 'NO_RECORD',
+        status: 'NO_RECORD',
         lastUpdatedAt: null,
         diagnosticMessage: null,
         latencyMs: null,
@@ -400,12 +399,12 @@ export class DeliveryTrustScoreService {
   }
 
   /**
-   * Động cơ Tra cứu Uy tín SĐT Đa Nguồn Chuẩn Production (v2):
-   * - Tầng 1: Tổng hợp trực tiếp từ `PosOrderEntity` của chính cửa hàng hiện tại (không bỏ sót đơn DELIVERED / RETURNING).
-   * - Tầng 2: Tra cứu 1-1 không va chạm bằng `phoneGlobalHash` trên Sổ cái Cộng đồng (`phone_reputation_ledgers`)
-   *           và Bảng Báo cáo Xấu Có Kiểm Chứng (`community_phone_abuse_reports`).
-   * - Tầng 3: Gọi song song các Provider Adapter thực tế (Pancake POS Open API, GHN Live API, Custom/SuperAI Webhook)
-   *           qua `TrustProviderRegistryService` kèm Redis cache và chẩn đoán trạng thái từng nguồn.
+   * Động cơ Tra cứu Uy tín SĐT 100% Zero-Config (không yêu cầu chủ shop nhập bất kỳ khóa 3PL nào):
+   * - Lớp 1: Đơn hàng thực tế nội bộ (khớp cả `customerId` và SĐT giải mã chống sót đơn).
+   * - Lớp 2: Sổ cái Cộng đồng Liên Shop (`phone_reputation_ledgers` + `community_phone_abuse_reports`)
+   *          được tự động thu hoạch từ OMS & Webhook 3PL toàn hệ thống.
+   * - Lớp 3: 4 Cổng cộng đồng công khai miễn phí (GhetBomHang, ChongBomHang, CheckScam, ChongLuaDao).
+   * - Lớp 4: Cổng đối tác trung tâm ở tầng server (chạy ngầm nếu nền tảng có cấu hình sẵn).
    */
   public async lookupPhoneReputationFromSources(params: {
     shopId: string;
@@ -434,31 +433,13 @@ export class DeliveryTrustScoreService {
       ? this.piiVaultService.computeGlobalPhoneConsortiumHash(validPhone)
       : params.phoneGlobalHash || null;
 
+    const resolvedMasked = validPhone
+      ? this.piiVaultService.maskPhoneNumber(validPhone)
+      : params.phoneMasked || null;
+
     const cfg = params.config || {};
-    const overrideSet =
-      Array.isArray(params.overrideSources) && params.overrideSources.length > 0
-        ? new Set(params.overrideSources.map((s) => String(s).toUpperCase()))
-        : null;
-
-    const useInternal = cfg.useInternalPosHistory !== false;
-    const useCommunity = overrideSet
-      ? overrideSet.has('PANCAKE_COMMUNITY') || overrideSet.has('PANCAKE_COMMUNITY_NETWORK')
-      : cfg.usePancakeCommunityNetwork !== false;
-    const useCarrier3pl = overrideSet
-      ? overrideSet.has('CARRIER_3PL') || overrideSet.has('CARRIER_3PL_GHN_GHTK')
-      : cfg.useCarrier3plLookup !== false;
     const enabledCarriers = cfg.enabledCarriers || ['VTP', 'GHN', 'GHTK', 'JT'];
-
-    const effectiveWebhookUrl = (
-      params.overrideWebhookUrl ||
-      cfg.customLookupWebhookUrl ||
-      ''
-    ).trim();
-    const hasCustomWebhook = Boolean(
-      effectiveWebhookUrl && /^https?:\/\//i.test(effectiveWebhookUrl),
-    );
-
-    const breakdownMap = this.initSourceBreakdownMap(hasCustomWebhook);
+    const breakdownMap = this.initZeroConfigBreakdownMap();
     const diagnostics: PersistedTrustProviderDiagnosticItem[] = [];
     const collectedReports: Array<Partial<CustomerAbuseReportItem> & Record<string, any>> = [];
 
@@ -481,7 +462,7 @@ export class DeliveryTrustScoreService {
         phoneGlobalHash: null,
         hasPhoneIdentifier: false,
         warningMessage:
-          'Khách hàng chưa có số điện thoại gốc trong PII Vault. Hãy lưu SĐT để tra cứu lịch sử nhận/hoàn từ 3PL & Cộng đồng.',
+          'Khách hàng chưa có số điện thoại gốc. Hãy lưu SĐT để hệ thống tự động tra cứu uy tín nhận/hoàn.',
       };
     }
 
@@ -491,74 +472,101 @@ export class DeliveryTrustScoreService {
     let networkDeliveredCount = 0;
     let networkReturnedCount = 0;
 
-    // =========================================================================
-    // TẦNG 1: ĐỐI SOÁT ĐƠN HÀNG THỰC TẾ NỘI BỘ CỬA HÀNG (POS/OMS)
-    // =========================================================================
-    if (useInternal && currentShopId) {
+    // LỚP 1: ĐỐI SOÁT ĐƠN HÀNG THỰC TẾ NỘI BỘ CỬA HÀNG (CHỐNG SÓT ĐƠN RỜI)
+    if (cfg.useInternalPosHistory !== false && currentShopId) {
       const startedInternal = Date.now();
-      let resolvedCustomerId = params.customerId || null;
+      const matchedCustomerIds = new Set<string>();
+      if (params.customerId) matchedCustomerIds.add(params.customerId);
 
-      if (!resolvedCustomerId && (params.phoneSearchHash || resolvedGlobalHash)) {
-        const matchedCustomer = await this.customerRepo.findOne({
-          where: resolvedGlobalHash
-            ? { shopId: currentShopId, phoneGlobalHash: resolvedGlobalHash }
-            : { shopId: currentShopId, phoneSearchHash: params.phoneSearchHash! },
+      if (resolvedGlobalHash || params.phoneSearchHash) {
+        const matchedCustomers = await this.customerRepo.find({
+          where: [
+            ...(resolvedGlobalHash
+              ? [{ shopId: currentShopId, phoneGlobalHash: resolvedGlobalHash }]
+              : []),
+            ...(params.phoneSearchHash
+              ? [{ shopId: currentShopId, phoneSearchHash: params.phoneSearchHash }]
+              : []),
+          ],
+          take: 10,
         });
-        resolvedCustomerId = matchedCustomer?.id || null;
+        for (const c of matchedCustomers) matchedCustomerIds.add(c.id);
       }
 
-      if (resolvedCustomerId) {
-        const shopOrders = await this.posOrderRepo.find({
-          where: { shopId: currentShopId, customerId: resolvedCustomerId },
+      const orderMap = new Map<string, PosOrderEntity>();
+      if (matchedCustomerIds.size > 0) {
+        const byCustomerOrders = await this.posOrderRepo
+          .createQueryBuilder('o')
+          .where('o.shop_id = :shopId AND o.customer_id IN (:...customerIds)', {
+            shopId: currentShopId,
+            customerIds: Array.from(matchedCustomerIds),
+          })
+          .orderBy('o.created_at', 'DESC')
+          .take(250)
+          .getMany();
+        for (const ord of byCustomerOrders) orderMap.set(ord.id, ord);
+      }
+
+      if (validPhone && resolvedMasked) {
+        const unlinkedCandidates = await this.posOrderRepo.find({
+          where: { shopId: currentShopId, customerPhoneMasked: resolvedMasked },
           order: { createdAt: 'DESC' },
-          take: 200,
+          take: 100,
         });
-
-        const shopBucket = breakdownMap.get('INTERNAL_SHOP_POS')!;
-        for (const ord of shopOrders) {
-          const tsIso = new Date(ord.updatedAt || ord.createdAt || Date.now()).toISOString();
-          const carrierSource = this.mapCarrierOrChannelToSourceCode(
-            ord.carrierCode,
-            ord.channelType,
+        for (const ord of unlinkedCandidates) {
+          if (orderMap.has(ord.id) || !ord.customerPhoneEncrypted) continue;
+          const dec = this.piiVaultService.decryptPhoneInRam(
+            currentShopId,
+            ord.customerPhoneEncrypted,
           );
-          const carrierBucket =
-            carrierSource !== 'INTERNAL_SHOP_POS' ? breakdownMap.get(carrierSource) : null;
+          if (dec && this.piiVaultService.normalizeLocalVietnamesePhone(dec) === validPhone) {
+            orderMap.set(ord.id, ord);
+          }
+        }
+      }
 
-          if (
-            ord.status === PosOrderStatusEnum.DELIVERED ||
-            ord.status === PosOrderStatusEnum.DELIVERED_RECONCILED
-          ) {
-            shopDeliveredCount += 1;
-            shopBucket.deliveredCount += 1;
-            shopBucket.status = 'LOCAL_LEDGER';
-            shopBucket.lastUpdatedAt = shopBucket.lastUpdatedAt || tsIso;
+      const shopBucket = breakdownMap.get('INTERNAL_SHOP_POS')!;
+      for (const ord of orderMap.values()) {
+        const tsIso = new Date(ord.updatedAt || ord.createdAt || Date.now()).toISOString();
+        const carrierSource = this.mapCarrierOrChannelToSourceCode(
+          ord.carrierCode,
+          ord.channelType,
+        );
+        const carrierBucket =
+          carrierSource !== 'INTERNAL_SHOP_POS' ? breakdownMap.get(carrierSource) : null;
 
-            if (carrierBucket) {
-              carrierBucket.deliveredCount += 1;
-              carrierBucket.status = 'LOCAL_LEDGER';
-              carrierBucket.lastUpdatedAt = carrierBucket.lastUpdatedAt || tsIso;
-            }
-          } else if (
-            ord.status === PosOrderStatusEnum.RETURNING ||
-            ord.status === PosOrderStatusEnum.RETURNED_RESTOCKED
-          ) {
-            shopReturnedCount += 1;
-            shopBucket.returnedCount += 1;
-            shopBucket.status = 'LOCAL_LEDGER';
-            shopBucket.lastUpdatedAt = shopBucket.lastUpdatedAt || tsIso;
-
-            if (carrierBucket) {
-              carrierBucket.returnedCount += 1;
-              carrierBucket.status = 'LOCAL_LEDGER';
-              carrierBucket.lastUpdatedAt = carrierBucket.lastUpdatedAt || tsIso;
-            }
+        if (
+          ord.status === PosOrderStatusEnum.DELIVERED ||
+          ord.status === PosOrderStatusEnum.DELIVERED_RECONCILED
+        ) {
+          shopDeliveredCount += 1;
+          shopBucket.deliveredCount += 1;
+          shopBucket.status = 'LOCAL_LEDGER';
+          shopBucket.lastUpdatedAt = shopBucket.lastUpdatedAt || tsIso;
+          if (carrierBucket) {
+            carrierBucket.deliveredCount += 1;
+            carrierBucket.status = 'LOCAL_LEDGER';
+            carrierBucket.lastUpdatedAt = carrierBucket.lastUpdatedAt || tsIso;
+          }
+        } else if (
+          ord.status === PosOrderStatusEnum.RETURNING ||
+          ord.status === PosOrderStatusEnum.RETURNED_RESTOCKED
+        ) {
+          shopReturnedCount += 1;
+          shopBucket.returnedCount += 1;
+          shopBucket.status = 'LOCAL_LEDGER';
+          shopBucket.lastUpdatedAt = shopBucket.lastUpdatedAt || tsIso;
+          if (carrierBucket) {
+            carrierBucket.returnedCount += 1;
+            carrierBucket.status = 'LOCAL_LEDGER';
+            carrierBucket.lastUpdatedAt = carrierBucket.lastUpdatedAt || tsIso;
           }
         }
       }
 
       diagnostics.push({
         providerCode: 'INTERNAL_SHOP_OMS',
-        providerName: 'Sổ cái Đơn hàng Nội bộ (OMS/POS)',
+        providerName: 'Sổ cái Đơn hàng Nội bộ (Tự động)',
         status: shopDeliveredCount + shopReturnedCount > 0 ? 'LOCAL_LEDGER' : 'NO_RECORD',
         deliveredCount: shopDeliveredCount,
         returnedCount: shopReturnedCount,
@@ -568,15 +576,13 @@ export class DeliveryTrustScoreService {
         message:
           shopDeliveredCount + shopReturnedCount > 0
             ? `Đã khớp ${shopDeliveredCount} đơn giao thành công & ${shopReturnedCount} đơn hoàn tại cửa hàng.`
-            : 'Khách chưa có đơn giao thành công hoặc hoàn tại cửa hàng này.',
+            : 'Khách chưa phát sinh đơn giao thành công hoặc hoàn tại cửa hàng này.',
         checkedAt: new Date().toISOString(),
       });
     }
 
-    // =========================================================================
-    // TẦNG 2: MẠNG LƯỚI CỘNG ĐỒNG LIÊN SHOP (HMAC phoneGlobalHash — 0% VA CHẠM)
-    // =========================================================================
-    if (useCommunity && resolvedGlobalHash) {
+    // LỚP 2: MẠNG LƯỚI CỘNG ĐỒNG LIÊN SHOP (TỰ ĐỘNG THU HOẠCH OMS & WEBHOOK 3PL ĐA SHOP)
+    if (cfg.usePancakeCommunityNetwork !== false && resolvedGlobalHash) {
       const startedCommunity = Date.now();
       const [ledger, activeCommunityReports] = await Promise.all([
         this.ledgerRepo.findOne({ where: { phoneGlobalHash: resolvedGlobalHash } }),
@@ -591,7 +597,6 @@ export class DeliveryTrustScoreService {
       let otherShopsReturned = 0;
 
       if (ledger) {
-        // Loại trừ các đơn thuộc chính shop hiện tại bằng danh sách processedOrdersJson để chống đếm trùng
         const processed = Array.isArray(ledger.processedOrdersJson)
           ? ledger.processedOrdersJson
           : [];
@@ -618,8 +623,7 @@ export class DeliveryTrustScoreService {
             : new Date().toISOString();
         }
 
-        // Bổ sung phân rã 3PL từ các shop khác trong mạng lưới
-        if (useCarrier3pl && ledger.carrierBreakdownJson) {
+        if (ledger.carrierBreakdownJson) {
           for (const [carrierKey, counts] of Object.entries(ledger.carrierBreakdownJson)) {
             const targetCode = this.mapCarrierOrChannelToSourceCode(carrierKey, null);
             if (targetCode === 'INTERNAL_SHOP_POS') continue;
@@ -661,7 +665,7 @@ export class DeliveryTrustScoreService {
 
       diagnostics.push({
         providerCode: 'CROSS_SHOP_CONSORTIUM',
-        providerName: 'Mạng lưới Cộng đồng Liên Shop (HMAC-SHA256)',
+        providerName: 'Mạng lưới Cộng đồng & 3PL Liên Shop (Tự động)',
         status:
           otherShopsDelivered + otherShopsReturned + activeCommunityReports.length > 0
             ? 'COMMUNITY_SYNCED'
@@ -673,35 +677,26 @@ export class DeliveryTrustScoreService {
         fromCache: false,
         message:
           otherShopsDelivered + otherShopsReturned + activeCommunityReports.length > 0
-            ? `Khớp 1-1 qua HMAC: ${otherShopsDelivered} đơn nhận, ${otherShopsReturned} đơn hoàn, ${activeCommunityReports.length} báo xấu từ mạng lưới.`
+            ? `Khớp tự động: ${otherShopsDelivered} đơn nhận, ${otherShopsReturned} đơn hoàn, ${activeCommunityReports.length} báo xấu từ mạng lưới liên shop.`
             : 'SĐT này chưa có lịch sử giao nhận hoặc báo xấu trên mạng lưới liên shop.',
         checkedAt: new Date().toISOString(),
       });
     }
 
-    // =========================================================================
-    // TẦNG 3: TRA CỨU CỔNG CỘNG ĐỒNG CÔNG KHAI KHÔNG CẦN API KEY (ZERO-KEY)
-    // (ChongBomHang.com, GhetBomHang.com, CheckScam.vn — Redis Cache 30 phút)
-    // =========================================================================
-    let resolvedViaPublicWeb = false;
+    // LỚP 3: 4 CỔNG CỘNG ĐỒNG CÔNG KHAI MIỄN PHÍ KHÔNG CẦN KEY
     const enablePublicWeb =
-      params.enablePublicWebRiskLookup ??
-      (cfg as CrmTrustAndIndustryConfig)?.enablePublicWebRiskLookup ??
-      true;
-
+      params.enablePublicWebRiskLookup ?? cfg.enablePublicWebRiskLookup ?? true;
     if (enablePublicWeb && validPhone && resolvedGlobalHash) {
       const pubRes = await this.publicWebRiskProvider.queryPublicCommunityPortals({
         normalizedPhone: validPhone,
         phoneGlobalHash: resolvedGlobalHash,
         bypassCache: params.bypassCache,
       });
-
       diagnostics.push(...pubRes.diagnostics);
 
       const communityBucket = breakdownMap.get('PANCAKE_COMMUNITY')!;
       for (const hit of pubRes.hits) {
         if (hit.status === 'LIVE_VERIFIED' && hit.reports.length > 0) {
-          resolvedViaPublicWeb = true;
           communityBucket.status = 'LIVE_VERIFIED';
           communityBucket.lastUpdatedAt = hit.checkedAt;
           for (const rep of hit.reports) {
@@ -711,6 +706,47 @@ export class DeliveryTrustScoreService {
       }
     }
 
+    // LỚP 4: CỔNG ĐỐI TÁC TRUNG TÂM TẦNG HẠ TẦNG (CHẠY NGẦM NẾU SERVER CÓ CẤU HÌNH SẴN — 0 CẤU HÌNH TỪ SHOP)
+    const platformHubUrl = (process.env.PLATFORM_TRUST_COMMUNITY_GATEWAY_URL || '').trim();
+    if (
+      platformHubUrl &&
+      /^https?:\/\//i.test(platformHubUrl) &&
+      validPhone &&
+      resolvedGlobalHash
+    ) {
+      const hubHit = await this.queryManagedPlatformHubSilently({
+        url: platformHubUrl,
+        apiKey: (process.env.PLATFORM_TRUST_COMMUNITY_GATEWAY_API_KEY || '').trim() || null,
+        normalizedPhone: validPhone,
+        phoneGlobalHash: resolvedGlobalHash,
+        enabledCarriers,
+        bypassCache: params.bypassCache,
+      });
+
+      if (hubHit) {
+        diagnostics.push(hubHit.diagnostic);
+        if (hubHit.deliveredCount > 0 || hubHit.returnedCount > 0 || hubHit.reports.length > 0) {
+          const communityBucket = breakdownMap.get('PANCAKE_COMMUNITY')!;
+          const deltaDel = Math.max(0, hubHit.deliveredCount - communityBucket.deliveredCount);
+          const deltaRet = Math.max(0, hubHit.returnedCount - communityBucket.returnedCount);
+          networkDeliveredCount += deltaDel;
+          networkReturnedCount += deltaRet;
+          communityBucket.deliveredCount = Math.max(
+            communityBucket.deliveredCount,
+            hubHit.deliveredCount,
+          );
+          communityBucket.returnedCount = Math.max(
+            communityBucket.returnedCount,
+            hubHit.returnedCount,
+          );
+          communityBucket.status = 'LIVE_VERIFIED';
+          communityBucket.lastUpdatedAt = hubHit.diagnostic.checkedAt;
+          collectedReports.push(...hubHit.reports);
+        }
+      }
+    }
+
+    // HỢP NHẤT CUỐI CÙNG
     const sortedReasons = this.sortAndNormalizeAbuseReportsNewestFirst(collectedReports);
     const verifiedReportedCount = sortedReasons.filter((r) => r.isCarrierVerified).length;
 
@@ -743,16 +779,8 @@ export class DeliveryTrustScoreService {
 
     const warningMessage =
       totalAllSignals === 0
-        ? 'SĐT này hiện sạch (0 đơn nhận / 0 đơn hoàn / 0 báo xấu) trên OMS nội bộ, Sổ cái dữ liệu đã nạp và 3 cổng cộng đồng công khai.'
+        ? 'SĐT này hiện chưa ghi nhận đơn nhận, đơn hoàn hay cảnh báo xấu trên toàn bộ mạng lưới nội bộ, liên shop và 4 cổng cộng đồng công khai.'
         : null;
-
-    const sourceEnum = resolvedViaPublicWeb
-      ? PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE
-      : useCommunity && useCarrier3pl
-        ? PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE
-        : useCommunity
-          ? PhoneTrustLookupSourceEnum.PANCAKE_COMMUNITY_NETWORK
-          : PhoneTrustLookupSourceEnum.INTERNAL_SHOP_POS;
 
     return {
       shopDeliveredCount,
@@ -764,17 +792,149 @@ export class DeliveryTrustScoreService {
       reportedReasons: sortedReasons,
       sourceBreakdowns: this.finalizeBreakdownList(breakdownMap),
       providerDiagnostics: diagnostics,
-      lookupSource: sourceEnum,
-      lookupSourceLabel: this.resolveLookupSourceLabel(sourceEnum, enabledCarriers),
+      lookupSource: PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
+      lookupSourceLabel: this.resolveLookupSourceLabel(
+        PhoneTrustLookupSourceEnum.COMBINED_MULTI_SOURCE,
+        enabledCarriers,
+      ),
       phoneGlobalHash: resolvedGlobalHash,
       hasPhoneIdentifier: true,
       warningMessage,
     };
   }
 
-  /**
-   * Chấm điểm Uy tín Giao nhận (0–100) theo công thức Bayesian có trọng số + Time-Decay báo cáo xấu.
-   */
+  private async queryManagedPlatformHubSilently(params: {
+    url: string;
+    apiKey: string | null;
+    normalizedPhone: string;
+    phoneGlobalHash: string;
+    enabledCarriers: string[];
+    bypassCache?: boolean;
+  }): Promise<{
+    deliveredCount: number;
+    returnedCount: number;
+    reports: Array<Partial<CustomerAbuseReportItem> & Record<string, unknown>>;
+    diagnostic: PersistedTrustProviderDiagnosticItem;
+  } | null> {
+    const cacheKey = `trust:platform_hub:${params.phoneGlobalHash}`;
+    if (!params.bypassCache) {
+      try {
+        const cached = await this.redis.get(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          return {
+            ...parsed,
+            diagnostic: { ...parsed.diagnostic, fromCache: true },
+          };
+        }
+      } catch {
+        // Bỏ qua lỗi cache để tiếp tục tra cứu trực tiếp
+      }
+    }
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PLATFORM_HUB_TIMEOUT_MS);
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      };
+      if (params.apiKey) {
+        headers.Authorization = `Bearer ${params.apiKey}`;
+        headers['X-API-Key'] = params.apiKey;
+      }
+
+      const res = await fetch(params.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          phone: params.normalizedPhone,
+          phoneSha256: crypto.createHash('sha256').update(params.normalizedPhone).digest('hex'),
+          phoneGlobalHash: params.phoneGlobalHash,
+          enabledCarriers: params.enabledCarriers,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      const latencyMs = Date.now() - startedAt;
+      const checkedAt = new Date().toISOString();
+      if (!res.ok) {
+        return {
+          deliveredCount: 0,
+          returnedCount: 0,
+          reports: [],
+          diagnostic: {
+            providerCode: 'PLATFORM_MANAGED_HUB',
+            providerName: 'Cổng Đối Soát 3PL Trung Tâm (Tự động)',
+            status: 'PROVIDER_ERROR',
+            deliveredCount: 0,
+            returnedCount: 0,
+            reportedCount: 0,
+            latencyMs,
+            fromCache: false,
+            message: `Cổng trung tâm tạm gián đoạn (HTTP ${res.status}).`,
+            checkedAt,
+          },
+        };
+      }
+
+      const json = (await res.json().catch(() => ({}))) as Record<string, any>;
+      const node = json?.data ?? json;
+      const deliveredCount = Math.max(
+        0,
+        Number(node?.deliveredCount ?? node?.succeed_order_count ?? 0),
+      );
+      const returnedCount = Math.max(
+        0,
+        Number(node?.returnedCount ?? node?.returned_order_count ?? 0),
+      );
+      const reports = Array.isArray(node?.reportedReasons)
+        ? node.reportedReasons
+        : Array.isArray(node?.reports)
+          ? node.reports
+          : [];
+      const hasData = deliveredCount > 0 || returnedCount > 0 || reports.length > 0;
+
+      const payload = {
+        deliveredCount,
+        returnedCount,
+        reports,
+        diagnostic: {
+          providerCode: 'PLATFORM_MANAGED_HUB',
+          providerName: 'Cổng Đối Soát 3PL Trung Tâm (Tự động)',
+          status: hasData ? ('LIVE_VERIFIED' as const) : ('NO_RECORD' as const),
+          deliveredCount,
+          returnedCount,
+          reportedCount: reports.length,
+          latencyMs,
+          fromCache: false,
+          message: hasData
+            ? `Cổng trung tâm trả về ${deliveredCount} nhận / ${returnedCount} hoàn / ${reports.length} báo xấu.`
+            : 'Đã đối soát cổng trung tâm — chưa ghi nhận lịch sử cho SĐT này.',
+          checkedAt,
+        },
+      };
+
+      try {
+        await this.redis.set(
+          cacheKey,
+          JSON.stringify(payload),
+          'EX',
+          PLATFORM_HUB_CACHE_TTL_SECONDS,
+        );
+      } catch {
+        // Không làm gián đoạn luồng trả kết quả khi Redis bận
+      }
+      return payload;
+    } catch {
+      clearTimeout(timer);
+      return null;
+    }
+  }
+
   public evaluateCustomerTrustScore(params: {
     successfulDeliveriesCount: number;
     returnedOrdersCount: number;
@@ -906,7 +1066,7 @@ export class DeliveryTrustScoreService {
         badgeVariant: 'info',
         headline: 'Khách hàng mới (80/100)',
         recommendation:
-          'Chưa ghi nhận đơn nhận/hoàn hay báo xấu trên các nguồn đang kết nối — xác nhận rõ địa chỉ trước khi gửi.',
+          'Chưa ghi nhận đơn nhận/hoàn hay báo xấu — xác nhận rõ địa chỉ trước khi gửi.',
         requireDepositVietQr: false,
         successRatePercent: 100,
         returnRatePercent: 0,
@@ -988,7 +1148,7 @@ export class DeliveryTrustScoreService {
     reportedReasons: CustomerAbuseReportItem[];
     checkedAt: string;
   }): DeliverySourceBreakdownItem[] {
-    const map = this.initSourceBreakdownMap(false);
+    const map = this.initZeroConfigBreakdownMap();
     const shopBucket = map.get('INTERNAL_SHOP_POS')!;
     shopBucket.deliveredCount = params.shopDeliveredCount;
     shopBucket.returnedCount = params.shopReturnedCount;

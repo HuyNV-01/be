@@ -20,12 +20,15 @@ import { WarehouseEntity } from 'src/entity/warehouse.entity';
 import { ChatModule } from '../chat/chat.module';
 import { IamModule } from '../iam/iam.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PhoneTrustReputationController } from './controllers/phone-trust-reputation.controller';
 import { CrmController } from './crm.controller';
 import { AdsConversionSyncService } from './services/ads-conversion-sync.service';
+import { AutoReputationHarvesterService } from './services/auto-reputation-harvester.service';
 import { Customer360Service } from './services/customer-360.service';
 import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalty.service';
 import { DeliveryTrustScoreService } from './services/delivery-trust-score.service';
 import { PhoneReputationSyncService } from './services/phone-reputation-sync.service';
+import { PhoneTrustStandaloneService } from './services/phone-trust-standalone.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
 import { PublicWebRiskProviderService } from './services/public-web-risk-provider.service';
 import { VietnameseCommerceNerService } from './services/vietnamese-commerce-ner.service';
@@ -54,14 +57,16 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     NotificationsModule,
     forwardRef(() => ChatModule),
   ],
-  controllers: [CrmController],
+  controllers: [CrmController, PhoneTrustReputationController],
   providers: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
     PiiVaultAndAuditService,
     PublicWebRiskProviderService,
     PhoneReputationSyncService,
+    AutoReputationHarvesterService,
     DeliveryTrustScoreService,
+    PhoneTrustStandaloneService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,
@@ -72,7 +77,9 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     PiiVaultAndAuditService,
     PublicWebRiskProviderService,
     PhoneReputationSyncService,
+    AutoReputationHarvesterService,
     DeliveryTrustScoreService,
+    PhoneTrustStandaloneService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,

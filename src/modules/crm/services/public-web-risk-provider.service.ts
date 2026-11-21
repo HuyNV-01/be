@@ -8,7 +8,11 @@ import {
 } from 'src/entity/customer-profile.entity';
 
 export interface PublicWebRiskHit {
-  providerCode: 'PUBLIC_WEB_CHONGBOMHANG' | 'PUBLIC_WEB_GHETBOMHANG' | 'PUBLIC_WEB_CHECKSCAM';
+  providerCode:
+    | 'PUBLIC_WEB_GHETBOMHANG'
+    | 'PUBLIC_WEB_CHONGBOMHANG'
+    | 'PUBLIC_WEB_CHECKSCAM'
+    | 'PUBLIC_WEB_CHONGLUADAO';
   providerName: string;
   status: 'LIVE_VERIFIED' | 'NO_RECORD' | 'PROVIDER_ERROR';
   reportedCount: number;
@@ -25,9 +29,8 @@ const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 /**
- * Dịch vụ Tra cứu Cảnh báo Bom hàng / Lừa đảo Công khai KHÔNG CẦN API KEY (`Zero-Key Public Web Risk Providers`).
- * Truy vấn song song các cổng cộng đồng công khai tại Việt Nam (chongbomhang.com, ghetbomhang.com, checkscam.vn)
- * kèm Redis Cache 30 phút, Timeout cứng 3.5 giây và cơ chế cô lập lỗi để không bao giờ làm chậm luồng chat/POS.
+ * Dịch vụ Tra cứu Cộng đồng Công khai 100% Zero-Key (không yêu cầu bất kỳ API Key nào):
+ * GhetBomHang.com, ChongBomHang.com, CheckScam.vn và ChongLuaDao.info.
  */
 @Injectable()
 export class PublicWebRiskProviderService {
@@ -44,9 +47,62 @@ export class PublicWebRiskProviderService {
     diagnostics: PersistedTrustProviderDiagnosticItem[];
   }> {
     const tasks: Array<Promise<PublicWebRiskHit>> = [
-      this.queryChongBomHang(params),
-      this.queryGhetBomHang(params),
-      this.queryCheckScam(params),
+      this.queryPublicHtmlPortal({
+        providerCode: 'PUBLIC_WEB_GHETBOMHANG',
+        providerName: 'Cộng đồng GhetBomHang.com (Miễn phí)',
+        cachePrefix: 'ghetbomhang',
+        targetUrl: `https://ghetbomhang.com/?search=${encodeURIComponent(params.normalizedPhone)}`,
+        sourceLabel: 'GhetBomHang.com',
+        reportedByName: 'Cộng đồng GhetBomHang.com',
+        reasonCode: 'BOM_HANG',
+        severity: 'HIGH',
+        noResultPattern: /không tìm thấy|chưa có tố cáo|0 kết quả|chưa bị báo cáo/i,
+        normalizedPhone: params.normalizedPhone,
+        phoneGlobalHash: params.phoneGlobalHash,
+        bypassCache: params.bypassCache,
+      }),
+      this.queryPublicHtmlPortal({
+        providerCode: 'PUBLIC_WEB_CHONGBOMHANG',
+        providerName: 'Cộng đồng ChongBomHang.com (Miễn phí)',
+        cachePrefix: 'chongbomhang',
+        targetUrl: `https://chongbomhang.com/?s=${encodeURIComponent(params.normalizedPhone)}`,
+        sourceLabel: 'ChongBomHang.com',
+        reportedByName: 'Cộng đồng ChongBomHang.com',
+        reasonCode: 'BOM_HANG',
+        severity: 'HIGH',
+        noResultPattern: /không tìm thấy|chưa có dữ liệu|0 kết quả|no results/i,
+        normalizedPhone: params.normalizedPhone,
+        phoneGlobalHash: params.phoneGlobalHash,
+        bypassCache: params.bypassCache,
+      }),
+      this.queryPublicHtmlPortal({
+        providerCode: 'PUBLIC_WEB_CHECKSCAM',
+        providerName: 'Cộng đồng CheckScam.vn (Miễn phí)',
+        cachePrefix: 'checkscam',
+        targetUrl: `https://checkscam.vn/?s=${encodeURIComponent(params.normalizedPhone)}`,
+        sourceLabel: 'CheckScam.vn',
+        reportedByName: 'Cộng đồng CheckScam.vn',
+        reasonCode: 'BOOM_AO_SPAM',
+        severity: 'CRITICAL',
+        noResultPattern: /không tìm thấy|nothing found|0 kết quả|chưa có cảnh báo/i,
+        normalizedPhone: params.normalizedPhone,
+        phoneGlobalHash: params.phoneGlobalHash,
+        bypassCache: params.bypassCache,
+      }),
+      this.queryPublicHtmlPortal({
+        providerCode: 'PUBLIC_WEB_CHONGLUADAO',
+        providerName: 'Cộng đồng ChongLuaDao.info (Miễn phí)',
+        cachePrefix: 'chongluadao',
+        targetUrl: `https://chongluadao.info/search?q=${encodeURIComponent(params.normalizedPhone)}`,
+        sourceLabel: 'ChongLuaDao.info',
+        reportedByName: 'Cộng đồng ChongLuaDao.info',
+        reasonCode: 'BOOM_AO_SPAM',
+        severity: 'CRITICAL',
+        noResultPattern: /không tìm thấy|chưa có dữ liệu|0 kết quả|không có kết quả/i,
+        normalizedPhone: params.normalizedPhone,
+        phoneGlobalHash: params.phoneGlobalHash,
+        bypassCache: params.bypassCache,
+      }),
     ];
 
     const hits = await Promise.all(tasks);
@@ -66,267 +122,120 @@ export class PublicWebRiskProviderService {
     return { hits, diagnostics };
   }
 
-  private async queryChongBomHang(params: {
+  private async queryPublicHtmlPortal(params: {
+    providerCode:
+      | 'PUBLIC_WEB_GHETBOMHANG'
+      | 'PUBLIC_WEB_CHONGBOMHANG'
+      | 'PUBLIC_WEB_CHECKSCAM'
+      | 'PUBLIC_WEB_CHONGLUADAO';
+    providerName: string;
+    cachePrefix: string;
+    targetUrl: string;
+    sourceLabel: string;
+    reportedByName: string;
+    reasonCode: string;
+    severity: 'HIGH' | 'CRITICAL';
+    noResultPattern: RegExp;
     normalizedPhone: string;
     phoneGlobalHash: string;
     bypassCache?: boolean;
   }): Promise<PublicWebRiskHit> {
     const checkedAt = new Date().toISOString();
-    const cacheKey = `trust:public:chongbomhang:${params.phoneGlobalHash}`;
+    const cacheKey = `trust:public:${params.cachePrefix}:${params.phoneGlobalHash}`;
     if (!params.bypassCache) {
       const cached = await this.readCache<PublicWebRiskHit>(cacheKey);
       if (cached) return { ...cached, fromCache: true };
     }
 
     const startedAt = Date.now();
-    const targetUrl = `https://chongbomhang.com/?s=${encodeURIComponent(params.normalizedPhone)}`;
-    const html = await this.fetchHtmlSafely(targetUrl);
+    const fetchResult = await this.fetchHtmlSafely(params.targetUrl);
     const latencyMs = Date.now() - startedAt;
 
-    if (html === null) {
+    if (fetchResult.error || fetchResult.html === null) {
       return {
-        providerCode: 'PUBLIC_WEB_CHONGBOMHANG',
-        providerName: 'Cộng đồng ChongBomHang.com (Miễn phí)',
+        providerCode: params.providerCode,
+        providerName: params.providerName,
         status: 'PROVIDER_ERROR',
         reportedCount: 0,
         reports: [],
         latencyMs,
         fromCache: false,
-        message: 'Không thể kết nối chongbomhang.com (timeout hoặc tạm gián đoạn).',
+        message: fetchResult.error || `Tạm thời không thể kết nối ${params.sourceLabel}.`,
         checkedAt,
       };
     }
 
-    const normalizedHtml = this.stripScriptsAndStyles(html);
-    const exactMentions = this.countExactPhoneMentions(normalizedHtml, params.normalizedPhone);
-    const hasNoResultPhrase = /không tìm thấy|chưa có dữ liệu|0 kết quả|no results/i.test(
-      normalizedHtml,
-    );
+    if (this.isBotChallengePage(fetchResult.html)) {
+      return {
+        providerCode: params.providerCode,
+        providerName: params.providerName,
+        status: 'PROVIDER_ERROR',
+        reportedCount: 0,
+        reports: [],
+        latencyMs,
+        fromCache: false,
+        message: `${params.sourceLabel} đang bật bảo vệ Cloudflare — tạm bỏ qua cổng này và dùng dữ liệu các nguồn còn lại.`,
+        checkedAt,
+      };
+    }
+
+    // Loại bỏ input/meta/title trước khi đếm SĐT để không bị lệch do ô tìm kiếm lặp lại SĐT
+    const sanitizedText = this.stripNonContentHtml(fetchResult.html);
+    const exactMentions = this.countExactPhoneMentions(sanitizedText, params.normalizedPhone);
+    const hasNoResultPhrase = params.noResultPattern.test(sanitizedText);
 
     if (exactMentions === 0 || hasNoResultPhrase) {
       const noRec: PublicWebRiskHit = {
-        providerCode: 'PUBLIC_WEB_CHONGBOMHANG',
-        providerName: 'Cộng đồng ChongBomHang.com (Miễn phí)',
+        providerCode: params.providerCode,
+        providerName: params.providerName,
         status: 'NO_RECORD',
         reportedCount: 0,
         reports: [],
         latencyMs,
         fromCache: false,
-        message: 'Chưa ghi nhận bài tố cáo bom hàng nào trên chongbomhang.com.',
+        message: `Chưa ghi nhận tố cáo bom hàng / lừa đảo nào trên ${params.sourceLabel}.`,
         checkedAt,
       };
       await this.writeCache(cacheKey, noRec);
       return noRec;
     }
 
-    const snippet = this.extractContextSnippetAroundPhone(normalizedHtml, params.normalizedPhone);
+    const snippet = this.extractContextSnippetAroundPhone(sanitizedText, params.normalizedPhone);
     const reports = [
       {
-        reportId: `rep_pub_cbh_${params.phoneGlobalHash.slice(0, 12)}`,
-        reason: snippet || 'Số điện thoại xuất hiện trong danh sách cảnh báo bom hàng công khai.',
-        reasonCode: 'BOM_HANG',
-        reasonNote:
-          snippet ||
-          'Số điện thoại xuất hiện trong danh sách cảnh báo bom hàng trên chongbomhang.com.',
+        reportId: `rep_pub_${params.cachePrefix}_${params.phoneGlobalHash.slice(0, 12)}`,
+        reason: snippet || `SĐT có cảnh báo công khai trên ${params.sourceLabel}.`,
+        reasonCode: params.reasonCode,
+        reasonNote: snippet || `SĐT có cảnh báo công khai trên ${params.sourceLabel}.`,
         source: 'PANCAKE_COMMUNITY',
-        sourceLabel: 'ChongBomHang.com (Công khai)',
-        severity: 'HIGH' as const,
+        sourceLabel: params.sourceLabel,
+        severity: params.severity,
         isCarrierVerified: false,
         verificationLevel: 'SHOP_DECLARED' as const,
-        evidenceUrl: targetUrl,
-        reportedByName: 'Cộng đồng ChongBomHang.com',
+        evidenceUrl: params.targetUrl,
+        reportedByName: params.reportedByName,
         reportedAt: checkedAt,
       },
     ];
 
     const hit: PublicWebRiskHit = {
-      providerCode: 'PUBLIC_WEB_CHONGBOMHANG',
-      providerName: 'Cộng đồng ChongBomHang.com (Miễn phí)',
+      providerCode: params.providerCode,
+      providerName: params.providerName,
       status: 'LIVE_VERIFIED',
       reportedCount: Math.min(5, exactMentions),
       reports,
       latencyMs,
       fromCache: false,
-      message: `Phát hiện cảnh báo bom hàng công khai trên chongbomhang.com (${Math.min(5, exactMentions)} kết quả khớp SĐT).`,
+      message: `Phát hiện cảnh báo công khai trên ${params.sourceLabel} (${Math.min(5, exactMentions)} kết quả khớp SĐT).`,
       checkedAt,
     };
     await this.writeCache(cacheKey, hit);
     return hit;
   }
 
-  private async queryGhetBomHang(params: {
-    normalizedPhone: string;
-    phoneGlobalHash: string;
-    bypassCache?: boolean;
-  }): Promise<PublicWebRiskHit> {
-    const checkedAt = new Date().toISOString();
-    const cacheKey = `trust:public:ghetbomhang:${params.phoneGlobalHash}`;
-    if (!params.bypassCache) {
-      const cached = await this.readCache<PublicWebRiskHit>(cacheKey);
-      if (cached) return { ...cached, fromCache: true };
-    }
-
-    const startedAt = Date.now();
-    const targetUrl = `https://ghetbomhang.com/?search=${encodeURIComponent(params.normalizedPhone)}`;
-    const html = await this.fetchHtmlSafely(targetUrl);
-    const latencyMs = Date.now() - startedAt;
-
-    if (html === null) {
-      return {
-        providerCode: 'PUBLIC_WEB_GHETBOMHANG',
-        providerName: 'Cộng đồng GhetBomHang.com (Miễn phí)',
-        status: 'PROVIDER_ERROR',
-        reportedCount: 0,
-        reports: [],
-        latencyMs,
-        fromCache: false,
-        message: 'Không thể kết nối ghetbomhang.com (timeout hoặc tạm gián đoạn).',
-        checkedAt,
-      };
-    }
-
-    const normalizedHtml = this.stripScriptsAndStyles(html);
-    const exactMentions = this.countExactPhoneMentions(normalizedHtml, params.normalizedPhone);
-    const hasNoResultPhrase = /không tìm thấy|chưa có tố cáo|0 kết quả|chưa bị báo cáo/i.test(
-      normalizedHtml,
-    );
-
-    if (exactMentions === 0 || hasNoResultPhrase) {
-      const noRec: PublicWebRiskHit = {
-        providerCode: 'PUBLIC_WEB_GHETBOMHANG',
-        providerName: 'Cộng đồng GhetBomHang.com (Miễn phí)',
-        status: 'NO_RECORD',
-        reportedCount: 0,
-        reports: [],
-        latencyMs,
-        fromCache: false,
-        message: 'Chưa ghi nhận tố cáo bom hàng nào trên ghetbomhang.com.',
-        checkedAt,
-      };
-      await this.writeCache(cacheKey, noRec);
-      return noRec;
-    }
-
-    const snippet = this.extractContextSnippetAroundPhone(normalizedHtml, params.normalizedPhone);
-    const reports = [
-      {
-        reportId: `rep_pub_gbh_${params.phoneGlobalHash.slice(0, 12)}`,
-        reason: snippet || 'SĐT có cảnh báo bom hàng trên cổng công khai ghetbomhang.com.',
-        reasonCode: 'BOM_HANG',
-        reasonNote: snippet || 'SĐT có cảnh báo bom hàng trên ghetbomhang.com.',
-        source: 'PANCAKE_COMMUNITY',
-        sourceLabel: 'GhetBomHang.com (Công khai)',
-        severity: 'HIGH' as const,
-        isCarrierVerified: false,
-        verificationLevel: 'SHOP_DECLARED' as const,
-        evidenceUrl: targetUrl,
-        reportedByName: 'Cộng đồng GhetBomHang.com',
-        reportedAt: checkedAt,
-      },
-    ];
-
-    const hit: PublicWebRiskHit = {
-      providerCode: 'PUBLIC_WEB_GHETBOMHANG',
-      providerName: 'Cộng đồng GhetBomHang.com (Miễn phí)',
-      status: 'LIVE_VERIFIED',
-      reportedCount: Math.min(5, exactMentions),
-      reports,
-      latencyMs,
-      fromCache: false,
-      message: `Phát hiện cảnh báo công khai trên ghetbomhang.com (${Math.min(5, exactMentions)} kết quả khớp SĐT).`,
-      checkedAt,
-    };
-    await this.writeCache(cacheKey, hit);
-    return hit;
-  }
-
-  private async queryCheckScam(params: {
-    normalizedPhone: string;
-    phoneGlobalHash: string;
-    bypassCache?: boolean;
-  }): Promise<PublicWebRiskHit> {
-    const checkedAt = new Date().toISOString();
-    const cacheKey = `trust:public:checkscam:${params.phoneGlobalHash}`;
-    if (!params.bypassCache) {
-      const cached = await this.readCache<PublicWebRiskHit>(cacheKey);
-      if (cached) return { ...cached, fromCache: true };
-    }
-
-    const startedAt = Date.now();
-    const targetUrl = `https://checkscam.vn/?s=${encodeURIComponent(params.normalizedPhone)}`;
-    const html = await this.fetchHtmlSafely(targetUrl);
-    const latencyMs = Date.now() - startedAt;
-
-    if (html === null) {
-      return {
-        providerCode: 'PUBLIC_WEB_CHECKSCAM',
-        providerName: 'Cộng đồng CheckScam.vn (Miễn phí)',
-        status: 'PROVIDER_ERROR',
-        reportedCount: 0,
-        reports: [],
-        latencyMs,
-        fromCache: false,
-        message: 'Không thể kết nối checkscam.vn (timeout hoặc tạm gián đoạn).',
-        checkedAt,
-      };
-    }
-
-    const normalizedHtml = this.stripScriptsAndStyles(html);
-    const exactMentions = this.countExactPhoneMentions(normalizedHtml, params.normalizedPhone);
-    const hasNoResultPhrase = /không tìm thấy|nothing found|0 kết quả|chưa có cảnh báo/i.test(
-      normalizedHtml,
-    );
-
-    if (exactMentions === 0 || hasNoResultPhrase) {
-      const noRec: PublicWebRiskHit = {
-        providerCode: 'PUBLIC_WEB_CHECKSCAM',
-        providerName: 'Cộng đồng CheckScam.vn (Miễn phí)',
-        status: 'NO_RECORD',
-        reportedCount: 0,
-        reports: [],
-        latencyMs,
-        fromCache: false,
-        message: 'Chưa ghi nhận cảnh báo lừa đảo / bom hàng trên checkscam.vn.',
-        checkedAt,
-      };
-      await this.writeCache(cacheKey, noRec);
-      return noRec;
-    }
-
-    const snippet = this.extractContextSnippetAroundPhone(normalizedHtml, params.normalizedPhone);
-    const reports = [
-      {
-        reportId: `rep_pub_cs_${params.phoneGlobalHash.slice(0, 12)}`,
-        reason: snippet || 'SĐT xuất hiện trong bài cảnh báo công khai trên checkscam.vn.',
-        reasonCode: 'BOOM_AO_SPAM',
-        reasonNote: snippet || 'SĐT xuất hiện trong bài cảnh báo công khai trên checkscam.vn.',
-        source: 'PANCAKE_COMMUNITY',
-        sourceLabel: 'CheckScam.vn (Công khai)',
-        severity: 'CRITICAL' as const,
-        isCarrierVerified: false,
-        verificationLevel: 'SHOP_DECLARED' as const,
-        evidenceUrl: targetUrl,
-        reportedByName: 'Cộng đồng CheckScam.vn',
-        reportedAt: checkedAt,
-      },
-    ];
-
-    const hit: PublicWebRiskHit = {
-      providerCode: 'PUBLIC_WEB_CHECKSCAM',
-      providerName: 'Cộng đồng CheckScam.vn (Miễn phí)',
-      status: 'LIVE_VERIFIED',
-      reportedCount: Math.min(5, exactMentions),
-      reports,
-      latencyMs,
-      fromCache: false,
-      message: `Phát hiện cảnh báo công khai trên checkscam.vn (${Math.min(5, exactMentions)} kết quả khớp SĐT).`,
-      checkedAt,
-    };
-    await this.writeCache(cacheKey, hit);
-    return hit;
-  }
-
-  private async fetchHtmlSafely(url: string): Promise<string | null> {
+  private async fetchHtmlSafely(
+    url: string,
+  ): Promise<{ html: string | null; error: string | null }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PUBLIC_WEB_TIMEOUT_MS);
     try {
@@ -340,30 +249,42 @@ export class PublicWebRiskProviderService {
         signal: controller.signal,
       });
       clearTimeout(timer);
-      if (!res.ok) return null;
-      return await res.text();
+      if (res.status === 403 || res.status === 503) {
+        return { html: null, error: `Cổng công khai chặn truy cập tự động (HTTP ${res.status}).` };
+      }
+      if (!res.ok) {
+        return { html: null, error: `Cổng công khai phản hồi HTTP ${res.status}.` };
+      }
+      return { html: await res.text(), error: null };
     } catch {
       clearTimeout(timer);
-      return null;
+      return { html: null, error: 'Hết thời gian chờ kết nối cổng công khai (timeout 3.5s).' };
     }
   }
 
-  private stripScriptsAndStyles(html: string): string {
+  private isBotChallengePage(html: string): boolean {
+    return /cf-browser-verification|challenge-platform|just a moment\.\.\.|attention required!\s*\|\s*cloudflare/i.test(
+      html,
+    );
+  }
+
+  private stripNonContentHtml(html: string): string {
     return html
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<input[^>]*>/gi, ' ')
+      .replace(/<title[\s\S]*?<\/title>/gi, ' ')
+      .replace(/<meta[^>]*>/gi, ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   }
 
   private countExactPhoneMentions(plainText: string, normalizedPhone: string): number {
-    // Bỏ qua chuỗi SĐT xuất hiện trong ô input search lặp lại bằng cách đếm số lần xuất hiện vượt quá 1
     const escaped = normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`(?<!\\d)${escaped}(?!\\d)`, 'g');
     const matches = plainText.match(regex);
-    if (!matches) return 0;
-    return Math.max(0, matches.length - 1);
+    return matches ? matches.length : 0;
   }
 
   private extractContextSnippetAroundPhone(plainText: string, normalizedPhone: string): string {
