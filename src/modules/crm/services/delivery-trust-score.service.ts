@@ -2,14 +2,17 @@ import { Injectable } from '@nestjs/common';
 
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import Redis from 'ioredis';
-import { DeliveryTrustBandEnum, PhoneTrustLookupSourceEnum } from 'src/common/enum';
-import { DeliverySourceCodeEnum, TrustProviderStatusEnum } from 'src/common/enum/phone-trust.enum';
+import {
+  DeliverySourceCodeEnum,
+  DeliveryTrustBandEnum,
+  PhoneTrustLookupSourceEnum,
+  TrustProviderStatusEnum,
+} from 'src/common/enum';
 import { envs } from 'src/config/envs/envs';
 import { CustomerAbuseReportItem } from 'src/entity/customer-profile.entity';
 import { CrmTrustAndIndustryConfig } from 'src/entity/shop-workspace.entity';
 import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 
-import { PhoneTrustBlindIndexService } from './phone-trust-blind-index.service';
 import { PhoneTrustLedgerService } from './phone-trust-ledger.service';
 import {
   ExternalProviderLookupOutput,
@@ -98,7 +101,6 @@ export interface ExternalPhoneReputationLookupResult {
 export class DeliveryTrustScoreService {
   constructor(
     @InjectRedis() private readonly redis: Redis,
-    private readonly blindIndexService: PhoneTrustBlindIndexService,
     private readonly ledgerService: PhoneTrustLedgerService,
     private readonly providerAdapters: PhoneTrustProviderAdaptersService,
     private readonly messageCryptoService: MessageCryptoService,
@@ -131,15 +133,16 @@ export class DeliveryTrustScoreService {
     shopId: string;
     rawPhone: string;
     phoneMasked?: string | null;
+    phoneSearchHash?: string | null;
     customerId?: string | null;
     config?: Partial<CrmTrustAndIndustryConfig> | null;
     decryptedCustomApiKey?: string | null;
     bypassCache?: boolean;
   }): Promise<ExternalPhoneReputationLookupResult> {
-    const normalizedPhone = this.blindIndexService.normalizeVietnamesePhone(params.rawPhone);
+    const normalizedPhone = this.ledgerService.normalizeVietnamesePhone(params.rawPhone);
     const enabledCarriers = params.config?.enabledCarriers || ['GHN', 'GHTK', 'VTP', 'JT'];
 
-    if (!this.blindIndexService.isValidVietnamesePhone(normalizedPhone)) {
+    if (!this.ledgerService.isValidVietnamesePhone(normalizedPhone)) {
       return {
         shopDeliveredCount: 0,
         shopReturnedCount: 0,
@@ -161,7 +164,7 @@ export class DeliveryTrustScoreService {
       };
     }
 
-    const globalPhoneHash = this.blindIndexService.computeGlobalPhoneHash(normalizedPhone);
+    const globalPhoneHash = this.ledgerService.computeGlobalPhoneHash(normalizedPhone);
     const cacheKey = `trust:lookup:v2:${params.shopId}:${globalPhoneHash}`;
 
     if (!params.bypassCache) {

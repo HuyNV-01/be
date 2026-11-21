@@ -21,13 +21,11 @@ import { ChatModule } from '../chat/chat.module';
 import { IamModule } from '../iam/iam.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CarrierTrustWebhookController } from './controllers/carrier-trust-webhook.controller.tscarrier-trust-webhook.controller';
-import { PhoneTrustController } from './controllers/phone-trust.controller';
 import { CrmController } from './crm.controller';
 import { AdsConversionSyncService } from './services/ads-conversion-sync.service';
 import { Customer360Service } from './services/customer-360.service';
 import { CustomerRfmAndLoyaltyService } from './services/customer-rfm-and-loyalty.service';
 import { DeliveryTrustScoreService } from './services/delivery-trust-score.service';
-import { PhoneTrustBlindIndexService } from './services/phone-trust-blind-index.service';
 import { PhoneTrustLedgerService } from './services/phone-trust-ledger.service';
 import { PhoneTrustProviderAdaptersService } from './services/phone-trust-provider-adapters.service';
 import { PiiVaultAndAuditService } from './services/pii-vault-and-audit.service';
@@ -57,15 +55,14 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
     NotificationsModule,
     forwardRef(() => ChatModule),
   ],
-  controllers: [CrmController, PhoneTrustController, CarrierTrustWebhookController],
+  controllers: [CrmController, CarrierTrustWebhookController],
   providers: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    PhoneTrustBlindIndexService,
+    PiiVaultAndAuditService,
     PhoneTrustProviderAdaptersService,
     PhoneTrustLedgerService,
     DeliveryTrustScoreService,
-    PiiVaultAndAuditService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,
@@ -73,11 +70,10 @@ import { VnAdministrativeAddressCarrierService } from './services/vn-administrat
   exports: [
     VietnameseCommerceNerService,
     VnAdministrativeAddressCarrierService,
-    PhoneTrustBlindIndexService,
+    PiiVaultAndAuditService,
     PhoneTrustProviderAdaptersService,
     PhoneTrustLedgerService,
     DeliveryTrustScoreService,
-    PiiVaultAndAuditService,
     AdsConversionSyncService,
     CustomerRfmAndLoyaltyService,
     Customer360Service,

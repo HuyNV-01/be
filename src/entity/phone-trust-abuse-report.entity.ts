@@ -3,7 +3,7 @@ import {
   PhoneTrustAbuseSeverityEnum,
   PhoneTrustReportStatusEnum,
   PhoneTrustVerificationLevelEnum,
-} from 'src/common/enum/phone-trust.enum';
+} from 'src/common/enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';

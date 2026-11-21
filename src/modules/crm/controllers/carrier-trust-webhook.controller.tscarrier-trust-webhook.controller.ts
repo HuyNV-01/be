@@ -13,10 +13,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import * as crypto from 'crypto';
-import {
-  PhoneTrustEventOutcomeEnum,
-  PhoneTrustVerificationLevelEnum,
-} from 'src/common/enum/phone-trust.enum';
+import { PhoneTrustEventOutcomeEnum, PhoneTrustVerificationLevelEnum } from 'src/common/enum';
 import { envs } from 'src/config/envs/envs';
 
 import { PhoneTrustLedgerService } from '../services/phone-trust-ledger.service';

@@ -4,14 +4,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
 import Redis from 'ioredis';
-import { SecurityAuditActionCodeEnum } from 'src/common/enum';
 import {
   PhoneTrustAbuseReasonCodeEnum,
   PhoneTrustAbuseSeverityEnum,
   PhoneTrustEventOutcomeEnum,
   PhoneTrustReportStatusEnum,
   PhoneTrustVerificationLevelEnum,
-} from 'src/common/enum/phone-trust.enum';
+  SecurityAuditActionCodeEnum,
+} from 'src/common/enum';
+import { envs } from 'src/config/envs/envs';
 import { CustomerAbuseReportItem, CustomerProfileEntity } from 'src/entity/customer-profile.entity';
 import { PhoneTrustAbuseReportEntity } from 'src/entity/phone-trust-abuse-report.entity';
 import { PhoneTrustDeliveryEventEntity } from 'src/entity/phone-trust-delivery-event.entity';
@@ -24,7 +25,6 @@ import { UserEntity } from 'src/entity/user.entity';
 import { MessageCryptoService } from 'src/modules/chat/services/message-crypto.service';
 import { DataSource, Repository } from 'typeorm';
 
-import { PhoneTrustBlindIndexService } from './phone-trust-blind-index.service';
 import { PhoneTrustProviderAdaptersService } from './phone-trust-provider-adapters.service';
 import { PiiVaultAndAuditService } from './pii-vault-and-audit.service';
 
@@ -97,11 +97,41 @@ export class PhoneTrustLedgerService {
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
     @InjectRedis() private readonly redis: Redis,
-    private readonly blindIndexService: PhoneTrustBlindIndexService,
     private readonly providerAdapters: PhoneTrustProviderAdaptersService,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly messageCryptoService: MessageCryptoService,
   ) {}
+
+  public normalizeVietnamesePhone(rawPhone?: string | null): string {
+    const digits = String(rawPhone || '').replace(/\D/g, '');
+    if (digits.startsWith('84') && digits.length === 11) {
+      return `0${digits.slice(2)}`;
+    }
+    if (digits.startsWith('0084') && digits.length === 13) {
+      return `0${digits.slice(4)}`;
+    }
+    return digits;
+  }
+
+  public isValidVietnamesePhone(normalizedPhone: string): boolean {
+    return /^0(?:3|5|7|8|9)\d{8}$/.test(normalizedPhone) || /^02\d{8,9}$/.test(normalizedPhone);
+  }
+
+  public maskPhone(rawPhone?: string | null): string {
+    return this.piiVaultService.maskPhoneNumber(this.normalizeVietnamesePhone(rawPhone)) || '***';
+  }
+
+  /**
+   * Computes a platform-wide blind index separated from shop-specific PII salts,
+   * enabling cross-shop reputation aggregation without storing plaintext buyer numbers.
+   */
+  public computeGlobalPhoneHash(rawPhone: string): string {
+    const normalized = this.normalizeVietnamesePhone(rawPhone);
+    return crypto
+      .createHmac('sha256', envs.phoneTrust.globalBlindPepper)
+      .update(normalized)
+      .digest('hex');
+  }
 
   private async invalidateLookupCacheByGlobalHash(globalPhoneHash: string): Promise<void> {
     try {
@@ -128,13 +158,13 @@ export class PhoneTrustLedgerService {
     globalPhoneHash: string;
     inserted: boolean;
   }> {
-    const normalizedPhone = this.blindIndexService.normalizeVietnamesePhone(params.rawPhone);
-    if (!this.blindIndexService.isValidVietnamesePhone(normalizedPhone)) {
+    const normalizedPhone = this.normalizeVietnamesePhone(params.rawPhone);
+    if (!this.isValidVietnamesePhone(normalizedPhone)) {
       throw new BadRequestException('INVALID_VIETNAMESE_PHONE_NUMBER');
     }
 
-    const globalPhoneHash = this.blindIndexService.computeGlobalPhoneHash(normalizedPhone);
-    const phoneMasked = this.blindIndexService.maskPhone(normalizedPhone);
+    const globalPhoneHash = this.computeGlobalPhoneHash(normalizedPhone);
+    const phoneMasked = this.maskPhone(normalizedPhone);
 
     const existing = await this.deliveryEventRepo.findOne({
       where: {
@@ -314,7 +344,7 @@ export class PhoneTrustLedgerService {
     normalizedPhone: string;
     includeConsortium: boolean;
   }): Promise<LedgerQuerySnapshot> {
-    const globalPhoneHash = this.blindIndexService.computeGlobalPhoneHash(params.normalizedPhone);
+    const globalPhoneHash = this.computeGlobalPhoneHash(params.normalizedPhone);
 
     const [shopEvents, globalAggregate, allActiveReports] = await Promise.all([
       this.deliveryEventRepo.find({
@@ -427,8 +457,8 @@ export class PhoneTrustLedgerService {
     phoneMasked: string;
     globalPhoneHash: string;
   }> {
-    const normalizedPhone = this.blindIndexService.normalizeVietnamesePhone(params.rawPhone);
-    if (!this.blindIndexService.isValidVietnamesePhone(normalizedPhone)) {
+    const normalizedPhone = this.normalizeVietnamesePhone(params.rawPhone);
+    if (!this.isValidVietnamesePhone(normalizedPhone)) {
       throw new BadRequestException('INVALID_VIETNAMESE_PHONE_NUMBER');
     }
 
@@ -441,8 +471,8 @@ export class PhoneTrustLedgerService {
       throw new NotFoundException('SHOP_WORKSPACE_NOT_FOUND');
     }
 
-    const globalPhoneHash = this.blindIndexService.computeGlobalPhoneHash(normalizedPhone);
-    const phoneMasked = this.blindIndexService.maskPhone(normalizedPhone);
+    const globalPhoneHash = this.computeGlobalPhoneHash(normalizedPhone);
+    const phoneMasked = this.maskPhone(normalizedPhone);
     const shareWithConsortium =
       shop.crmTrustAndIndustryConfigJson?.consortiumSharingEnabled !== false;
 
@@ -656,8 +686,8 @@ export class PhoneTrustLedgerService {
       const rawPhone = this.piiVaultService.decryptPhoneInRam(shopId, customer.phoneEncrypted);
       if (!rawPhone) continue;
 
-      const normalized = this.blindIndexService.normalizeVietnamesePhone(rawPhone);
-      if (!this.blindIndexService.isValidVietnamesePhone(normalized)) continue;
+      const normalized = this.normalizeVietnamesePhone(rawPhone);
+      if (!this.isValidVietnamesePhone(normalized)) continue;
 
       const occurredAt = customer.lastOrderAt || customer.updatedAt || new Date();
       const deliveredCount = Math.min(
@@ -731,8 +761,8 @@ export class PhoneTrustLedgerService {
 
     for (let idx = 0; idx < params.rows.length; idx += 1) {
       const row = params.rows[idx];
-      const normalized = this.blindIndexService.normalizeVietnamesePhone(row.rawPhone);
-      if (!this.blindIndexService.isValidVietnamesePhone(normalized)) {
+      const normalized = this.normalizeVietnamesePhone(row.rawPhone);
+      if (!this.isValidVietnamesePhone(normalized)) {
         skippedInvalidRows += 1;
         continue;
       }

@@ -7,12 +7,15 @@ import {
   AdsConversionPlatformEnum,
   ChannelTypeEnum,
   CustomerTierEnum,
+  PhoneTrustAbuseReasonCodeEnum,
   PhoneTrustLookupSourceEnum,
+  PhoneTrustReportStatusEnum,
   RfmSegmentCodeEnum,
   SecurityAuditActionCodeEnum,
   ShopBusinessCategoryEnum,
 } from 'src/common/enum';
 import { RealtimeEmitterService } from 'src/common/websocket/realtime-emitter.service';
+import { envs } from 'src/config/envs/envs';
 import { SOCKET_CONFIG } from 'src/config/websocket/socket.config';
 import {
   CustomerListQueryDto,
@@ -49,6 +52,8 @@ import {
   DeliveryTrustEvaluationResult,
   DeliveryTrustScoreService,
 } from './delivery-trust-score.service';
+import { PhoneTrustLedgerService } from './phone-trust-ledger.service';
+import { PhoneTrustProviderAdaptersService } from './phone-trust-provider-adapters.service';
 import { PiiVaultAndAuditService } from './pii-vault-and-audit.service';
 import { VietnameseCommerceNerService } from './vietnamese-commerce-ner.service';
 
@@ -157,6 +162,8 @@ export class Customer360Service {
     private readonly shopRepo: Repository<ShopWorkspaceEntity>,
     private readonly nerService: VietnameseCommerceNerService,
     private readonly trustScoreService: DeliveryTrustScoreService,
+    private readonly trustLedgerService: PhoneTrustLedgerService,
+    private readonly trustAdaptersService: PhoneTrustProviderAdaptersService,
     private readonly piiVaultService: PiiVaultAndAuditService,
     private readonly rfmService: CustomerRfmAndLoyaltyService,
     private readonly adsConversionSyncService: AdsConversionSyncService,
@@ -880,6 +887,175 @@ export class Customer360Service {
       existingCustomerName: existingCustomer?.fullName || null,
       trustEvaluation,
       warningMessage: lookupResult.warningMessage,
+    };
+  }
+
+  /**
+   * Gửi báo xấu độc lập theo SĐT (chống trùng lặp + xác minh mã vận đơn GHN/GHTK nếu có)
+   * và trả về kết quả đánh giá uy tín mới nhất.
+   */
+  public async submitStandalonePhoneAbuseReport(params: {
+    shopId: string;
+    actorUserId: string;
+    rawPhone: string;
+    reasonCode: PhoneTrustAbuseReasonCodeEnum;
+    reasonNote: string;
+    carrierCode?: string;
+    orderCode?: string;
+    trackingNumber?: string;
+    evidenceUrl?: string;
+    markBlacklisted?: boolean;
+  }): Promise<{
+    reportId: string;
+    phoneMasked: string;
+    verificationLevel: string;
+    isCarrierVerified: boolean;
+    trustEvaluation: DeliveryTrustEvaluationResult;
+  }> {
+    const { report, phoneMasked } = await this.trustLedgerService.submitAbuseReport({
+      shopId: params.shopId,
+      actorUserId: params.actorUserId,
+      rawPhone: params.rawPhone,
+      reasonCode: params.reasonCode,
+      reasonNote: params.reasonNote,
+      carrierCode: params.carrierCode,
+      orderCode: params.orderCode,
+      trackingNumber: params.trackingNumber,
+      evidenceUrl: params.evidenceUrl,
+      markBlacklisted: params.markBlacklisted,
+    });
+
+    const refreshed = await this.lookupStandalonePhoneTrust({
+      shopId: params.shopId,
+      rawPhone: params.rawPhone,
+      bypassCache: true,
+    });
+
+    return {
+      reportId: report.id,
+      phoneMasked,
+      verificationLevel: report.verificationLevel,
+      isCarrierVerified: report.isCarrierVerified,
+      trustEvaluation: refreshed.trustEvaluation,
+    };
+  }
+
+  /**
+   * Rút lại báo xấu SĐT đã gửi bởi cửa hàng, cập nhật lại sổ cái mạng lưới liên shop
+   * và đồng bộ ngay trên hồ sơ khách hàng nếu có customerId.
+   */
+  public async retractCustomerPhoneAbuseReport(params: {
+    shopId: string;
+    customerId?: string;
+    reportId: string;
+    actorUserId: string;
+    reason: string;
+  }): Promise<{
+    reportId: string;
+    status: PhoneTrustReportStatusEnum;
+    retractedAt: Date | null;
+    customer?: (CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult }) | null;
+  }> {
+    const retracted = await this.trustLedgerService.retractAbuseReport({
+      shopId: params.shopId,
+      reportId: params.reportId,
+      actorUserId: params.actorUserId,
+      reason: params.reason,
+    });
+
+    let updatedCustomer:
+      | (CustomerProfileEntity & { trustEvaluation: DeliveryTrustEvaluationResult })
+      | null = null;
+
+    if (params.customerId) {
+      const customer = await this.customerRepo.findOne({
+        where: { id: params.customerId, shopId: params.shopId },
+      });
+      if (customer) {
+        const crmConfig = await this.getShopCrmTrustAndIndustryConfig(params.shopId);
+        const remainingReports = Array.isArray(customer.reportedReasonsJson)
+          ? customer.reportedReasonsJson.filter((item) => item.reportId !== params.reportId)
+          : [];
+        customer.reportedReasonsJson = remainingReports;
+        customer.reportedCount = Math.max(0, Number(customer.reportedCount || 0) - 1);
+
+        const evalRes = this.trustScoreService.evaluateCustomerTrustScore({
+          successfulDeliveriesCount: customer.successfulDeliveriesCount,
+          returnedOrdersCount: customer.returnedOrdersCount,
+          networkDeliveredCount: customer.networkDeliveredCount,
+          networkReturnedCount: customer.networkReturnedCount,
+          reportedCount: customer.reportedCount,
+          reportedReasons: customer.reportedReasonsJson,
+          isBlacklisted: customer.isBlacklisted,
+          shopRequireDepositOnHighRisk: crmConfig.requireDepositOnHighRisk,
+          highRiskReturnRateThresholdPercent: crmConfig.highRiskReturnRateThresholdPercent,
+          highRiskReportedCountThreshold: crmConfig.highRiskReportedCountThreshold,
+          autoRequireDepositBelowTrustScore: crmConfig.autoRequireDepositBelowTrustScore,
+          lookupSource: customer.trustLookupSource,
+          enabledCarriers: crmConfig.enabledCarriers,
+        });
+        customer.deliveryTrustScore = evalRes.score;
+        const saved = await this.customerRepo.save(customer);
+        updatedCustomer = this.enrichCustomerWithTrustEvaluation(
+          saved,
+          crmConfig.requireDepositOnHighRisk,
+          crmConfig,
+        );
+      }
+    }
+
+    return {
+      reportId: retracted.id,
+      status: retracted.status,
+      retractedAt: retracted.retractedAt,
+      customer: updatedCustomer,
+    };
+  }
+
+  public async backfillShopTrustLedger(shopId: string): Promise<{
+    scannedCustomers: number;
+    insertedEvents: number;
+  }> {
+    return this.trustLedgerService.backfillShopCustomerProfilesToLedger(shopId);
+  }
+
+  public async importPhoneTrustHistory(params: {
+    shopId: string;
+    actorUserId: string;
+    rows: Array<{
+      rawPhone: string;
+      deliveredCount?: number;
+      returnedCount?: number;
+      carrierCode?: string;
+      orderCode?: string;
+      trackingNumber?: string;
+      abuseReasonNote?: string;
+      abuseReasonCode?: PhoneTrustAbuseReasonCodeEnum;
+    }>;
+  }): Promise<{
+    processedRows: number;
+    insertedEvents: number;
+    submittedReports: number;
+    skippedInvalidRows: number;
+  }> {
+    return this.trustLedgerService.importHistoricalRows(params);
+  }
+
+  public async getPlatformTrustGatewayStatus(): Promise<{
+    isConfigured: boolean;
+    providerName: string;
+    circuitOpen: boolean;
+    cacheTtlSeconds: number;
+  }> {
+    const isConfigured = Boolean(envs.phoneTrust.communityGatewayUrl);
+    const circuitOpen = isConfigured
+      ? await this.trustAdaptersService.isCircuitOpen('PLATFORM_COMMUNITY_GATEWAY')
+      : false;
+    return {
+      isConfigured,
+      providerName: envs.phoneTrust.communityGatewayProviderName,
+      circuitOpen,
+      cacheTtlSeconds: envs.phoneTrust.cacheTtlSeconds,
     };
   }
 

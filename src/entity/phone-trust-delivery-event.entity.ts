@@ -1,7 +1,4 @@
-import {
-  PhoneTrustEventOutcomeEnum,
-  PhoneTrustVerificationLevelEnum,
-} from 'src/common/enum/phone-trust.enum';
+import { PhoneTrustEventOutcomeEnum, PhoneTrustVerificationLevelEnum } from 'src/common/enum';
 import { Column, Entity, Index } from 'typeorm';
 
 import { BaseModel } from './base-model';

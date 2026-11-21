@@ -1,15 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { InjectRedis } from '@nestjs-modules/ioredis';
 import * as crypto from 'crypto';
+import Redis from 'ioredis';
+import * as net from 'net';
 import {
   DeliverySourceCodeEnum,
   PhoneTrustVerificationLevelEnum,
   TrustProviderStatusEnum,
-} from 'src/common/enum/phone-trust.enum';
+} from 'src/common/enum';
 import { envs } from 'src/config/envs/envs';
 import { CustomerAbuseReportItem } from 'src/entity/customer-profile.entity';
 
-import { PhoneTrustBlindIndexService } from './phone-trust-blind-index.service';
+import { PiiVaultAndAuditService } from './pii-vault-and-audit.service';
 
 export interface ExternalProviderLookupOutput {
   providerCode: string;
@@ -46,7 +49,104 @@ export interface TrackingVerificationResult {
 export class PhoneTrustProviderAdaptersService {
   private readonly logger = new Logger(PhoneTrustProviderAdaptersService.name);
 
-  constructor(private readonly blindIndexService: PhoneTrustBlindIndexService) {}
+  constructor(
+    @InjectRedis() private readonly redis: Redis,
+    private readonly piiVaultService: PiiVaultAndAuditService,
+  ) {}
+
+  public computeRawSha256(rawPhone: string): string {
+    const normalized = this.piiVaultService.normalizeLocalVietnamesePhone(rawPhone);
+    return crypto.createHash('sha256').update(normalized).digest('hex');
+  }
+
+  /**
+   * Blocks private, loopback, and link-local destinations so sellers cannot abuse
+   * custom lookup webhooks to probe internal cloud metadata or LAN services.
+   */
+  public assertSafeExternalWebhookUrl(rawUrl: string): URL {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl.trim());
+    } catch {
+      throw new Error('INVALID_EXTERNAL_WEBHOOK_URL');
+    }
+
+    if (parsed.protocol !== 'https:' && (envs.isProduction || parsed.protocol !== 'http:')) {
+      throw new Error('EXTERNAL_WEBHOOK_MUST_USE_HTTPS');
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname.endsWith('.local') ||
+      hostname.endsWith('.internal') ||
+      hostname === 'metadata.google.internal'
+    ) {
+      throw new Error('EXTERNAL_WEBHOOK_PRIVATE_HOST_BLOCKED');
+    }
+
+    if (net.isIP(hostname) && this.isPrivateIpAddress(hostname)) {
+      throw new Error('EXTERNAL_WEBHOOK_PRIVATE_IP_BLOCKED');
+    }
+
+    return parsed;
+  }
+
+  private isPrivateIpAddress(ip: string): boolean {
+    if (ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:')) {
+      return true;
+    }
+    const octets = ip.split('.').map((part) => Number(part));
+    if (octets.length !== 4 || octets.some((n) => Number.isNaN(n))) {
+      return true;
+    }
+    const [a, b] = octets;
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+
+  public async isCircuitOpen(providerKey: string): Promise<boolean> {
+    try {
+      return (await this.redis.get(`trust:cb:open:${providerKey}`)) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  public async recordProviderSuccess(providerKey: string): Promise<void> {
+    try {
+      await this.redis.del(`trust:cb:fail:${providerKey}`, `trust:cb:open:${providerKey}`);
+    } catch {
+      // Cache failure must not interrupt trust lookup pipeline.
+    }
+  }
+
+  public async recordProviderFailure(providerKey: string): Promise<void> {
+    try {
+      const failKey = `trust:cb:fail:${providerKey}`;
+      const failures = await this.redis.incr(failKey);
+      if (failures === 1) {
+        await this.redis.expire(failKey, envs.phoneTrust.circuitBreakerCooldownSeconds * 2);
+      }
+      if (failures >= envs.phoneTrust.circuitBreakerFailureThreshold) {
+        await this.redis.set(
+          `trust:cb:open:${providerKey}`,
+          '1',
+          'EX',
+          envs.phoneTrust.circuitBreakerCooldownSeconds,
+        );
+        this.logger.warn(
+          `Circuit breaker opened for trust provider "${providerKey}" after ${failures} failures`,
+        );
+      }
+    } catch {
+      // Cache failure must not interrupt trust lookup pipeline.
+    }
+  }
 
   /**
    * Queries the platform-level Partner / Aggregator Gateway configured via
@@ -83,7 +183,7 @@ export class PhoneTrustProviderAdaptersService {
       };
     }
 
-    if (await this.blindIndexService.isCircuitOpen(providerCode)) {
+    if (await this.isCircuitOpen(providerCode)) {
       return {
         providerCode,
         providerName,
@@ -112,7 +212,7 @@ export class PhoneTrustProviderAdaptersService {
 
     try {
       const timestamp = String(Math.floor(Date.now() / 1000));
-      const phoneSha256 = this.blindIndexService.computeRawSha256(params.normalizedPhone);
+      const phoneSha256 = this.computeRawSha256(params.normalizedPhone);
       const payloadObj: Record<string, unknown> = {
         phoneSha256,
         globalPhoneHash: params.globalPhoneHash,
@@ -150,7 +250,7 @@ export class PhoneTrustProviderAdaptersService {
 
       const latencyMs = Date.now() - startedAt;
       if (!response.ok) {
-        await this.blindIndexService.recordProviderFailure(providerCode);
+        await this.recordProviderFailure(providerCode);
         return {
           providerCode,
           providerName,
@@ -226,7 +326,7 @@ export class PhoneTrustProviderAdaptersService {
           reportedAt: String(item.reportedAt || item.createdAt || checkedAt),
         }));
 
-      await this.blindIndexService.recordProviderSuccess(providerCode);
+      await this.recordProviderSuccess(providerCode);
       const hasAnyRecord = deliveredCount > 0 || returnedCount > 0 || reportedCount > 0;
 
       return {
@@ -251,7 +351,7 @@ export class PhoneTrustProviderAdaptersService {
       };
     } catch (error) {
       clearTimeout(timeoutId);
-      await this.blindIndexService.recordProviderFailure(providerCode);
+      await this.recordProviderFailure(providerCode);
       const isAbort = error instanceof Error && error.name === 'AbortError';
       return {
         providerCode,
@@ -308,7 +408,7 @@ export class PhoneTrustProviderAdaptersService {
     }
 
     const cbKey = `${providerCode}:${params.pancakePosShopId}`;
-    if (await this.blindIndexService.isCircuitOpen(cbKey)) {
+    if (await this.isCircuitOpen(cbKey)) {
       return {
         providerCode,
         providerName,
@@ -350,7 +450,7 @@ export class PhoneTrustProviderAdaptersService {
 
       const latencyMs = Date.now() - startedAt;
       if (!response.ok) {
-        await this.blindIndexService.recordProviderFailure(cbKey);
+        await this.recordProviderFailure(cbKey);
         return {
           providerCode,
           providerName,
@@ -383,11 +483,11 @@ export class PhoneTrustProviderAdaptersService {
         }>;
       };
 
-      await this.blindIndexService.recordProviderSuccess(cbKey);
+      await this.recordProviderSuccess(cbKey);
 
       const matched = (json.data || []).find((item) =>
         (item.phone_numbers || []).some(
-          (p) => this.blindIndexService.normalizeVietnamesePhone(p) === params.normalizedPhone,
+          (p) => this.piiVaultService.normalizeLocalVietnamesePhone(p) === params.normalizedPhone,
         ),
       );
 
@@ -450,7 +550,7 @@ export class PhoneTrustProviderAdaptersService {
       };
     } catch (error) {
       clearTimeout(timeoutId);
-      await this.blindIndexService.recordProviderFailure(cbKey);
+      await this.recordProviderFailure(cbKey);
       return {
         providerCode,
         providerName,
@@ -504,7 +604,7 @@ export class PhoneTrustProviderAdaptersService {
     }
 
     const cbKey = `${providerCode}:${params.nhanhBusinessId}`;
-    if (await this.blindIndexService.isCircuitOpen(cbKey)) {
+    if (await this.isCircuitOpen(cbKey)) {
       return {
         providerCode,
         providerName,
@@ -555,7 +655,7 @@ export class PhoneTrustProviderAdaptersService {
 
       const latencyMs = Date.now() - startedAt;
       if (!response.ok) {
-        await this.blindIndexService.recordProviderFailure(cbKey);
+        await this.recordProviderFailure(cbKey);
         return {
           providerCode,
           providerName,
@@ -578,12 +678,12 @@ export class PhoneTrustProviderAdaptersService {
         code?: number;
         data?: Array<Record<string, any>>;
       };
-      await this.blindIndexService.recordProviderSuccess(cbKey);
+      await this.recordProviderSuccess(cbKey);
 
       const customers = Array.isArray(json.data) ? json.data : [];
       const matched = customers.find(
         (c) =>
-          this.blindIndexService.normalizeVietnamesePhone(String(c.mobile || c.phone || '')) ===
+          this.piiVaultService.normalizeLocalVietnamesePhone(String(c.mobile || c.phone || '')) ===
           params.normalizedPhone,
       );
 
@@ -631,7 +731,7 @@ export class PhoneTrustProviderAdaptersService {
       };
     } catch (error) {
       clearTimeout(timeoutId);
-      await this.blindIndexService.recordProviderFailure(cbKey);
+      await this.recordProviderFailure(cbKey);
       return {
         providerCode,
         providerName,
@@ -685,7 +785,7 @@ export class PhoneTrustProviderAdaptersService {
 
     let safeUrl: URL;
     try {
-      safeUrl = this.blindIndexService.assertSafeExternalWebhookUrl(params.customWebhookUrl);
+      safeUrl = this.assertSafeExternalWebhookUrl(params.customWebhookUrl);
     } catch (err) {
       return {
         providerCode,
@@ -724,7 +824,7 @@ export class PhoneTrustProviderAdaptersService {
         headers,
         body: JSON.stringify({
           phone: params.normalizedPhone,
-          phoneSha256: this.blindIndexService.computeRawSha256(params.normalizedPhone),
+          phoneSha256: this.computeRawSha256(params.normalizedPhone),
           globalPhoneHash: params.globalPhoneHash,
         }),
         signal: controller.signal,
